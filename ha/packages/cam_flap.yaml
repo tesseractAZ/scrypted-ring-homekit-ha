@@ -1,0 +1,31 @@
+# Camera prebuffer flap-rate monitor (companion to cam_health.yaml).
+# sensor.camera_flap_rate: state = worst camera's restarts/hr (-1 = script error).
+# binary_sensor.cameras_flapping: any camera over the alert threshold.
+command_line:
+  - sensor:
+      name: Camera flap rate
+      unique_id: camera_flap_rate
+      command: "python3 /config/scripts/cam_flap.py"
+      scan_interval: 600
+      command_timeout: 60
+      unit_of_measurement: "restarts/h"
+      value_template: "{{ value_json.worst_rate }}"
+      json_attributes:
+        - span_min
+        - rates
+        - counts
+        - flapping
+        - flap_count
+        - worst
+        - summary
+        - error
+
+template:
+  - binary_sensor:
+      - name: Cameras flapping
+        unique_id: cameras_flapping
+        device_class: problem
+        state: >-
+          {{ (state_attr('sensor.camera_flap_rate', 'flapping') or []) | length > 0 }}
+        availability: >-
+          {{ states('sensor.camera_flap_rate') | float(-1) >= 0 }}

@@ -1,0 +1,43 @@
+{
+  "id": "camera_health_alert",
+  "alias": "Cameras - health alert",
+  "description": "Pages on a SUSTAINED camera fault only, three tiers: DOWN (a camera offline) 8 min; SLOW/FROZEN (degraded, still serving frames) 30 min - transient stream blips self-recover well inside that window and paging on them is pure noise; FLEET-STALE (multiple cameras byte-identical to their previous probe - healthy cameras re-frame on every probe, so several simultaneously stale = a fleet-level snapshot-pipeline wedge) 5 min - the fastest tier because its false-positive rate is near zero.",
+  "triggers": [
+    {
+      "platform": "template",
+      "id": "down",
+      "value_template": "{{ state_attr('sensor.camera_health','down_count')|int(0) > 0 }}",
+      "for": {
+        "minutes": 8
+      }
+    },
+    {
+      "platform": "template",
+      "id": "degraded",
+      "value_template": "{{ (state_attr('sensor.camera_health','frozen_count')|int(0) > 0) or (state_attr('sensor.camera_health','slow_count')|int(0) > 0) }}",
+      "for": {
+        "minutes": 30
+      }
+    },
+    {
+      "platform": "template",
+      "id": "fleet_frozen",
+      "value_template": "{{ state_attr('sensor.camera_health','fleet_stale') == true }}",
+      "for": {
+        "minutes": 5
+      }
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "data": {
+        "notification_id": "camera_health",
+        "title": "⚠️ Camera issue",
+        "message": "{{ state_attr('sensor.camera_health','summary') }}\n\n{% if trigger.id == 'fleet_frozen' %}{{ state_attr('sensor.camera_health','stale_count') }} cameras have returned byte-identical frames for 5+ min - the snapshot pipeline is serving stale frames fleet-wide (stream-engine wedge or camera-cloud outage). Live view and HKSV are likely affected. Usual fix: reload the prebuffer (or camera-source) plugin.{% else %}Sustained {{ trigger.id }} fault.{% endif %} {{ now().strftime('%b %-d %-I:%M %p') }}."
+      },
+      "action": "persistent_notification.create"
+    }
+  ],
+  "mode": "single"
+}

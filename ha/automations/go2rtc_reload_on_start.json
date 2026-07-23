@@ -1,0 +1,24 @@
+{
+  "id": "go2rtc_reload_on_start",
+  "alias": "go2rtc - reload after HA start (restore camera WebRTC)",
+  "description": "An HA restart can leave go2rtc unable to serve the Scrypted cameras' WebRTC (camera/webrtc/offer fails until go2rtc is reloaded, forcing live view onto the slow ~10s HLS fallback). This reloads go2rtc ~2 min after start so live view stays on the fast ~130ms WebRTC path.",
+  "triggers": [
+    {
+      "platform": "homeassistant",
+      "event": "start"
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "delay": "00:02:00"
+    },
+    {
+      "data": {
+        "entry_id": "<go2rtc_config_entry_id>"
+      },
+      "action": "homeassistant.reload_config_entry"
+    }
+  ],
+  "mode": "single"
+}

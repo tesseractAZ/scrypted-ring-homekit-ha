@@ -1,0 +1,32 @@
+{
+  "id": "cameras_motion_stale_clear",
+  "alias": "Cameras - clear stale-motion alert on motion",
+  "description": "Dismisses the stale-motion warning the moment any camera detects motion again.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": [
+        "binary_sensor.<cam_1>_motion",
+        "binary_sensor.<cam_2>_motion",
+        "binary_sensor.<cam_3>_motion",
+        "binary_sensor.<cam_4>_motion",
+        "binary_sensor.<cam_5>_motion",
+        "binary_sensor.<cam_6>_motion",
+        "binary_sensor.<cam_7>_motion",
+        "binary_sensor.<cam_8>_motion",
+        "binary_sensor.<cam_9>_motion"
+      ],
+      "to": "on"
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "data": {
+        "notification_id": "cameras_motion_stale"
+      },
+      "action": "persistent_notification.dismiss"
+    }
+  ],
+  "mode": "single"
+}

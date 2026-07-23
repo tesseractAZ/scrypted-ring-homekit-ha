@@ -1,0 +1,33 @@
+# Never commit secrets or host-specific config with this reference doc set.
+# The docs use placeholders on purpose — keep it that way.
+
+# Secrets / credentials
+*.secret
+*.secrets
+secrets.yaml
+*token*
+*refresh*token*
+.env
+.env.*
+
+# Home Assistant config that may contain real IPs, tokens, pairing codes
+# (root-anchored: ha/packages/ carries SANITIZED artifacts on purpose)
+/configuration.yaml
+/packages/
+custom_components/
+.storage/
+*.local.yaml
+
+# Backups
+*.tar
+backups/
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Python bytecode
+__pycache__/
+*.pyc

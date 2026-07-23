@@ -1,0 +1,27 @@
+{
+  "id": "camera_flap_alert",
+  "alias": "Cameras - flap alert",
+  "description": "Pages when a camera's ~1h-rolling prebuffer restart rate exceeds its threshold and STAYS over it for 20 min of sensor updates (sensor.camera_flap_rate parses the Scrypted log - the churn the snapshot watchdog can't see, because snapshots self-heal between restarts). With a ~1h rolling window, effective time-to-page after onset is ~45-70 min - deliberate for an advisory. Thresholds are per-camera in cam_flap.py: ALERT_HR default plus ALERT_HR_OVERRIDES for a known-chronic camera, so one accepted baseline doesn't desensitize the fleet.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.cameras_flapping",
+      "to": "on",
+      "for": {
+        "minutes": 20
+      }
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "data": {
+        "notification_id": "camera_flap",
+        "title": "📹 Camera stream churn",
+        "message": "{{ state_attr('sensor.camera_flap_rate','summary') }}\n\nRestarts/hr (last ~{{ state_attr('sensor.camera_flap_rate','span_min')|int(60) }} min):\n{% for k, v in (state_attr('sensor.camera_flap_rate','rates') or {}) | dictsort(by='value', reverse=true) %}{{ '- %s: %s/hr\\n' % (k, v) }}{% endfor %}\nSelf-healing churn - live view/HKSV may stutter on the affected camera(s). Usually RF congestion; a prebuffer-mixin reload gives temporary relief. {{ now().strftime('%b %-d %-I:%M %p') }}."
+      },
+      "action": "persistent_notification.create"
+    }
+  ],
+  "mode": "single"
+}

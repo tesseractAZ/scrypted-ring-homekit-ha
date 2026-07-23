@@ -1,0 +1,25 @@
+{
+  "id": "camera_health_recovered",
+  "alias": "Cameras - recovered",
+  "description": "Dismisses the health alert once all cameras are clear (down/frozen/slow all 0) for 5 min. Dismiss-only: posting a 'recovered' notification churns during transient blips.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.cameras_problem",
+      "to": "off",
+      "for": {
+        "minutes": 5
+      }
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "data": {
+        "notification_id": "camera_health"
+      },
+      "action": "persistent_notification.dismiss"
+    }
+  ],
+  "mode": "single"
+}

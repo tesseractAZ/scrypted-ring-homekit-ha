@@ -1,0 +1,83 @@
+# Deployable Home Assistant artifacts
+
+The exact scripts, package config, and automations described in
+[`docs/operations.md`](../docs/operations.md), ready to copy onto a fresh HA
+instance. Every instance-specific value is a `<placeholder>` — fill them all
+before deploying (grep for `<` to find them).
+
+## Layout → where it goes
+
+| Repo path | Deploy target | Loaded by |
+|---|---|---|
+| `scripts/cam_health.py` | `/config/scripts/cam_health.py` | the command_line sensor below |
+| `scripts/cam_flap.py` | `/config/scripts/cam_flap.py` | the flap-rate command_line sensor |
+| `packages/cam_health.yaml`, `packages/cam_flap.yaml` | `/config/packages/` | `homeassistant: packages: !include_dir_named packages` |
+| `automations/*.json` | HA **storage** automations (not files) | `POST /api/config/automation/config/<id>` |
+
+## Deploy order
+
+1. **Fill placeholders.** `scripts/cam_health.py` needs the HA host IP plus each
+   camera's Scrypted device id and webhook token (how to obtain them:
+   [`docs/migration-runbook.md`](../docs/migration-runbook.md)).
+   `scripts/cam_flap.py` needs: `<scrypted_addon_slug>` (visible in the add-on's
+   URL in the HA UI, e.g. `xxxxxxxx_scrypted`); its `CAMS` dict keys must
+   byte-match the camera names Scrypted prints in log brackets (`[Front Door]`);
+   `TP_PER_MIN` = camera_count ÷ probe_interval_minutes (the default 4.5 assumes
+   9 cameras probed every 120 s — recompute if either differs); and
+   `ALERT_HR_OVERRIDES` ships empty — add a raised threshold per known-chronic
+   camera if you have one. `automations/front_door_doorbell_announce.json`
+   needs your speaker and TTS entity ids.
+   `automations/go2rtc_reload_on_start.json` needs the go2rtc config-entry id —
+   find it with `GET /api/config/config_entries/entry` (filter `domain: go2rtc`).
+2. **Copy** the script and package file to `/config/` (SSH add-on or Samba).
+   Ensure `configuration.yaml` includes the `packages:` directive above.
+3. **Restart HA fully.** The `command_line` integration only loads on a full
+   restart — `reload_all` leaves the sensor `unavailable`.
+4. **Create the automations** — for each JSON file:
+   **Prerequisite:** the motion-stale pair and the doorbell announce presuppose
+   the MQTT motion/doorbell `binary_sensor`s from
+   [`docs/operations.md`](../docs/operations.md) §3 — deploy those three only
+   after MQTT discovery is live, and replace their camera entity lists with
+   your own (on an install where the sensors don't exist yet, the stale-motion
+   check reads as "no motion" and false-alarms at the next 15:00/18:00 check).
+   For each JSON file:
+   `POST /api/config/automation/config/<filename-without-extension>` with the
+   file body. They take effect immediately, no restart.
+5. **API calls**: all REST endpoints above are `http://<HA_HOST_IP>:8123/...`
+   with an HA long-lived access token (`Authorization: Bearer <token>`).
+   Note the flap monitor requires an HAOS/Supervised install — it reads the
+   add-on log through the Supervisor API using the `SUPERVISOR_TOKEN` available
+   inside the Core container; on Container/Core installs, adapt the fetch.
+6. **Verify**: `sensor.camera_health` reads the camera count (all healthy),
+   `binary_sensor.cameras_problem` is `off`, and a test notification fires when
+   a camera URL is deliberately broken.
+
+## What each automation does
+
+- `camera_health_alert` — pages on a **sustained** fault only, three tiers:
+  camera down 8 min (fast); degraded (frozen/slow) 30 min — transient stream
+  blips self-heal in under ~22 min and paging on them is pure noise; and
+  fleet-stale 5 min (fastest) — multiple cameras returning byte-identical
+  frames simultaneously means a fleet-level snapshot-pipeline wedge.
+- `camera_health_recovered` — dismisses the alert after 5 min clear.
+  Dismiss-only: no "recovered" notification (avoids churn).
+- `go2rtc_reload_on_start` — reloads the go2rtc config entry 2 min after HA
+  starts, healing the WebRTC live-view regression every restart causes.
+- `front_door_doorbell_announce` — doorbell press → parallel TTS announce on
+  two independent speaker paths (`continue_on_error` on both, so one path's
+  failure can't silence the other) + a persistent notification.
+- `cameras_motion_stale_alert` / `_clear` — fleet-wide dead-man's switch,
+  checked hourly during active hours: if **zero** cameras report motion over
+  a rolling 4-hour window, the motion pipeline itself is down (a single quiet
+  camera is normal; a silent fleet is not). Catches the silent event-listener
+  wedge described in `docs/operations.md` §3.
+
+- `camera_flap_alert` / `camera_flap_recovered` / `camera_flap_down` — the
+  stream-layer flap monitor (see `docs/operations.md` §6): pages on a
+  sustained per-camera restart-rate excursion, dismisses on recovery, and
+  pages separately if the monitor itself sits in an error state for an hour
+  (dead-man's switch - covers the watchdog dying too, since that starves
+  the flap sensor's clock).
+
+As shipped, alerts use `persistent_notification` (HA notification center) —
+swap in your `notify.*` service of choice (e.g. mobile push) in the JSON.

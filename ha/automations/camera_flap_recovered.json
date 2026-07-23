@@ -1,0 +1,31 @@
+{
+  "id": "camera_flap_recovered",
+  "alias": "Cameras - flap recovered",
+  "description": "Dismisses the flap alert (and the flap-monitor-down alert, since reaching 'off' proves the monitor is alive again) once no camera has been over its flap threshold for 30 min. Dismiss-only (no 'recovered' notification) - same churn-avoidance pattern as camera_health_recovered. The 30 min 'for' accounts for the ~1h rolling window decaying slowly after a storm ends.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.cameras_flapping",
+      "to": "off",
+      "for": {
+        "minutes": 30
+      }
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "data": {
+        "notification_id": "camera_flap"
+      },
+      "action": "persistent_notification.dismiss"
+    },
+    {
+      "data": {
+        "notification_id": "camera_flap_down"
+      },
+      "action": "persistent_notification.dismiss"
+    }
+  ],
+  "mode": "single"
+}

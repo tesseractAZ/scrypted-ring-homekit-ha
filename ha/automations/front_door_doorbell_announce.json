@@ -1,0 +1,58 @@
+{
+  "id": "front_door_doorbell_announce",
+  "alias": "Front Door Doorbell - Announce",
+  "description": "Doorbell press -> synchronized announcement. One priority speaker runs on its OWN independent, error-isolated path (parallel) so a media-server group hiccup can't silence it. Notification always fires (visual signal even if audio fails).",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.<doorbell_cam>_doorbell",
+      "to": "on"
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "parallel": [
+        {
+          "continue_on_error": true,
+          "target": {
+            "entity_id": [
+              "media_player.<speaker_a>",
+              "media_player.<speaker_b>",
+              "media_player.<speaker_c>",
+              "media_player.<speaker_d>"
+            ]
+          },
+          "data": {
+            "media_content_id": "media-source://tts/tts.<tts_engine>?message=Someone is at the front door.",
+            "media_content_type": "music",
+            "announce": true
+          },
+          "action": "media_player.play_media"
+        },
+        {
+          "continue_on_error": true,
+          "target": {
+            "entity_id": "tts.<tts_engine>"
+          },
+          "data": {
+            "cache": true,
+            "media_player_entity_id": "media_player.<priority_speaker>",
+            "message": "Someone is at the front door."
+          },
+          "action": "tts.speak"
+        }
+      ]
+    },
+    {
+      "data": {
+        "notification_id": "front_door_ding",
+        "title": "🔔 Front door",
+        "message": "Doorbell pressed at {{ now().strftime('%-I:%M %p') }}."
+      },
+      "action": "persistent_notification.create"
+    }
+  ],
+  "mode": "single",
+  "max_exceeded": "silent"
+}
