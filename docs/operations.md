@@ -13,9 +13,9 @@ Conventions used below:
 
 By default a Ring live view is **on‑demand**: opening it makes Scrypted negotiate a fresh stream with Ring's cloud, so first frame lands in ~3 s (and the HLS fallback path can be ~10 s).
 
-**Prebuffer** keeps a warm rolling stream so live view opens in **~0.1 s**. The catch is well known: on **battery** cameras a continuous stream suppresses motion events and drains the battery — never enable it there. On **wired/hardline** cameras neither applies, so prebuffer is safe and is the single biggest live‑view win.
+**Prebuffer** keeps a warm rolling stream so live view opens in **~0.1 s**. **But the cost is severe and easy to miss: Ring progressively stops delivering motion events for a persistently‑streamed camera — wired or battery.** The cloud treats the camera as "in live view" and suppresses its event pushes, decaying over roughly a week-plus, camera by camera, while every pull path (streams, snapshots, probes) stays green — so HomeKit/HKSV and the MQTT sensors silently go blind. A one‑ or two‑day "motion still works" verification passes during the decay window and proves nothing. Ring's periodic Snapshot Capture also pauses on a streamed camera. **Default to prebuffer OFF; consider it only for a camera whose motion events you genuinely don't need.**
 
-**Enable it (wired cams):**
+**If you accept that trade for a specific camera:**
 
 1. In Scrypted, on each wired camera, set the Rebroadcast/prebuffer mixin's **Prebuffered Streams** to include the stream you serve (e.g. the WebRTC/RTSP stream).
 2. **Reload the prebuffer plugin.** The buffer loop does **not** start on a live setting change — the setting looks like a no‑op until the plugin is reloaded (`plugins.reload('@scrypted/prebuffer-mixin')` via the client API, or restart the plugin from the UI).
@@ -25,7 +25,7 @@ By default a Ring live view is **on‑demand**: opening it makes Scrypted negoti
 
 **One camera may refuse to warm.** A camera whose encoder emits **keyframes on‑demand** (some models emit H.264 High profile with sparse keyframes) will log `Unable to find sync frame in rtsp prebuffer` — the buffer is warm but has no decodable frame, so it waits for the next keyframe and stays at ~3 s. This is a hardware/GOP property, not tunable from Scrypted; leave that one camera on‑demand (a continuous stream that never warms just wastes a session).
 
-**Snapshots vs live view are different paths.** Prebuffer warms *live view*. Snapshots come from the webhook `takePicture` endpoint and are governed by Ring's Snapshot Capture setting (§4), independent of prebuffer.
+**Snapshots ride the prebuffer when it exists.** The snapshot plugin's "Snapshots From Prebuffer" defaults to using the warm stream — so after disabling prebuffer, cameras can throw snapshot **500s** until that setting is explicitly set to Disabled (falling back to Ring's stored snapshot / live capture). Expect ~10 s live-capture snapshots for the first minutes after the switch, until Ring's Snapshot Capture cache (§4) resumes on the no-longer-streamed camera.
 
 ---
 

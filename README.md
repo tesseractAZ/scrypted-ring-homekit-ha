@@ -16,7 +16,7 @@ This is the field reference from building and running the setup: a stage‑by‑
 | **HomeKit Secure Video** | Each camera is exposed to Apple Home in accessory mode; HKSV records to iCloud |
 | **Home Assistant cameras** | HA *Generic Camera* entities fed by Scrypted's local snapshot endpoint + RTSP rebroadcast |
 | **Fast snapshots** | Local webhook snapshot (~0.1–0.5 s) instead of a per‑request Ring cloud round‑trip |
-| **Instant live view** (wired cams) | Optional prebuffer keeps a warm stream, so live view opens in ~0.1 s instead of ~3 s |
+| **Instant live view** (optional, costly) | Prebuffer opens live view in ~0.1 s instead of ~3 s — but Ring progressively stops delivering that camera's motion events (see Hard-won lessons); avoid it where motion/HKSV matters |
 | **Motion + doorbell in HA** | Scrypted's MQTT bridge publishes motion / doorbell‑press as HA `binary_sensor`s via MQTT discovery |
 | **Doorbell announcements** | HA automation on the doorbell sensor → TTS / multi‑room announcement |
 | **Self‑probing health watchdog** | Active snapshot probe catches down / frozen / slow cameras a cached proxy would miss |
@@ -74,7 +74,7 @@ The condensed version of what actually bites in practice. Full detail lives in t
 
 **Streaming & live view**
 - **Pin the RTSP rebroadcast port.** Left blank it's randomized on every restart, which silently breaks the HA stream URL.
-- **Prebuffer is the instant‑live‑view lever on wired cameras — and poison on battery ones**, where a continuous stream suppresses motion events and drains the battery. This reverses the old blanket "never prebuffer Ring" advice, which was really battery‑specific.
+- **Prebuffer suppresses Ring motion events on ANY camera — wired included — and the suppression is *progressive*.** Ring's side treats a persistently‑streamed camera as "in live view" and stops pushing its events: delivery decays over roughly a week-plus per camera (staggered, camera-by-camera — on a mixed fleet the one non-prebuffered camera is the last one still eventing), while streams, snapshots, and health probes all stay perfectly green. A short verification (a day or two of "motion still works") passes and is still wrong — this exact trap was fallen into and published here before being reversed. Battery drain is the battery-specific cost; event suppression is universal. Ring's periodic Snapshot Capture also pauses on a streamed camera, so after disabling prebuffer expect ~10 s snapshots for a few minutes until the stored-snapshot cache refreshes. Keep prebuffer OFF wherever motion or HKSV matters.
 - **One camera may refuse to warm** (`Unable to find sync frame`) if its encoder emits keyframes on demand. That's a hardware/GOP trait, not tunable — leave that camera on‑demand.
 - **The prebuffer window length is not a lever.** Current prebuffer‑mixin hardcodes ~10 s (`prebufferDurationMs` constant) — there is no duration setting, and writing a legacy storage key is a silent no‑op. Read the running version's `getSettings()` before writing any setting; vanished options don't error, they just stop mattering. (HKSV only uses a few seconds of pre‑roll, so the cap costs little.)
 - **An HA restart can break go2rtc WebRTC** for Generic Cameras until go2rtc is reloaded. Automate the reload on HA start so live view self‑heals.
