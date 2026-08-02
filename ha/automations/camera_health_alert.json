@@ -34,7 +34,7 @@
       "data": {
         "notification_id": "camera_health",
         "title": "⚠️ Camera issue",
-        "message": "{{ state_attr('sensor.camera_health','summary') }}\n\n{% if trigger.id == 'fleet_frozen' %}{{ state_attr('sensor.camera_health','stale_count') }} cameras have returned byte-identical frames for 5+ min - the snapshot pipeline is serving stale frames fleet-wide (stream-engine wedge or camera-cloud outage). Live view and HKSV are likely affected. Usual fix: reload the prebuffer (or camera-source) plugin.{% else %}Sustained {{ trigger.id }} fault.{% endif %} {{ now().strftime('%b %-d %-I:%M %p') }}."
+        "message": "{{ state_attr('sensor.camera_health','summary') }}\n\n{% if trigger.id == 'fleet_frozen' %}{{ state_attr('sensor.camera_health','stale_count') }} cameras have returned byte-identical frames for 5+ min - the snapshot pipeline is serving stale frames fleet-wide (stream-engine wedge or camera-cloud outage). Live view and HKSV are likely affected. Usual fix: reload the camera-source plugin; if snapshots stay stale, restart the engine.{% else %}Sustained {{ trigger.id }} fault.{% endif %} {{ now().strftime('%b %-d %-I:%M %p') }}."
       },
       "action": "persistent_notification.create"
     }

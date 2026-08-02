@@ -1,12 +1,15 @@
 {
   "id": "camera_flap_down",
   "alias": "Cameras - flap monitor down",
-  "description": "Dead-man's switch for the flap monitor itself. The monitor's error path (script failure, SUPERVISOR_TOKEN loss, log-fetch failure, or cam_health dying - which starves the span clock and trips the freshness guard) lands binary_sensor.cameras_flapping in 'unavailable'. Without this automation that state is terminal-silent. 60 min clears benign windows (HA/Scrypted restarts recover in 5-15 min) while catching every permanent-death mode.",
+  "description": "Dead-man's switch for the flap monitor itself. The monitor's error path (script failure, SUPERVISOR_TOKEN loss, log-fetch failure, or cam_health dying - which starves the span clock and trips the freshness guard) lands binary_sensor.cameras_flapping in 'unavailable' (or 'unknown' before its first successful poll) - trigger on BOTH, or a sensor stuck in the other state pages nothing. Without this automation that state is terminal-silent. 60 min clears benign windows (HA/Scrypted restarts recover in 5-15 min) while catching every permanent-death mode.",
   "triggers": [
     {
       "platform": "state",
       "entity_id": "binary_sensor.cameras_flapping",
-      "to": "unavailable",
+      "to": [
+        "unavailable",
+        "unknown"
+      ],
       "for": {
         "minutes": 60
       }

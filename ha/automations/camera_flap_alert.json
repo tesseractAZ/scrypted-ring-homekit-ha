@@ -18,7 +18,7 @@
       "data": {
         "notification_id": "camera_flap",
         "title": "📹 Camera stream churn",
-        "message": "{{ state_attr('sensor.camera_flap_rate','summary') }}\n\nRestarts/hr (last ~{{ state_attr('sensor.camera_flap_rate','span_min')|int(60) }} min):\n{% for k, v in (state_attr('sensor.camera_flap_rate','rates') or {}) | dictsort(by='value', reverse=true) %}{{ '- %s: %s/hr\\n' % (k, v) }}{% endfor %}\nSelf-healing churn - live view/HKSV may stutter on the affected camera(s). Usually RF congestion; a prebuffer-mixin reload gives temporary relief. {{ now().strftime('%b %-d %-I:%M %p') }}."
+        "message": "{{ state_attr('sensor.camera_flap_rate','summary') }}\n\nRestarts/hr (last ~{{ state_attr('sensor.camera_flap_rate','span_min')|int(60) }} min):\n{% for k, v in (state_attr('sensor.camera_flap_rate','rates') or {}) | dictsort(by='value', reverse=true) %}{{ '- %s: %s/hr\\n' % (k, v) }}{% endfor %}\nSelf-healing churn - live view/HKSV may stutter on the affected camera(s). NOTE: with prebuffer off this sensor should read ~0; a sustained excursion means persistent streams exist again, or heavy on-demand viewing under RF congestion. {{ now().strftime('%b %-d %-I:%M %p') }}."
       },
       "action": "persistent_notification.create"
     }

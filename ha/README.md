@@ -33,6 +33,12 @@ before deploying (grep for `<` to find them).
    bad change is a restore rather than a reconstruction. Note that manual
    backups are usually **exempt** from the supervisor's automatic-backup
    retention, so prune old pre-change snapshots yourself or they accumulate.
+   The mirror-image hazard is worth planning for too: **restoring a backup
+   silently reverts every change made after that backup was taken.** Storage
+   automations are the easy thing to lose this way, because nothing warns you
+   that an automation's config moved backwards. After any restore, diff the
+   live automations against these files and re-apply the delta — which is the
+   practical reason to keep this directory in sync with the running system.
 3. **Copy** the script and package file to `/config/` (SSH add-on or Samba).
    Ensure `configuration.yaml` includes the `packages:` directive above.
 4. **Restart HA fully.** The `command_line` integration only loads on a full
