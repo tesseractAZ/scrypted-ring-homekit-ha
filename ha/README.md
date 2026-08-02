@@ -29,11 +29,15 @@ before deploying (grep for `<` to find them).
    needs your speaker and TTS entity ids.
    `automations/go2rtc_reload_on_start.json` needs the go2rtc config-entry id —
    find it with `GET /api/config/config_entries/entry` (filter `domain: go2rtc`).
-2. **Copy** the script and package file to `/config/` (SSH add-on or Samba).
+2. **Snapshot first.** Take a full backup immediately before deploying, so a
+   bad change is a restore rather than a reconstruction. Note that manual
+   backups are usually **exempt** from the supervisor's automatic-backup
+   retention, so prune old pre-change snapshots yourself or they accumulate.
+3. **Copy** the script and package file to `/config/` (SSH add-on or Samba).
    Ensure `configuration.yaml` includes the `packages:` directive above.
-3. **Restart HA fully.** The `command_line` integration only loads on a full
+4. **Restart HA fully.** The `command_line` integration only loads on a full
    restart — `reload_all` leaves the sensor `unavailable`.
-4. **Create the automations** — for each JSON file:
+5. **Create the automations** — for each JSON file:
    **Prerequisite:** the motion-stale pair and the doorbell announce presuppose
    the MQTT motion/doorbell `binary_sensor`s from
    [`docs/operations.md`](../docs/operations.md) §3 — deploy those three only
@@ -43,12 +47,12 @@ before deploying (grep for `<` to find them).
    For each JSON file:
    `POST /api/config/automation/config/<filename-without-extension>` with the
    file body. They take effect immediately, no restart.
-5. **API calls**: all REST endpoints above are `http://<HA_HOST_IP>:8123/...`
+6. **API calls**: all REST endpoints above are `http://<HA_HOST_IP>:8123/...`
    with an HA long-lived access token (`Authorization: Bearer <token>`).
    Note the flap monitor requires an HAOS/Supervised install — it reads the
    add-on log through the Supervisor API using the `SUPERVISOR_TOKEN` available
    inside the Core container; on Container/Core installs, adapt the fetch.
-6. **Verify**: `sensor.camera_health` reads the camera count (all healthy),
+7. **Verify**: `sensor.camera_health` reads the camera count (all healthy),
    `binary_sensor.cameras_problem` is `off`, and a test notification fires when
    a camera URL is deliberately broken.
 
