@@ -1,16 +1,16 @@
-# Camera-health watchdog v4 (replaces the removed ring_snapshot monitor).
+# Camera-health watchdog v5 (replaces the removed ring_snapshot monitor).
 # Active webhook probe on :11080 — /api/camera_proxy can't be used (returns a
 # stale cached 200 on failure). Automations are storage-managed (created via API).
 # v3: fast freeze detection (byte-identical frame for N consecutive probes, ~10 min
 # vs the old 2h) + slow-snapshot flag — catches a wedged camera that returns a
 # stale-but-valid 200 JPEG (a stale-cache failure the old logic missed).
-# v4: fleet-stale fast indicator — MULTIPLE cameras (>= FLEET_STALE_MIN) byte-identical
-# to their previous probe simultaneously (healthy cams re-frame every probe; upstream
-# snapshot dedupe tops out well below the 120s cadence) => pipeline serving stale
-# frames fleet-wide; alerted after 5 min sustained (~3 cycles). CAVEATS: only valid
-# at the production scan cadence (probes seconds apart legitimately read identical
-# cached frames), and assumes the camera-cloud snapshot-capture interval stays well
-# below scan_interval.
+# v4: fleet-stale fast indicator — a MAJORITY (>=5) of cameras byte-identical to their previous
+# probe simultaneously (healthy cams re-frame every probe; Ring dedupe tops out ~30s
+# << the 120s cadence) => snapshot pipeline is
+# serving stale frames fleet-wide; alerted after 5 min sustained (~3 cycles).
+# CAVEATS: only valid at the 120s scan cadence (probes <15s apart legitimately
+# read identical Ring snapshot-cache frames), and assumes the Ring-app Snapshot
+# Capture interval stays well below scan_interval (currently 15s vs 120s).
 command_line:
   - sensor:
       name: Camera Health
@@ -23,6 +23,8 @@ command_line:
         - stale_count
         - all_stale
         - fleet_stale
+        - miss_count
+        - fleet_miss
         - down_count
         - frozen_count
         - slow_count
@@ -43,6 +45,7 @@ template:
           {{ (state_attr('sensor.camera_health','down_count')|int(0) > 0)
              or (state_attr('sensor.camera_health','frozen_count')|int(0) > 0)
              or (state_attr('sensor.camera_health','slow_count')|int(0) > 0)
-             or (state_attr('sensor.camera_health','fleet_stale') == true) }}
+             or (state_attr('sensor.camera_health','fleet_stale') == true)
+             or (state_attr('sensor.camera_health','fleet_miss') == true) }}
         attributes:
           summary: "{{ state_attr('sensor.camera_health','summary') }}"

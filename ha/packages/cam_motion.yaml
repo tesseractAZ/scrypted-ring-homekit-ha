@@ -1,0 +1,37 @@
+# Per-camera motion staleness monitor.
+# The fleet-wide dead-man (cameras_motion_stale_alert) only fires when EVERY
+# camera goes quiet, so a single camera whose motion detection dies is invisible
+# to it — that blind spot hid a dead camera for a week. This reads the RECORDER
+# (not entity last_changed, which resets on every HA restart) so staleness
+# survives restarts.
+command_line:
+  - sensor:
+      name: Camera motion stale
+      unique_id: camera_motion_stale
+      command: "python3 /config/scripts/cam_motion.py"
+      scan_interval: 1800
+      command_timeout: 60
+      unit_of_measurement: "cameras"
+      value_template: "{{ value_json.stale_count }}"
+      json_attributes:
+        - stale
+        - stale_count
+        - oldest_cam
+        - oldest_hours
+        - hours_since
+        - fleet_active
+        - summary
+        - error
+
+template:
+  - binary_sensor:
+      - name: Camera motion stale
+        unique_id: camera_motion_stale_problem
+        device_class: problem
+        state: >-
+          {{ (state_attr('sensor.camera_motion_stale','stale') or []) | length > 0 }}
+        availability: >-
+          {{ states('sensor.camera_motion_stale') not in ['unknown','unavailable']
+             and state_attr('sensor.camera_motion_stale','error') is none }}
+        attributes:
+          summary: "{{ state_attr('sensor.camera_motion_stale','summary') }}"

@@ -1,0 +1,27 @@
+{
+  "id": "camera_motion_dead_alert",
+  "alias": "Cameras - single camera motion dead",
+  "description": "Pages when ONE camera has reported no motion for 72h while the rest of the fleet is active. The existing fleet-wide dead-man only fires when EVERY camera goes quiet, so a single camera whose motion detection dies is invisible to it - that blind spot hid a dead camera for a week (found 2026-08-04 by log review, not by monitoring). Source is the recorder, not entity last_changed, so an HA restart cannot mask staleness.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.camera_motion_stale",
+      "to": "on",
+      "for": {
+        "hours": 1
+      }
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "data": {
+        "notification_id": "camera_motion_dead",
+        "title": "📷 Camera not detecting motion",
+        "message": "{{ state_attr('sensor.camera_motion_stale','summary') }}\n\nStale: {{ (state_attr('sensor.camera_motion_stale','stale') or []) | join(', ') }}\n\nHours since last motion, per camera:\n{% for k, v in (state_attr('sensor.camera_motion_stale','hours_since') or {}) | dictsort(by='value', reverse=true) %}{{ '- %s: %s h\\n' % (k, v) }}{% endfor %}\nA camera silent this long while others are active usually means its motion detection is disabled/snoozed in the camera app, its motion zones were zeroed, or its uplink is failing. Snapshots can still look healthy - the snapshot probe does not test the motion path. {{ now().strftime('%b %-d %-I:%M %p') }}."
+      },
+      "action": "persistent_notification.create"
+    }
+  ],
+  "mode": "single"
+}

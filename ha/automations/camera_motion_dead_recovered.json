@@ -1,0 +1,25 @@
+{
+  "id": "camera_motion_dead_recovered",
+  "alias": "Cameras - single camera motion recovered",
+  "description": "Dismisses the per-camera motion-dead alert once no camera is stale. Dismiss-only, no recovery notification (same churn-avoidance pattern as the other recovery automations).",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.camera_motion_stale",
+      "to": "off",
+      "for": {
+        "minutes": 30
+      }
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "data": {
+        "notification_id": "camera_motion_dead"
+      },
+      "action": "persistent_notification.dismiss"
+    }
+  ],
+  "mode": "single"
+}

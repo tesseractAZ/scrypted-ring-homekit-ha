@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Camera-health watchdog probe (Ring -> Scrypted single engine). v3
 
-Actively fetches every camera's Scrypted webhook snapshot URL on :11080 and
+Actively fetches each of the 9 Scrypted webhook snapshot URLs on :11080 and
 reports honest per-camera liveness AND degradation.
 
 Why NOT /api/camera_proxy: it returns HTTP 200 + a STALE cached JPEG when the
@@ -16,7 +16,7 @@ Detects (v3 hardening, after a stale-cache wedge the old logic missed):
              capture also changes between 120s probes), so an identical hash is
              a reliable stuck-source signal. Catches in ~10 min vs the old 2 h.
   - slow   : takePicture latency > SLOW_SECS for SLOW_AFTER consecutive probes
-             (degraded / near-timeout). NOTE the probe fires all cameras
+             (degraded / near-timeout). NOTE the probe fires all 9 cameras
              concurrently, so a healthy camera can transiently spike to 4-7s from
              contention; SLOW_SECS sits ABOVE that band so only a genuinely-stalled
              source (the wedge ran ~10s / near the 15s timeout) trips it. FREEZE is
@@ -47,7 +47,9 @@ SLOW_SECS = 9.0         # >this = degraded/near-timeout. Above the 4-7s concurre
                         # contention band so healthy cameras aren't false-flagged.
 SLOW_AFTER = 2          # ...for this many consecutive probes (tolerate one-off spikes)
 TIMEOUT = 15
-FLEET_STALE_MIN = 5     # this many cams identical-to-previous-probe => fleet-level wedge
+FLEET_STALE_MIN = 5     # majority of cams identical-to-previous-probe => fleet-level wedge
+FLEET_MISS_MIN = 5      # majority of cams failing THIS cycle => fleet-level outage,
+                        # reported immediately instead of waiting out DOWN_AFTER
 
 
 def probe(cam):
@@ -70,11 +72,12 @@ def main():
     except Exception:
         st = {}
 
-    with ThreadPoolExecutor(max_workers=len(CAMS)) as ex:
+    with ThreadPoolExecutor(max_workers=9) as ex:
         results = list(ex.map(probe, CAMS))
 
     down, frozen, slow, detail, healthy = [], [], [], {}, 0
     stale_now = 0   # cams whose frame is byte-identical to the PREVIOUS probe
+    miss_now = 0    # cams whose probe failed THIS cycle, before DOWN_AFTER tolerance
     for name, code, nbytes, h, latency in results:
         prev = st.get(name, {})
         if code == 200 and nbytes >= MIN_BYTES and h:
@@ -95,6 +98,7 @@ def main():
                 detail[name] = "ok" if latency < 1 else f"ok ({int(latency * 1000)}ms)"
         else:
             # hard failure: consecutive-miss tolerance; keep prior hash/streak
+            miss_now += 1
             fails = prev.get("fails", 0) + 1
             st[name] = {**prev, "fails": fails, "slowc": 0}
             reason = f"down({code or 'timeout'})" if code != 200 else f"tiny({nbytes}b)"
@@ -112,14 +116,15 @@ def main():
 
     n_down, n_frozen, n_slow = len(down), len(frozen), len(slow)
     all_down = n_down == len(CAMS)
-    # Fleet-stale: MULTIPLE cameras returned a frame identical to their previous
-    # probe in the same cycle. Healthy cameras re-frame on every probe at this
-    # cadence, so several simultaneously stale = the snapshot pipeline is serving
-    # stale frames fleet-wide -> very fast, very low-false-positive wedge signal.
-    fleet_stale = stale_now >= FLEET_STALE_MIN
+    # Fleet-stale: EVERY camera responded AND returned a frame identical to its
+    # previous probe. A healthy prebuffered camera returns a distinct frame every
+    # probe, so even one all-identical cycle is extraordinary -> very fast, very
+    # low-false-positive indicator of a fleet-wide snapshot/stream wedge.
     all_stale = stale_now == len(CAMS)
+    fleet_stale = stale_now >= FLEET_STALE_MIN
+    fleet_miss = miss_now >= FLEET_MISS_MIN
     if all_down:
-        summary = "ALL %d cameras OFFLINE (Ring/Scrypted outage?)" % len(CAMS)
+        summary = "ALL 9 cameras OFFLINE (Ring/Scrypted outage?)"
     elif down or frozen or slow:
         parts = []
         if down:
@@ -130,7 +135,9 @@ def main():
             parts.append(f"{n_slow} slow: " + ", ".join(slow))
         summary = " | ".join(parts)
     else:
-        summary = "%d/%d OK" % (len(CAMS), len(CAMS))
+        summary = "9/9 OK"
+    if fleet_miss:
+        summary = "FLEET-MISS: %d/%d probes failed this cycle | " % (miss_now, len(CAMS)) + summary
     if fleet_stale:
         summary = "FLEET-STALE: %d/%d frames identical to last probe | " % (stale_now, len(CAMS)) + summary
 
@@ -138,6 +145,7 @@ def main():
         "healthy": healthy, "down_count": n_down, "frozen_count": n_frozen, "slow_count": n_slow,
         "down": down, "frozen": frozen, "slow": slow, "all_down": all_down,
         "stale_count": stale_now, "all_stale": all_stale, "fleet_stale": fleet_stale,
+        "miss_count": miss_now, "fleet_miss": fleet_miss,
         "summary": summary, "detail": detail,
     }))
 

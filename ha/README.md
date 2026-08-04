@@ -10,8 +10,9 @@ before deploying (grep for `<` to find them).
 | Repo path | Deploy target | Loaded by |
 |---|---|---|
 | `scripts/cam_health.py` | `/config/scripts/cam_health.py` | the command_line sensor below |
-| `scripts/cam_flap.py` | `/config/scripts/cam_flap.py` | the flap-rate command_line sensor |
-| `packages/cam_health.yaml`, `packages/cam_flap.yaml` | `/config/packages/` | `homeassistant: packages: !include_dir_named packages` |
+| `scripts/cam_flap.py` | `/config/scripts/cam_flap.py` | the stream-fault command_line sensor |
+| `scripts/cam_motion.py` | `/config/scripts/cam_motion.py` | the per-camera motion-staleness sensor |
+| `packages/cam_health.yaml`, `packages/cam_flap.yaml`, `packages/cam_motion.yaml` | `/config/packages/` | `homeassistant: packages: !include_dir_named packages` |
 | `automations/*.json` | HA **storage** automations (not files) | `POST /api/config/automation/config/<id>` |
 
 ## Deploy order
@@ -83,11 +84,17 @@ before deploying (grep for `<` to find them).
   wedge described in `docs/operations.md` §3.
 
 - `camera_flap_alert` / `camera_flap_recovered` / `camera_flap_down` — the
-  stream-layer flap monitor (see `docs/operations.md` §6): pages on a
-  sustained per-camera restart-rate excursion, dismisses on recovery, and
-  pages separately if the monitor itself sits in an error state for an hour
+  stream-fault monitor (see `docs/operations.md` §6): pages on a sustained
+  per-camera **recording-error** rate, dismisses on recovery, and pages
+  separately if the monitor itself sits in an error state for an hour
   (dead-man's switch - covers the watchdog dying too, since that starves
-  the flap sensor's clock).
+  the monitor's clock).
+- `camera_motion_dead_alert` / `_recovered` — per-camera motion staleness:
+  pages when **one** camera has reported no motion for 72 h while the rest of
+  the fleet is active. The fleet-wide dead-man above only fires when *every*
+  camera goes quiet, so a single camera whose motion detection dies is
+  invisible to it. Reads the recorder rather than entity `last_changed`, which
+  resets on restart and would otherwise mask staleness.
 
 As shipped, alerts use `persistent_notification` (HA notification center) —
 swap in your `notify.*` service of choice (e.g. mobile push) in the JSON.

@@ -1,7 +1,7 @@
 {
   "id": "camera_flap_alert",
   "alias": "Cameras - flap alert",
-  "description": "Pages when a camera's ~1h-rolling prebuffer restart rate exceeds its threshold and STAYS over it for 20 min of sensor updates (sensor.camera_flap_rate parses the Scrypted log - the churn the snapshot watchdog can't see, because snapshots self-heal between restarts). With a ~1h rolling window, effective time-to-page after onset is ~45-70 min - deliberate for an advisory. Thresholds are per-camera in cam_flap.py: ALERT_HR default plus ALERT_HR_OVERRIDES for a known-chronic camera, so one accepted baseline doesn't desensitize the fleet.",
+  "description": "Pages when a camera's HKSV recording-error rate stays over threshold for 20 min. sensor.camera_flap_rate v2 counts per-camera 'motion recording error' lines - a lost or truncated security clip - plus fleet-wide stream faults. It REPLACED a v1 metric that counted prebuffer restarts, a string that stopped occurring when prebuffer was disabled fleet-wide, leaving the sensor pinned at 0.0 and unable to fire for 9 days. Threshold 2/hr with a 3-event floor: a healthy camera records 0. Error-coded closes are context only - code 3 also covers a benign max-duration cancel.",
   "triggers": [
     {
       "platform": "state",
@@ -18,7 +18,7 @@
       "data": {
         "notification_id": "camera_flap",
         "title": "📹 Camera stream churn",
-        "message": "{{ state_attr('sensor.camera_flap_rate','summary') }}\n\nRestarts/hr (last ~{{ state_attr('sensor.camera_flap_rate','span_min')|int(60) }} min):\n{% for k, v in (state_attr('sensor.camera_flap_rate','rates') or {}) | dictsort(by='value', reverse=true) %}{{ '- %s: %s/hr\\n' % (k, v) }}{% endfor %}\nSelf-healing churn - live view/HKSV may stutter on the affected camera(s). NOTE: with prebuffer off this sensor should read ~0; a sustained excursion means persistent streams exist again, or heavy on-demand viewing under RF congestion. {{ now().strftime('%b %-d %-I:%M %p') }}."
+        "message": "{{ state_attr('sensor.camera_flap_rate','summary') }}\n\nRecording errors/hr (last ~{{ state_attr('sensor.camera_flap_rate','span_min')|int(0) }} min):\n{% for k, v in (state_attr('sensor.camera_flap_rate','rates') or {}) | dictsort(by='value', reverse=true) %}{{ '- %s: %s/hr\\n' % (k, v) }}{% endfor %}\nEach error is a motion clip that failed to record. Sustained errors on ONE camera point at that camera's uplink or the cloud's session to it, not at the engine. {{ now().strftime('%b %-d %-I:%M %p') }}."
       },
       "action": "persistent_notification.create"
     }

@@ -1,19 +1,29 @@
-# Camera prebuffer flap-rate monitor (companion to cam_health.yaml).
-# sensor.camera_flap_rate: state = worst camera's restarts/hr (-1 = script error).
-# binary_sensor.cameras_flapping: any camera over the alert threshold.
+# Camera stream-fault monitor (v2). REPLACES the v1 prebuffer-restart counter,
+# which silently died when prebuffer was disabled fleet-wide: it counted a log
+# string that stopped occurring, so it read 0.0 = "no faults" when it actually
+# meant "not measuring". v2 counts per-camera HKSV recording ERRORS (the
+# user-facing harm - a lost or truncated clip) plus fleet-wide stream faults,
+# and measures its window from real log timestamps rather than inferring it
+# from probe cadence. Entity ids are unchanged so existing automations keep
+# working, but the metric now means recording errors/hour, not restarts/hour.
 command_line:
   - sensor:
       name: Camera flap rate
       unique_id: camera_flap_rate
       command: "python3 /config/scripts/cam_flap.py"
       scan_interval: 600
-      command_timeout: 60
-      unit_of_measurement: "restarts/h"
+      command_timeout: 90
+      unit_of_measurement: "errors/h"
       value_template: "{{ value_json.worst_rate }}"
       json_attributes:
         - span_min
         - rates
         - counts
+        - recording_errors
+        - closed_with_error
+        - stream_errors
+        - probe_counts
+        - probe_shortfall
         - flapping
         - flap_count
         - worst

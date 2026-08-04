@@ -1,7 +1,7 @@
 {
   "id": "camera_health_alert",
   "alias": "Cameras - health alert",
-  "description": "Pages on a SUSTAINED camera fault only, three tiers: DOWN (a camera offline) 8 min; SLOW/FROZEN (degraded, still serving frames) 30 min - transient stream blips self-recover well inside that window and paging on them is pure noise; FLEET-STALE (multiple cameras byte-identical to their previous probe - healthy cameras re-frame on every probe, so several simultaneously stale = a fleet-level snapshot-pipeline wedge) 5 min - the fastest tier because its false-positive rate is near zero.",
+  "description": "Pages on a SUSTAINED camera fault only, four tiers: DOWN (a camera offline) 8 min; SLOW/FROZEN (degraded, still serving frames) 30 min - transient stream blips self-recover well inside that window; FLEET-STALE (multiple cameras byte-identical to their previous probe) 5 min; and FLEET-MISS (multiple probes failing in a single cycle) 5 min - added after a whole-fleet blackout during a brief network outage was absorbed by the per-camera miss tolerance and published as 'all OK'.",
   "triggers": [
     {
       "platform": "template",
@@ -26,6 +26,14 @@
       "for": {
         "minutes": 5
       }
+    },
+    {
+      "platform": "template",
+      "id": "fleet_miss",
+      "value_template": "{{ state_attr('sensor.camera_health','fleet_miss') == true }}",
+      "for": {
+        "minutes": 5
+      }
     }
   ],
   "conditions": [],
@@ -34,7 +42,7 @@
       "data": {
         "notification_id": "camera_health",
         "title": "⚠️ Camera issue",
-        "message": "{{ state_attr('sensor.camera_health','summary') }}\n\n{% if trigger.id == 'fleet_frozen' %}{{ state_attr('sensor.camera_health','stale_count') }} cameras have returned byte-identical frames for 5+ min - the snapshot pipeline is serving stale frames fleet-wide (stream-engine wedge or camera-cloud outage). Live view and HKSV are likely affected. Usual fix: reload the camera-source plugin; if snapshots stay stale, restart the engine.{% else %}Sustained {{ trigger.id }} fault.{% endif %} {{ now().strftime('%b %-d %-I:%M %p') }}."
+        "message": "{{ state_attr('sensor.camera_health','summary') }}\n\n{% if trigger.id == 'fleet_frozen' %}{{ state_attr('sensor.camera_health','stale_count') }} of 9 cameras have returned byte-identical frames for 5+ min - the snapshot pipeline is serving stale frames fleet-wide (Scrypted stream wedge or Ring cloud outage). Live view and HKSV are likely affected. Usual fix: reload the Ring plugin in Scrypted; if snapshots stay stale, restart the Scrypted add-on.{% elif trigger.id == 'fleet_miss' %}{{ state_attr('sensor.camera_health','miss_count') }} camera probes failed in the same cycle - a fleet-level outage (network, engine, or host), not a single camera.{% else %}Sustained {{ trigger.id }} fault.{% endif %} {{ now().strftime('%b %-d %-I:%M %p') }}."
       },
       "action": "persistent_notification.create"
     }
