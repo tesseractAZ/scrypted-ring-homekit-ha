@@ -88,7 +88,9 @@ before deploying (grep for `<` to find them).
   per-camera **recording-error** rate, dismisses on recovery, and pages
   separately if the monitor itself sits in an error state for an hour
   (dead-man's switch - covers the watchdog dying too, since that starves
-  the monitor's clock).
+  the monitor's clock). Also carries a tripwire on cloud push-decryption
+  failures - each one is a dropped motion push; a sustained climb means the
+  event transport is degrading and the camera-source plugin needs re-auth.
 - `camera_motion_dead_alert` / `_recovered` — per-camera motion staleness:
   pages when **one** camera has reported no motion for 72 h while the rest of
   the fleet is active. The fleet-wide dead-man above only fires when *every*

@@ -72,6 +72,8 @@ DEVICE_IDS = {  # scrypted device id -> short name, for probe accounting
     "<device_id_9>": "<cam_9>",
 }
 
+PUSH_DECRYPT = "ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY"  # each hit = one dropped Ring push
+
 STREAM_FAULTS = (
     "timeout waiting for data, killing parser session",
     "rebroadcast error",
@@ -87,6 +89,7 @@ def emit(payload):
     base = {
         "span_min": None, "rates": None, "counts": None,
         "recording_errors": None, "closed_with_error": None, "stream_errors": None,
+        "push_drops": None, "push_drop_rate": None,
         "probe_counts": None, "probe_shortfall": [],
         "flapping": [], "flap_count": 0,
         "worst": None, "worst_rate": -1, "summary": "", "error": None,
@@ -145,6 +148,7 @@ def main():
     closed_err = {n: 0 for n in CAMS.values()}
     probes = {n: 0 for n in DEVICE_IDS.values()}
     stream_errors = 0
+    push_drops = 0
 
     for ln in lines:
         if "takePicture" in ln:
@@ -159,6 +163,8 @@ def main():
                     else:
                         closed_err[name] += 1
                     break
+        elif PUSH_DECRYPT in ln:
+            push_drops += 1
         elif any(f in ln for f in STREAM_FAULTS):
             stream_errors += 1
 
@@ -180,8 +186,11 @@ def main():
     shortfall = sorted(n for n, v in probes.items()
                        if expected >= 10 and v < expected * PROBE_SHORTFALL)
 
+    push_drop_rate = round(push_drops / span_min * 60, 1)
     summary = "worst %s %.1f/hr over %.0fm; %d cam(s) over threshold" % (
         worst, rates[worst], span_min, len(flapping))
+    if push_drop_rate >= 1.0:
+        summary += "; push drops %.1f/hr" % push_drop_rate
     if shortfall:
         summary += "; probe shortfall: " + ",".join(shortfall)
 
@@ -190,6 +199,7 @@ def main():
         "rates": rates, "counts": fails,
         "recording_errors": rec, "closed_with_error": closed_err,
         "stream_errors": stream_errors,
+        "push_drops": push_drops, "push_drop_rate": push_drop_rate,
         "probe_counts": probes, "probe_shortfall": shortfall,
         "flapping": flapping, "flap_count": len(flapping),
         "worst": worst, "worst_rate": rates[worst], "summary": summary,

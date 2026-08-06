@@ -89,6 +89,7 @@ The condensed version of what actually bites in practice. Full detail lives in t
 - **Bring motion/doorbell back with Scrypted's MQTT plugin** (publishing via HA MQTT discovery) — *not* the reverse‑direction "Home Assistant" plugin, which imports HA entities into Scrypted, the wrong way.
 
 **Operating it**
+- **A Ring plan change is a system event.** Upgrading the subscription tier reset the cloud clip-history epoch (making clip queries return zero for everything older — easily misread as "the API broke"), changed the snapshot refresh cadence, and revived a camera's server-side motion detection that no local fix had touched. Re-verify monitors and re-measure baselines after any plan change.
 - **The supervisor add‑on‑log API returns the *oldest* entries by default.** `Range: entries=:0:N` is a frozen head slice that never advances; use `entries=:-N:N` for the live tail, or you'll analyze hours‑old data and reach the wrong conclusion.
 - **Use the insecure HTTP snapshot endpoint** so HA doesn't reject Scrypted's self‑signed certificate.
 - **Home Assistant stores backups locally by default.** That protects you against a bad update, not against a dead SD card — arrange an off‑site copy, or a hardware failure takes your only rebuild image with it.
