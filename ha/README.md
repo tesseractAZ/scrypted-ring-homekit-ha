@@ -92,11 +92,17 @@ before deploying (grep for `<` to find them).
   failures - each one is a dropped motion push; a sustained climb means the
   event transport is degrading and the camera-source plugin needs re-auth.
 - `camera_motion_dead_alert` / `_recovered` — per-camera motion staleness:
-  pages when **one** camera has reported no motion for 72 h while the rest of
-  the fleet is active. The fleet-wide dead-man above only fires when *every*
-  camera goes quiet, so a single camera whose motion detection dies is
-  invisible to it. Reads the recorder rather than entity `last_changed`, which
-  resets on restart and would otherwise mask staleness.
+  pages when **one** camera has reported no motion beyond its window (default
+  72 h; naturally-quiet cameras take longer per-camera overrides in
+  `cam_motion.py`) while the rest of the fleet is active. The fleet-wide
+  dead-man above only fires when *every* camera goes quiet, so a single dead
+  camera is invisible to it. Reads the recorder rather than entity
+  `last_changed`, which resets on restart and would otherwise mask staleness.
+  The alert fires on the onset edge AND re-asserts hourly while the condition
+  persists — a restart otherwise wipes the notification with the binary still
+  latched (the edge can never re-fire), and a second camera crossing its
+  threshold while latched would otherwise never page; recreating the same
+  notification_id is idempotent, so the re-assert adds no churn.
 
 As shipped, alerts use `persistent_notification` (HA notification center) —
 swap in your `notify.*` service of choice (e.g. mobile push) in the JSON.

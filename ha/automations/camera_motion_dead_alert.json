@@ -1,7 +1,7 @@
 {
   "id": "camera_motion_dead_alert",
   "alias": "Cameras - single camera motion dead",
-  "description": "Pages when ONE camera has reported no motion for 72h while the rest of the fleet is active. The existing fleet-wide dead-man only fires when EVERY camera goes quiet, so a single camera whose motion detection dies is invisible to it - that blind spot hid a dead camera for a week (found 2026-08-04 by log review, not by monitoring). Source is the recorder, not entity last_changed, so an HA restart cannot mask staleness.",
+  "description": "Pages when ONE camera has reported no motion beyond its staleness window while the rest of the fleet is active (default 72h; naturally-quiet cameras carry longer per-camera overrides in cam_motion.py). Two triggers: the onset edge, plus an HOURLY RE-ASSERT while the condition persists - added after a routine HA restart silently wiped the notification with the binary still latched 'on' (the edge trigger could never re-fire), leaving two dead cameras under a clean dashboard; the re-assert also refreshes the message when an ADDITIONAL camera crosses its threshold while the binary is already latched (which previously produced no second page at all). Recreating the same notification_id is idempotent - no churn while it persists.",
   "triggers": [
     {
       "platform": "state",
@@ -9,10 +9,39 @@
       "to": "on",
       "for": {
         "hours": 1
-      }
+      },
+      "id": "onset"
+    },
+    {
+      "platform": "time_pattern",
+      "minutes": "23",
+      "id": "reassert"
     }
   ],
-  "conditions": [],
+  "conditions": [
+    {
+      "condition": "or",
+      "conditions": [
+        {
+          "condition": "trigger",
+          "id": "onset"
+        },
+        {
+          "condition": "and",
+          "conditions": [
+            {
+              "condition": "state",
+              "entity_id": "binary_sensor.camera_motion_stale",
+              "state": "on",
+              "for": {
+                "hours": 1
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
   "actions": [
     {
       "data": {

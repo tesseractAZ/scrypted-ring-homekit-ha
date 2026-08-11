@@ -20,6 +20,11 @@ import time
 
 DB = "/config/home-assistant_v2.db"
 STALE_HOURS = 72.0      # a camera silent this long while the fleet is active
+# Naturally-quiet cameras get longer windows: the recorder showed one camera
+# with routine 3-4 day silences, which would false-page at the default.
+STALE_HOURS_OVERRIDES = {
+    # e.g.  "<naturally_quiet_cam>": 120.0,
+}
 FLEET_ACTIVE_HOURS = 24.0   # ...and someone else fired within this window
 QUERY_TIMEOUT_S = 20
 
@@ -95,7 +100,8 @@ def main():
     # treat them as stale when the fleet is demonstrably active.
     stale = sorted(
         c for c in CAMS
-        if (hours[c] is None or hours[c] > STALE_HOURS)
+        if (hours[c] is None
+            or hours[c] > STALE_HOURS_OVERRIDES.get(c, STALE_HOURS))
     ) if fleet_active else []
 
     oldest_cam = max(seen, key=lambda c: seen[c])
