@@ -92,9 +92,13 @@ before deploying (grep for `<` to find them).
   failures - each one is a dropped motion push; a sustained climb means the
   event transport is degrading and the camera-source plugin needs re-auth.
 - `camera_motion_dead_alert` / `_recovered` — per-camera motion staleness:
-  pages when **one** camera has reported no motion beyond its window (default
-  72 h; naturally-quiet cameras take longer per-camera overrides in
-  `cam_motion.py`) while the rest of the fleet is active. The fleet-wide
+  pages when **one** camera has produced no motion EVENTS beyond its window
+  (default 72 h; naturally-quiet or rarely-visited cameras take longer
+  per-camera overrides in `cam_motion.py`) while the rest of the fleet is
+  active. Read the page as an observation, not a fault verdict: zero events
+  can mean a genuinely unvisited area, disabled/zoned-out motion detection in
+  the camera app, or a dead event-push path — a walk-test discriminates, and
+  under a 24/7-recording plan the camera records continuously regardless. The fleet-wide
   dead-man above only fires when *every* camera goes quiet, so a single dead
   camera is invisible to it. Reads the recorder rather than entity
   `last_changed`, which resets on restart and would otherwise mask staleness.

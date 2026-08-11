@@ -46,8 +46,8 @@
     {
       "data": {
         "notification_id": "camera_motion_dead",
-        "title": "📷 Camera not detecting motion",
-        "message": "{{ state_attr('sensor.camera_motion_stale','summary') }}\n\nStale: {{ (state_attr('sensor.camera_motion_stale','stale') or []) | join(', ') }}\n\nHours since last motion, per camera:\n{% for k, v in (state_attr('sensor.camera_motion_stale','hours_since') or {}) | dictsort(by='value', reverse=true) %}{{ '- %s: %s h\\n' % (k, v) }}{% endfor %}\nA camera silent this long while others are active usually means its motion detection is disabled/snoozed in the camera app, its motion zones were zeroed, or its uplink is failing. Snapshots can still look healthy - the snapshot probe does not test the motion path. {{ now().strftime('%b %-d %-I:%M %p') }}."
+        "title": "📷 No motion events from a camera",
+        "message": "{{ state_attr('sensor.camera_motion_stale','summary') }}\n\nQuiet beyond window: {{ (state_attr('sensor.camera_motion_stale','stale') or []) | join(', ') }}\n\nHours since last motion event, per camera:\n{% for k, v in (state_attr('sensor.camera_motion_stale','hours_since') or {}) | dictsort(by='value', reverse=true) %}{{ '- %s: %s h\\n' % (k, v) }}{% endfor %}\nThis measures motion EVENTS reaching HA - not camera health. Under a 24/7-recording plan the camera still records continuously regardless. Three possible causes, in likelihood order: the area is genuinely unvisited; motion detection is disabled/snoozed/zoned-out in the camera app; or the event push path to the engine died (walk-test to discriminate: motion in view with no event within a minute = a real pipeline fault). {{ now().strftime('%b %-d %-I:%M %p') }}."
       },
       "action": "persistent_notification.create"
     }
