@@ -20,6 +20,8 @@ command_line:
         - oldest_hours
         - hours_since
         - fleet_active
+        - visual_hours
+        - verdicts
         - summary
         - error
 

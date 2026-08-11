@@ -19,6 +19,7 @@ import sys
 import time
 
 DB = "/config/home-assistant_v2.db"
+VISION_STATE = "/config/.cam_vision_state.json"  # written by cam_vision.py
 STALE_HOURS = 72.0      # a camera silent this long while the fleet is active
 # Naturally-quiet cameras get longer windows. Zero events is NOT proof of a
 # fault: an interior room can sit genuinely unvisited for a week, and under a
@@ -49,6 +50,8 @@ def emit(payload):
     base = {
         "stale": [],
         "stale_count": 0,
+        "visual_hours": None,
+        "verdicts": None,
         "oldest_cam": None,
         "oldest_hours": None,
         "hours_since": None,
@@ -107,6 +110,27 @@ def main():
             or hours[c] > STALE_HOURS_OVERRIDES.get(c, STALE_HOURS))
     ) if fleet_active else []
 
+    # Discriminator: cam_vision.py's frame-differencing log tells us whether a
+    # motion-event-stale camera's SCENE has actually been changing. Visual
+    # activity without events = the detection/event path is suspect; neither =
+    # consistent with a genuinely quiet area. Annotation-grade until per-camera
+    # visual baselines are tuned (outdoor scenes change without Ring events).
+    try:
+        vs = json.load(open(VISION_STATE))
+    except Exception:
+        vs = {}
+    visual_hours = {}
+    for cam in CAMS:
+        log = (vs.get(cam) or {}).get("log") or []
+        visual_hours[cam] = round((now - max(log)) / 3600.0, 1) if log else None
+    verdicts = {}
+    for cam in stale:
+        ev_h, vis_h = hours[cam], visual_hours.get(cam)
+        if vis_h is not None and (ev_h is None or vis_h < ev_h - 1.0):
+            verdicts[cam] = "scene HAS changed without events - detection/event path suspect"
+        else:
+            verdicts[cam] = "no visual change either - consistent with a quiet area"
+
     oldest_cam = max(seen, key=lambda c: seen[c])
     summary = "%d stale (>%.0fh); oldest %s %.1fh" % (
         len(stale), STALE_HOURS, oldest_cam, seen[oldest_cam],
@@ -121,6 +145,8 @@ def main():
         "oldest_hours": seen[oldest_cam],
         "hours_since": hours,
         "fleet_active": fleet_active,
+        "visual_hours": visual_hours,
+        "verdicts": verdicts,
         "summary": summary,
     })
 

@@ -1,0 +1,23 @@
+# Visual-activity monitor (frame differencing) — the automated walk test.
+# Compares each camera's snapshot against its previous frame (block-based,
+# lighting-normalized, IR-aware) and logs when the SCENE visibly changed.
+# cam_motion.py reads this monitor's state file to discriminate, without a
+# human present, between "area genuinely quiet" and "motion detection or the
+# event path is broken" — visual change without motion events is the tell.
+command_line:
+  - sensor:
+      name: Camera visual activity
+      unique_id: camera_visual_activity
+      command: "python3 /config/scripts/cam_vision.py"
+      scan_interval: 120
+      command_timeout: 60
+      unit_of_measurement: "cameras"
+      value_template: "{{ value_json.active_count if value_json.active_count is not none else -1 }}"
+      json_attributes:
+        - hours_since_visual
+        - changes_24h
+        - ir_mode
+        - max_norm_diff
+        - active_count
+        - summary
+        - error

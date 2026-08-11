@@ -12,7 +12,8 @@ before deploying (grep for `<` to find them).
 | `scripts/cam_health.py` | `/config/scripts/cam_health.py` | the command_line sensor below |
 | `scripts/cam_flap.py` | `/config/scripts/cam_flap.py` | the stream-fault command_line sensor |
 | `scripts/cam_motion.py` | `/config/scripts/cam_motion.py` | the per-camera motion-staleness sensor |
-| `packages/cam_health.yaml`, `packages/cam_flap.yaml`, `packages/cam_motion.yaml` | `/config/packages/` | `homeassistant: packages: !include_dir_named packages` |
+| `scripts/cam_vision.py` | `/config/scripts/cam_vision.py` | the frame-differencing visual-activity sensor |
+| `packages/cam_health.yaml`, `packages/cam_flap.yaml`, `packages/cam_motion.yaml`, `packages/cam_vision.yaml` | `/config/packages/` | `homeassistant: packages: !include_dir_named packages` |
 | `automations/*.json` | HA **storage** automations (not files) | `POST /api/config/automation/config/<id>` |
 
 ## Deploy order
@@ -98,7 +99,13 @@ before deploying (grep for `<` to find them).
   active. Read the page as an observation, not a fault verdict: zero events
   can mean a genuinely unvisited area, disabled/zoned-out motion detection in
   the camera app, or a dead event-push path — a walk-test discriminates, and
-  under a 24/7-recording plan the camera records continuously regardless. The fleet-wide
+  under a 24/7-recording plan the camera records continuously regardless.
+  The staleness page carries an AUTOMATED discriminator: `cam_vision.py`
+  compares each camera's snapshots over time (block-based frame differencing,
+  lighting-normalized, IR-aware) and the alert states whether the scene has
+  visibly changed without events (detection/event path suspect) or not changed
+  at all (genuinely quiet area) - no human walk test required, which matters
+  when nobody is at the property for weeks. The fleet-wide
   dead-man above only fires when *every* camera goes quiet, so a single dead
   camera is invisible to it. Reads the recorder rather than entity
   `last_changed`, which resets on restart and would otherwise mask staleness.
