@@ -35,8 +35,15 @@ import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
+# A command_line sensor's stderr is written into the HA core log; at this
+# script's 2-minute cadence a single library warning becomes hundreds of log
+# lines a day, burying real signal. Fix the deprecated calls AND suppress
+# warnings defensively - this process's stderr is a shared log, not a console.
+import warnings
+warnings.simplefilter("ignore")
+
 try:
-    from PIL import Image
+    from PIL import Image, ImageStat
     PIL_OK = True
 except Exception:
     PIL_OK = False
@@ -101,10 +108,9 @@ def analyze(body):
     """Return (luma_bytes_1440, is_ir) or None."""
     img = Image.open(io.BytesIO(body))
     img.thumbnail((96, 60))
-    hsv = img.convert("HSV")
-    sat = sum(hsv.getdata(1)) / (hsv.width * hsv.height)
+    sat = ImageStat.Stat(img.convert("HSV")).mean[1]
     luma = img.convert("L").resize(RESIZE)
-    return bytes(luma.getdata()), sat < SAT_IR
+    return luma.tobytes(), sat < SAT_IR
 
 
 def block_diffs(a, b):
