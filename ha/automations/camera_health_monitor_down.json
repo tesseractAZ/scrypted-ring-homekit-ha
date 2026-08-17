@@ -1,0 +1,59 @@
+{
+ "id": "camera_health_monitor_down",
+ "alias": "Cameras - health monitor down",
+ "description": "Dead-man for the snapshot-probe watchdog (sensor.camera_health) itself. Its alert automation's four template triggers all read state_attr(...)|int(0), so a dead/unknown sensor - or the script's own error path, which publishes healthy=-1 with zeroed counts - evaluates as 'no fault' on every one of them: the primary liveness monitor could die and be reported as a clean fleet (observed: 10 recorder rows of 'unknown' with all json_attributes wiped). 30 min clears restart windows. RE-ASSERTS hourly (:53) while dead (restart-wipe guard). Added 2026-08-17.",
+ "triggers": [
+  {
+   "platform": "state",
+   "entity_id": "sensor.camera_health",
+   "to": [
+    "unavailable",
+    "unknown",
+    "-1"
+   ],
+   "for": {
+    "minutes": 30
+   },
+   "id": "dead"
+  },
+  {
+   "platform": "time_pattern",
+   "minutes": "53",
+   "id": "reassert"
+  }
+ ],
+ "conditions": [
+  {
+   "condition": "or",
+   "conditions": [
+    {
+     "condition": "template",
+     "value_template": "{{ trigger.id == 'dead' }}"
+    },
+    {
+     "condition": "state",
+     "entity_id": "sensor.camera_health",
+     "state": [
+      "unavailable",
+      "unknown",
+      "-1"
+     ],
+     "for": {
+      "minutes": 30
+     }
+    }
+   ]
+  }
+ ],
+ "actions": [
+  {
+   "action": "persistent_notification.create",
+   "data": {
+    "notification_id": "camera_health_monitor_down",
+    "title": "\ud83d\udcf7 Camera health monitor down",
+    "message": "The camera snapshot-probe watchdog (sensor.camera_health) has been dead for 30+ min (state: {{ states('sensor.camera_health') }}) - the fleet is NOT being probed. Its own alert cannot fire in this state. Summary at death: {{ state_attr('sensor.camera_health','summary') or 'attributes wiped' }}. {{ now().strftime('%b %-d %-I:%M %p') }}."
+   }
+  }
+ ],
+ "mode": "single"
+}

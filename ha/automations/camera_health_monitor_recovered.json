@@ -1,0 +1,24 @@
+{
+ "id": "camera_health_monitor_recovered",
+ "alias": "Cameras - health monitor recovered",
+ "description": "Dismisses the camera_health_monitor_down card once the watchdog sensor is back to a live numeric state for 5 min. Dismiss-only, no notification (avoids churn). Added 2026-08-17.",
+ "triggers": [
+  {
+   "platform": "template",
+   "value_template": "{{ states('sensor.camera_health') not in ['unavailable','unknown','-1'] }}",
+   "for": {
+    "minutes": 5
+   }
+  }
+ ],
+ "conditions": [],
+ "actions": [
+  {
+   "action": "persistent_notification.dismiss",
+   "data": {
+    "notification_id": "camera_health_monitor_down"
+   }
+  }
+ ],
+ "mode": "single"
+}

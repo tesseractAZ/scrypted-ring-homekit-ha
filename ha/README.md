@@ -71,8 +71,30 @@ before deploying (grep for `<` to find them).
   blips self-heal in under ~22 min and paging on them is pure noise; and
   fleet-stale 5 min (fastest) — multiple cameras returning byte-identical
   frames simultaneously means a fleet-level snapshot-pipeline wedge.
+  Re-asserts hourly while the problem binary has been on 30+ min (the longest
+  tier's window, so a re-assert can never page a blip the tiers absorb):
+  persistent notifications are in-memory, so a restart wipes the page with the
+  fault still latched and an edge trigger can never re-fire.
 - `camera_health_recovered` — dismisses the alert after 5 min clear.
   Dismiss-only: no "recovered" notification (avoids churn).
+- `camera_health_monitor_down` / `_recovered` — dead-man for the watchdog
+  ITSELF. The alert's template triggers all read `state_attr(...)|int(0)`, so a
+  dead sensor — or the script's own error path, which publishes `healthy: -1` —
+  evaluates as "no fault" on every trigger: without this, the primary liveness
+  monitor can die and be reported as a clean fleet. The recovered half
+  dismisses the card once the sensor is back (dismiss-only).
+- `camera_motion_monitor_down` / `_recovered` — the same dead-man for the
+  motion-staleness monitor. Covers BOTH death modes: command-level death
+  (state `unavailable`/`unknown`) and the script's fail() path, which emits
+  valid JSON with exit 0 — the sensor stays numeric but its `error` attribute
+  goes non-null, so a state trigger alone would miss the likeliest death (a
+  recorder-DB failure).
+- `camera_health_heartbeat` — daily proactive status card, sourced from ALL
+  THREE monitors (snapshot probes, motion staleness, stream faults) with an
+  honest "not reporting" fallback per line. "Probes OK" is the deliberate
+  wording: the probe measures the snapshot path, not motion-event delivery,
+  and a card that says "healthy" from one monitor while another is latched is
+  a false all-clear.
 - `go2rtc_reload_on_start` — reloads the go2rtc config entry 2 min after HA
   starts, healing the WebRTC live-view regression every restart causes.
 - `front_door_doorbell_announce` — doorbell press → parallel TTS announce on
@@ -82,7 +104,13 @@ before deploying (grep for `<` to find them).
   checked hourly during active hours: if **zero** cameras report motion over
   a rolling 4-hour window, the motion pipeline itself is down (a single quiet
   camera is normal; a silent fleet is not). Catches the silent event-listener
-  wedge described in `docs/operations.md` §3.
+  wedge described in `docs/operations.md` §3. The condition reads the
+  staleness sensor's **recorder-derived** `hours_since` map, NOT entity
+  `last_changed`: last_changed resets on every restart (blinding the check
+  for up to 4 h), and a motion sensor stuck `on` reads as *fresh motion
+  forever* — a stuck sensor once pinned the fleet clock to "now" for ~35
+  consecutive hourly checks, mathematically disabling the dead-man while it
+  claimed to be watching.
 
 - `camera_flap_alert` / `camera_flap_recovered` / `camera_flap_down` — the
   stream-fault monitor (see `docs/operations.md` §6): pages on a sustained

@@ -1,0 +1,24 @@
+{
+ "id": "camera_motion_monitor_recovered",
+ "alias": "Cameras - motion monitor recovered",
+ "description": "Dismisses the camera_motion_monitor_down card once the staleness monitor is back (binary on/off AND error attr null) for 5 min. Dismiss-only, no notification. Added 2026-08-17.",
+ "triggers": [
+  {
+   "platform": "template",
+   "value_template": "{{ states('binary_sensor.camera_motion_stale') in ['on','off'] and state_attr('sensor.camera_motion_stale','error') is none }}",
+   "for": {
+    "minutes": 5
+   }
+  }
+ ],
+ "conditions": [],
+ "actions": [
+  {
+   "action": "persistent_notification.dismiss",
+   "data": {
+    "notification_id": "camera_motion_monitor_down"
+   }
+  }
+ ],
+ "mode": "single"
+}

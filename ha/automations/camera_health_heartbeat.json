@@ -1,0 +1,23 @@
+{
+ "id": "camera_health_heartbeat",
+ "alias": "Cameras - daily heartbeat",
+ "triggers": [
+  {
+   "platform": "time",
+   "at": "08:00:00"
+  }
+ ],
+ "conditions": [],
+ "actions": [
+  {
+   "data": {
+    "notification_id": "camera_health_status",
+    "title": "\ud83d\udcf7 Camera health",
+    "message": "Snapshot probes: {{ states('sensor.camera_health') }}/9 OK \u2014 {{ state_attr('sensor.camera_health','summary') }}\nMotion events: {% if state_attr('sensor.camera_motion_stale','stale_count') is none %}motion monitor not reporting{% else %}{% set sc = state_attr('sensor.camera_motion_stale','stale_count')|int(0) %}{% set st = state_attr('sensor.camera_motion_stale','stale') or [] %}{{ sc }} camera(s) beyond their staleness window{% if st %} ({{ st|join(', ') }}){% endif %}{% endif %}\nStream faults: {{ state_attr('sensor.camera_flap_rate','summary') or 'flap monitor not reporting' }}\n\nDaily check {{ now().strftime('%b %-d, %-I:%M %p') }}."
+   },
+   "action": "persistent_notification.create"
+  }
+ ],
+ "mode": "single",
+ "description": "Daily proactive status card. Sourced from ALL THREE monitors - the 2026-08-13 card said '9/9 healthy' from the snapshot probe alone while a camera stood 185h past its motion-staleness window on the same panel. 'Probes OK' is the honest claim: the probe measures the snapshot path, not motion-event delivery."
+}

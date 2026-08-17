@@ -75,7 +75,14 @@ SETTLE_SAMPLES = 2             # comparisons to skip after a day/night flip
                                # (auto-exposure hunts for a few frames)
 MIN_BLOCKS = 2                 # localized change needs at least this many hot blocks
 MAX_FRACTION = 0.7             # more than this fraction hot = global change, ignore
-SAT_IR = 10.0                  # mean saturation below this = IR/night mode
+SAT_IR_ENTER = 8.0             # mean saturation below this = switch to IR/night
+SAT_IR_EXIT = 12.0             # ...and above this = switch back to day. The gap
+                               # is hysteresis: a low-colour interior camera whose
+                               # mean saturation sits near a single threshold will
+                               # dither across it hundreds of times a day, blanking
+                               # most of its samples behind the settle guard and
+                               # logging phantom "visual changes" on the flips that
+                               # get through. Inside the band the previous mode holds.
 KEEP_HOURS = 48.0
 TIMEOUT = 12
 
@@ -105,12 +112,12 @@ def fetch(cam):
 
 
 def analyze(body):
-    """Return (luma_bytes_1440, is_ir) or None."""
+    """Return (luma_bytes_1440, mean_saturation) or None."""
     img = Image.open(io.BytesIO(body))
     img.thumbnail((96, 60))
     sat = ImageStat.Stat(img.convert("HSV")).mean[1]
     luma = img.convert("L").resize(RESIZE)
-    return luma.tobytes(), sat < SAT_IR
+    return luma.tobytes(), sat
 
 
 def block_diffs(a, b):
@@ -152,10 +159,18 @@ def main():
         entry = {"log": log, "events": events, "noise": noise}
         if body:
             try:
-                luma, is_ir = analyze(body)
+                luma, sat = analyze(body)
             except Exception:
-                luma, is_ir = None, None
+                luma, sat = None, None
             if luma is not None:
+                prev_ir = prev.get("ir")
+                if sat < SAT_IR_ENTER:
+                    is_ir = True
+                elif sat > SAT_IR_EXIT:
+                    is_ir = False
+                else:
+                    # hysteresis band: hold the previous mode
+                    is_ir = prev_ir if prev_ir is not None else sat < 10.0
                 mode = "ir" if is_ir else "day"
                 old = prev.get("frame")
                 if prev.get("ir") is not None and prev.get("ir") != is_ir:
@@ -177,8 +192,14 @@ def main():
                             log.append(now)
                             events.append([now, mode])
                         else:
-                            # quiet sample = this camera+mode's live noise estimate
-                            noise[mode] = round(0.9 * ema + 0.1 * max(peak, 0.0), 2)
+                            # quiet sample = this camera+mode's live noise estimate.
+                            # Growth is capped at 15%/sample: a single above-threshold
+                            # peak with only ONE hot block (too localized to count as
+                            # an event) used to ratchet the bar 40-80% in one step -
+                            # the detector training itself to ignore exactly the
+                            # excursions it exists to catch. Decay stays uncapped.
+                            ema_new = 0.9 * ema + 0.1 * max(peak, 0.0)
+                            noise[mode] = round(min(ema_new, max(ema * 1.15, 0.5)), 2)
                 entry["frame"] = base64.b64encode(luma).decode()
                 entry["ir"] = is_ir
                 entry["settle"] = settle

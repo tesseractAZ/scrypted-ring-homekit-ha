@@ -1,35 +1,62 @@
 {
-  "id": "camera_flap_alert",
-  "alias": "Cameras - flap alert",
-  "description": "Pages when a camera's HKSV recording-error rate stays over threshold for 20 min. sensor.camera_flap_rate v2 counts per-camera 'motion recording error' lines - a lost or truncated security clip - plus fleet-wide stream faults. It REPLACED a v1 metric that counted prebuffer restarts, a string that stopped occurring when prebuffer was disabled fleet-wide, leaving the sensor pinned at 0.0 and unable to fire for 9 days. Threshold 2/hr with a 3-event floor: a healthy camera records 0. Error-coded closes are context only - code 3 also covers a benign max-duration cancel. Also pages if Ring push-decryption failures (each one a dropped motion push; ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY in the engine log) exceed 5/hr sustained 30 min - baseline is ~1-2/hr from a stale push keypair; a climb means the event transport is degrading and a Ring plugin re-auth is the likely fix.",
-  "triggers": [
+ "id": "camera_flap_alert",
+ "alias": "Cameras - flap alert",
+ "description": "Pages when a camera's HKSV recording-error rate stays over threshold for 20 min. sensor.camera_flap_rate v2 counts per-camera 'motion recording error' lines - a lost or truncated security clip - plus fleet-wide stream faults. It REPLACED a v1 metric that counted prebuffer restarts, a string that stopped occurring when prebuffer was disabled fleet-wide, leaving the sensor pinned at 0.0 and unable to fire for 9 days. Threshold 2/hr with a 3-event floor: a healthy camera records 0. Error-coded closes are context only - code 3 also covers a benign max-duration cancel. Also pages if Ring push-decryption failures (each one a dropped motion push; ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY in the engine log) exceed 5/hr sustained 30 min - baseline is ~1-2/hr from a stale push keypair; a climb means the event transport is degrading and a Ring plugin re-auth is the likely fix. RE-ASSERTS hourly (:41) while binary_sensor.cameras_flapping stays on (restart-wipe guard; the re-assert also covers a persistent push-drop fault, and the push-drop paragraph keys off the live rate rather than the trigger).",
+ "triggers": [
+  {
+   "platform": "state",
+   "entity_id": "binary_sensor.cameras_flapping",
+   "to": "on",
+   "for": {
+    "minutes": 20
+   }
+  },
+  {
+   "platform": "template",
+   "id": "push_drops",
+   "value_template": "{{ (state_attr('sensor.camera_flap_rate','push_drop_rate') or 0) | float(0) >= 5.0 }}",
+   "for": {
+    "minutes": 30
+   }
+  },
+  {
+   "platform": "time_pattern",
+   "minutes": "41",
+   "id": "reassert"
+  }
+ ],
+ "conditions": [
+  {
+   "condition": "or",
+   "conditions": [
     {
-      "platform": "state",
-      "entity_id": "binary_sensor.cameras_flapping",
-      "to": "on",
-      "for": {
-        "minutes": 20
-      }
+     "condition": "template",
+     "value_template": "{{ trigger.id != 'reassert' }}"
     },
     {
-      "platform": "template",
-      "id": "push_drops",
-      "value_template": "{{ (state_attr('sensor.camera_flap_rate','push_drop_rate') or 0) | float(0) >= 5.0 }}",
-      "for": {
-        "minutes": 30
-      }
-    }
-  ],
-  "conditions": [],
-  "actions": [
+     "condition": "state",
+     "entity_id": "binary_sensor.cameras_flapping",
+     "state": "on",
+     "for": {
+      "minutes": 20
+     }
+    },
     {
-      "data": {
-        "notification_id": "camera_flap",
-        "title": "📹 Camera stream churn",
-        "message": "{{ state_attr('sensor.camera_flap_rate','summary') }}\n\nRecording errors/hr (last ~{{ state_attr('sensor.camera_flap_rate','span_min')|int(0) }} min):\n{% for k, v in (state_attr('sensor.camera_flap_rate','rates') or {}) | dictsort(by='value', reverse=true) %}{{ '- %s: %s/hr\\n' % (k, v) }}{% endfor %}\n{% if trigger.id == 'push_drops' %}Ring push-decryption failures at {{ state_attr('sensor.camera_flap_rate','push_drop_rate') }}/hr - each is a DROPPED motion push. Likely stale push credentials; re-authenticate the Ring plugin in Scrypted.\n{% endif %}Each error is a motion clip that failed to record. Sustained errors on ONE camera point at that camera's uplink or the cloud's session to it, not at the engine. {{ now().strftime('%b %-d %-I:%M %p') }}."
-      },
-      "action": "persistent_notification.create"
+     "condition": "template",
+     "value_template": "{{ (state_attr('sensor.camera_flap_rate','push_drop_rate') or 0)|float(0) >= 5.0 }}"
     }
-  ],
-  "mode": "single"
+   ]
+  }
+ ],
+ "actions": [
+  {
+   "data": {
+    "notification_id": "camera_flap",
+    "title": "\ud83d\udcf9 Camera stream churn",
+    "message": "{{ state_attr('sensor.camera_flap_rate','summary') }}\n\nRecording errors/hr (last ~{{ state_attr('sensor.camera_flap_rate','span_min')|int(0) }} min):\n{% for k, v in (state_attr('sensor.camera_flap_rate','rates') or {}) | dictsort(by='value', reverse=true) %}{{ '- %s: %s/hr\\n' % (k, v) }}{% endfor %}\n{% if trigger.id == 'push_drops' or (state_attr('sensor.camera_flap_rate','push_drop_rate') or 0)|float(0) >= 5.0 %}Ring push-decryption failures at {{ state_attr('sensor.camera_flap_rate','push_drop_rate') }}/hr - each is a DROPPED motion push. Likely stale push credentials; re-authenticate the Ring plugin in Scrypted.\n{% endif %}Each error is a motion clip that failed to record. Sustained errors on ONE camera point at that camera's uplink or the cloud's session to it, not at the engine. {{ now().strftime('%b %-d %-I:%M %p') }}."
+   },
+   "action": "persistent_notification.create"
+  }
+ ],
+ "mode": "single"
 }

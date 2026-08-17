@@ -1,0 +1,69 @@
+{
+ "id": "camera_motion_monitor_down",
+ "alias": "Cameras - motion monitor down",
+ "description": "Dead-man for the per-camera motion-staleness monitor (binary_sensor.camera_motion_stale / sensor.camera_motion_stale, the recorder-query script). Both its alert and the fleet-wide pipeline check read this sensor's attributes and silently evaluate 'no fault' when it dies. 60 min clears restart windows. RE-ASSERTS hourly (:59) while dead (restart-wipe guard). Covers BOTH death modes: command-level death (state unavailable/unknown) AND the script's fail() path, which emits valid JSON with exit 0 - the sensor stays numeric but its 'error' attribute goes non-null (the binary reads 'off', so a state trigger alone would miss the likeliest death mode: a recorder-DB failure). Added 2026-08-17.",
+ "triggers": [
+  {
+   "platform": "state",
+   "entity_id": "binary_sensor.camera_motion_stale",
+   "to": [
+    "unavailable",
+    "unknown"
+   ],
+   "for": {
+    "minutes": 60
+   },
+   "id": "dead"
+  },
+  {
+   "platform": "template",
+   "id": "dead_err",
+   "value_template": "{{ state_attr('sensor.camera_motion_stale','error') is not none }}",
+   "for": {
+    "minutes": 60
+   }
+  },
+  {
+   "platform": "time_pattern",
+   "minutes": "59",
+   "id": "reassert"
+  }
+ ],
+ "conditions": [
+  {
+   "condition": "or",
+   "conditions": [
+    {
+     "condition": "template",
+     "value_template": "{{ trigger.id in ['dead','dead_err'] }}"
+    },
+    {
+     "condition": "state",
+     "entity_id": "binary_sensor.camera_motion_stale",
+     "state": [
+      "unavailable",
+      "unknown"
+     ],
+     "for": {
+      "minutes": 60
+     }
+    },
+    {
+     "condition": "template",
+     "value_template": "{{ state_attr('sensor.camera_motion_stale','error') is not none }}"
+    }
+   ]
+  }
+ ],
+ "actions": [
+  {
+   "action": "persistent_notification.create",
+   "data": {
+    "notification_id": "camera_motion_monitor_down",
+    "title": "\ud83d\udcf7 Motion-staleness monitor down",
+    "message": "The per-camera motion-staleness monitor has been in an error state for 60+ min. Per-camera staleness and the fleet pipeline check are both blind while it is down. sensor.camera_motion_stale error: {{ state_attr('sensor.camera_motion_stale','error') or 'sensor missing entirely' }}. {{ now().strftime('%b %-d %-I:%M %p') }}."
+   }
+  }
+ ],
+ "mode": "single"
+}

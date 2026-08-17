@@ -111,25 +111,40 @@ def main():
     ) if fleet_active else []
 
     # Discriminator: cam_vision.py's frame-differencing log tells us whether a
-    # motion-event-stale camera's SCENE has actually been changing. Visual
-    # activity without events = the detection/event path is suspect; neither =
-    # consistent with a genuinely quiet area. Annotation-grade until per-camera
-    # visual baselines are tuned (outdoor scenes change without Ring events).
+    # motion-event-stale camera's SCENE has actually been changing. Verdicts are
+    # annotation-grade and HONEST about their window: the vision log retains only
+    # VISION_KEEP_H hours - always less than any staleness window - so "no visual
+    # change" can never prove quiet across the whole stale span. (The old form
+    # compared vis_h < ev_h - 1.0, which is unconditionally true whenever the log
+    # is non-empty: a one-bit test dressed as a comparison.) The state file is
+    # age-checked first: a dead/stalled visual monitor must surface as "no
+    # verdict", not silently produce the reassuring branch.
+    VISION_KEEP_H = 48.0     # cam_vision.py KEEP_HOURS
+    VISION_STALE_MIN = 30.0  # vision polls every 2 min; older than this = dead
+    vs, vision_age_min = {}, None
     try:
-        vs = json.load(open(VISION_STATE))
+        vision_age_min = (now - os.path.getmtime(VISION_STATE)) / 60.0
+        if vision_age_min <= VISION_STALE_MIN:
+            vs = json.load(open(VISION_STATE))
     except Exception:
-        vs = {}
+        vs, vision_age_min = {}, None
     visual_hours = {}
     for cam in CAMS:
         log = (vs.get(cam) or {}).get("log") or []
         visual_hours[cam] = round((now - max(log)) / 3600.0, 1) if log else None
     verdicts = {}
     for cam in stale:
-        ev_h, vis_h = hours[cam], visual_hours.get(cam)
-        if vis_h is not None and (ev_h is None or vis_h < ev_h - 1.0):
-            verdicts[cam] = "scene HAS changed without events - detection/event path suspect"
+        vis_h = visual_hours.get(cam)
+        if vision_age_min is None or vision_age_min > VISION_STALE_MIN:
+            age = "missing" if vision_age_min is None else "%.0f min old" % vision_age_min
+            verdicts[cam] = "visual monitor not reporting (state %s) - no verdict" % age
+        elif vis_h is not None:
+            verdicts[cam] = ("scene changed %.1fh ago with no motion event - "
+                             "detection/event path suspect" % vis_h)
         else:
-            verdicts[cam] = "no visual change either - consistent with a quiet area"
+            verdicts[cam] = ("no visual change in the last %.0fh (vision window; "
+                             "shorter than the stale span) - consistent with a "
+                             "quiet area" % VISION_KEEP_H)
 
     oldest_cam = max(seen, key=lambda c: seen[c])
     summary = "%d stale (>%.0fh); oldest %s %.1fh" % (

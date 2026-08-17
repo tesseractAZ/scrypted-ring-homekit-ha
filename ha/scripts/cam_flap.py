@@ -8,7 +8,10 @@ structurally incapable of firing. It reported "no faults" when it meant
 
   RECORDING FAILURES (per camera, the user-facing harm — a lost/truncated
   HKSV clip):   "[Cam] motion recording error ..."
-                "[Cam] motion recording closed (error code: N)"
+                (closed_with_error is RETIRED: current Scrypted builds never emit a
+                "(error code: N)" parenthetical - the close line ends bare - so
+                the match was dead code pinned at 0 that read as evidence of
+                health. The attribute is kept, hard-zero, for schema stability.)
   STREAM FAULTS (fleet-wide; these lines carry no camera bracket):
                 "timeout waiting for data, killing parser session"
                 "rebroadcast error", "rtsp read loop exited",
@@ -37,10 +40,15 @@ import os
 import re
 import sys
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 
 ADDON = "<scrypted_addon_slug>"
 LINES = 60000
+WINDOW_MIN = 360.0      # rate window is bounded by TIME, not by LINES: the 60k-line
+                        # span floats with engine chattiness (~85%% of it is the
+                        # monitors' own probe traffic), so identical error counts
+                        # could publish rates differing ~7x. Lines older than this
+                        # are dropped before counting.
 MIN_SPAN_MIN = 10.0     # below this the rates are too noisy to publish
 ALERT_HR = 2.0          # per-camera recording failures/hour -> flagged
 MIN_EVENTS = 3          # ...and at least this many absolute failures
@@ -143,9 +151,21 @@ def main():
     span_min = (t1 - t0).total_seconds() / 60.0
     if span_min < MIN_SPAN_MIN:
         fail("span too short (%.1f min) - log just rotated?" % span_min)
+    if span_min > WINDOW_MIN:
+        # keep only the last WINDOW_MIN minutes (timestamps are lexicographic)
+        cutoff = (t1 - timedelta(minutes=WINDOW_MIN)).strftime("%Y-%m-%d %H:%M:%S")
+        kept, past = [], False
+        for ln in lines:
+            m = TS_RE.match(ln)
+            if m:
+                past = m.group(1) >= cutoff
+            if past:
+                kept.append(ln)
+        lines = kept
+        span_min = WINDOW_MIN
 
     rec = {n: 0 for n in CAMS.values()}
-    closed_err = {n: 0 for n in CAMS.values()}
+    closed_err = {n: 0 for n in CAMS.values()}  # retired, hard-zero (see docstring)
     probes = {n: 0 for n in DEVICE_IDS.values()}
     stream_errors = 0
     push_drops = 0
@@ -155,13 +175,10 @@ def main():
             m = PROBE_RE.search(ln)
             if m and m.group(1) in DEVICE_IDS:
                 probes[DEVICE_IDS[m.group(1)]] += 1
-        if "motion recording error" in ln or "motion recording closed (error code:" in ln:
+        if "motion recording error" in ln:
             for label, name in CAMS.items():
                 if ("[%s]" % label) in ln:
-                    if "motion recording error" in ln:
-                        rec[name] += 1
-                    else:
-                        closed_err[name] += 1
+                    rec[name] += 1
                     break
         elif PUSH_DECRYPT in ln:
             push_drops += 1

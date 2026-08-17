@@ -78,6 +78,7 @@ def main():
     down, frozen, slow, detail, healthy = [], [], [], {}, 0
     stale_now = 0   # cams whose frame is byte-identical to the PREVIOUS probe
     miss_now = 0    # cams whose probe failed THIS cycle, before DOWN_AFTER tolerance
+    pending = 0     # first miss of the DOWN_AFTER tolerance: not alerted, NOT healthy
     for name, code, nbytes, h, latency in results:
         prev = st.get(name, {})
         if code == 200 and nbytes >= MIN_BYTES and h:
@@ -106,7 +107,10 @@ def main():
                 down.append(name)
                 detail[name] = f"{reason} x{fails}"
             else:
-                healthy += 1
+                # First miss of the tolerance window. Previously counted healthy,
+                # which published '9/9 OK' during a 9/9 probe blackout. A missed
+                # probe is pending, not healthy.
+                pending += 1
                 detail[name] = f"miss({code or 'timeout'})"
 
     try:
@@ -135,7 +139,9 @@ def main():
             parts.append(f"{n_slow} slow: " + ", ".join(slow))
         summary = " | ".join(parts)
     else:
-        summary = "9/9 OK"
+        summary = "%d/%d OK" % (healthy, len(CAMS))
+        if pending:
+            summary += " | %d pending (missed this probe, within tolerance)" % pending
     if fleet_miss:
         summary = "FLEET-MISS: %d/%d probes failed this cycle | " % (miss_now, len(CAMS)) + summary
     if fleet_stale:
@@ -145,7 +151,7 @@ def main():
         "healthy": healthy, "down_count": n_down, "frozen_count": n_frozen, "slow_count": n_slow,
         "down": down, "frozen": frozen, "slow": slow, "all_down": all_down,
         "stale_count": stale_now, "all_stale": all_stale, "fleet_stale": fleet_stale,
-        "miss_count": miss_now, "fleet_miss": fleet_miss,
+        "miss_count": miss_now, "fleet_miss": fleet_miss, "pending": pending,
         "summary": summary, "detail": detail,
     }))
 

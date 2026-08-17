@@ -1,33 +1,33 @@
 {
-  "id": "cameras_motion_stale_alert",
-  "alias": "Cameras - stale motion alert (daytime pipeline check)",
-  "description": "Fleet-wide motion-pipeline dead-man, hourly rolling window: pages if NO camera has reported motion for 4+ hours, checked hourly during active hours (10:00-20:00). A rolling window beats fixed check times: a real event-listener wedge (motion events die while streams and snapshots stay perfectly healthy - the push path fails independently of the pull paths) can otherwise run half a day before paging. One quiet camera is normal; a whole fleet silent for 4 daytime hours is not. CAVEAT: last_changed resets on HA restart, masking staleness for up to the window length.",
-  "triggers": [
-    {
-      "platform": "time_pattern",
-      "minutes": "11"
-    }
-  ],
-  "conditions": [
-    {
-      "condition": "time",
-      "after": "10:00:00",
-      "before": "20:00:00"
-    },
-    {
-      "condition": "template",
-      "value_template": "{% set ns = namespace(m=0) %}{% for c in ['<cam_1>','<cam_2>','<cam_3>','<cam_4>','<cam_5>','<cam_6>','<cam_7>','<cam_8>','<cam_9>'] %}{% set e = 'binary_sensor.' ~ c ~ '_motion' %}{% if states[e] is not none %}{% if is_state(e,'on') %}{% set ns.m = as_timestamp(now()) %}{% elif as_timestamp(states[e].last_changed) > ns.m %}{% set ns.m = as_timestamp(states[e].last_changed) %}{% endif %}{% endif %}{% endfor %}{{ ns.m > 0 and (as_timestamp(now()) - ns.m) > 14400 }}"
-    }
-  ],
-  "actions": [
-    {
-      "data": {
-        "notification_id": "cameras_motion_stale",
-        "title": "⚠️ Cameras: no motion detected today",
-        "message": "{% set ns = namespace(m=0) %}{% for c in ['<cam_1>','<cam_2>','<cam_3>','<cam_4>','<cam_5>','<cam_6>','<cam_7>','<cam_8>','<cam_9>'] %}{% set e = 'binary_sensor.' ~ c ~ '_motion' %}{% if states[e] is not none %}{% if is_state(e,'on') %}{% set ns.m = as_timestamp(now()) %}{% elif as_timestamp(states[e].last_changed) > ns.m %}{% set ns.m = as_timestamp(states[e].last_changed) %}{% endif %}{% endif %}{% endfor %}No motion on ANY camera in the last 4+ hours (newest: {{ ns.m | timestamp_custom('%b %-d %-I:%M %p') if ns.m > 0 else 'unknown' }}). The camera->engine->MQTT->HA motion pipeline may be down (usual fix: reload the camera-source plugin; if events still don't arrive, restart the engine). Checked {{ now().strftime('%-I:%M %p') }}."
-      },
-      "action": "persistent_notification.create"
-    }
-  ],
-  "mode": "single"
+ "id": "cameras_motion_stale_alert",
+ "alias": "Cameras - stale motion alert (daytime pipeline check)",
+ "description": "Fleet-wide motion-pipeline dead-man, hourly rolling window: pages if NO camera has reported a motion EVENT for 4+ hours, checked hourly during active hours (10:00-20:00). Replaced the twice-daily since-08:00 check after a real Ring event-listener wedge ran ~12h before paging (2026-07-24). REBASED 2026-08-17 onto sensor.camera_motion_stale's recorder-derived hours_since map: the old template read entity last_changed, which (a) resets on every restart, blinding the check for up to 4h, and (b) treated a sensor stuck 'on' as fresh motion - one camera's motion binary_sensor sat latched 'on' for 85h and pinned the staleness clock to zero for ~35 consecutive hourly checks. The recorder survives both. If the staleness sensor itself dies this condition reads false - that hole is covered by the camera_motion_monitor_down dead-man.",
+ "triggers": [
+  {
+   "platform": "time_pattern",
+   "minutes": "11"
+  }
+ ],
+ "conditions": [
+  {
+   "condition": "time",
+   "after": "10:00:00",
+   "before": "20:00:00"
+  },
+  {
+   "condition": "template",
+   "value_template": "{% set hs = state_attr('sensor.camera_motion_stale','hours_since') %}{% set vals = (hs or {}).values() | reject('none') | list %}{{ vals | length > 0 and (vals | min) > 4.0 }}"
+  }
+ ],
+ "actions": [
+  {
+   "data": {
+    "notification_id": "cameras_motion_stale",
+    "title": "\u26a0\ufe0f Cameras: no motion detected today",
+    "message": "{% set hs = state_attr('sensor.camera_motion_stale','hours_since') or {} %}{% set vals = hs.values() | reject('none') | list %}No motion event from ANY camera in the last {{ (vals | min) | round(1) if vals else '?' }} hours (recorder-derived - immune to restarts and stuck sensors). The Ring->Scrypted->MQTT->HA motion pipeline may be down (usual fix: reload the Ring plugin in Scrypted). If HA history is empty for OTHER entity types too, the recorder - not the camera pipeline - is the fault. Checked {{ now().strftime('%-I:%M %p') }}."
+   },
+   "action": "persistent_notification.create"
+  }
+ ],
+ "mode": "single"
 }
