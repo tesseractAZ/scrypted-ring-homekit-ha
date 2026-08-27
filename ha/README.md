@@ -75,8 +75,15 @@ before deploying (grep for `<` to find them).
   tier's window, so a re-assert can never page a blip the tiers absorb):
   persistent notifications are in-memory, so a restart wipes the page with the
   fault still latched and an edge trigger can never re-fire.
-- `camera_health_recovered` — dismisses the alert after 5 min clear.
-  Dismiss-only: no "recovered" notification (avoids churn).
+- `camera_health_recovered` — dismisses the alert after **35 min** clear.
+  Dismiss-only: no "recovered" notification (avoids churn). The gate must sit
+  above the longest raise tier: at 5 min it was 6× *shorter* than the 30-min
+  degraded tier, so any fault whose quiet runs exceeded 5 min re-raised and
+  re-cleared once per oscillation — one 7.3 h fault produced 4 card appearances
+  and 6 dismissals, with the card absent for 143 min during which the fault was
+  actually active 81% of the time. 35 min also clears the freeze detector's own
+  10-min re-arm window (`FREEZE_PROBES × scan_interval`), so "recovered" can no
+  longer be asserted from an interval the detector is blind in.
 - `camera_health_monitor_down` / `_recovered` — dead-man for the watchdog
   ITSELF. The alert's template triggers all read `state_attr(...)|int(0)`, so a
   dead sensor — or the script's own error path, which publishes `healthy: -1` —
