@@ -120,6 +120,20 @@ before deploying (grep for `<` to find them).
   the monitor's clock). Also carries a tripwire on cloud push-decryption
   failures - each one is a dropped motion push; a sustained climb means the
   event transport is degrading and the camera-source plugin needs re-auth.
+- `camera_host_down_alert` / `_recovered` — reports an outage of the HOST, after
+  the fact. Every monitor here is a process inside the thing it monitors, so a
+  host-down event raises nothing at all while it is happening: the monitor
+  dead-men can only fire while HA is up, and every gate is ≥5 min while a cold
+  boot restores service in ~2 min. A real mains cut took one fleet dark for
+  57 minutes and produced no camera signal whatsoever. `cam_motion.py` publishes
+  `host_gap_min` — the largest hole spanning **every** entity in the recorder over
+  24 h, which is only explicable by the host being down. Note the trigger is a
+  template plus a half-hourly sweep, **not** `numeric_state`: numeric_state only
+  fires from an *armed* state, and after a cold boot neither ordering arms it
+  (attach-before-first-poll raises on the missing attribute and never arms;
+  first-poll-before-attach is already above the threshold and never arms), so it
+  would have been structurally incapable of reporting the very outage it exists
+  for.
 - `camera_motion_dead_alert` / `_recovered` — per-camera motion staleness:
   pages when **one** camera has produced no motion EVENTS beyond its window
   (default 72 h; naturally-quiet or rarely-visited cameras take longer
@@ -132,13 +146,26 @@ before deploying (grep for `<` to find them).
   compares each camera's snapshots over time (block-based frame differencing,
   lighting-normalized, IR-aware) and the alert states whether the scene has
   visibly changed without events (detection/event path suspect) or not changed
-  at all (genuinely quiet area) - no human walk test required, which matters
+  at all (genuinely quiet area). The discriminator counts only **localized**
+  changes — a change that fires on three or more cameras within three minutes is
+  a lighting transition, a cloud shadow, or the first frame after a restart
+  (which has no valid prior frame and so registers on every camera at once), and
+  says nothing about any one camera — and it requires several of them. Testing
+  "is the vision log non-empty" is not a discriminator at all: an outdoor scene
+  guarantees entries via sun, shadow and IR transitions, so every stale outdoor
+  camera reads "suspect" regardless of its true state - no human walk test required, which matters
   when nobody is at the property for weeks. The fleet-wide
   dead-man above only fires when *every* camera goes quiet, so a single dead
   camera is invisible to it. Reads the recorder rather than entity
   `last_changed`, which resets on restart and would otherwise mask staleness.
-  The alert fires on the onset edge AND re-asserts hourly while the condition
-  persists — a restart otherwise wipes the notification with the binary still
+  The alert fires on the onset edge, on any change to the **stale set** (so an
+  additional camera crossing its threshold raises genuinely new information
+  rather than silently rewriting a card you have already read), on HA start, and
+  on a slow 2-hourly re-assert. It used to re-assert *hourly* off a bare clock,
+  which produced 260 identical recreations against 3 real state transitions in
+  26 days and trained the reader to ignore the channel. Its condition reads the
+  recorder-derived `stale_count` rather than the template entity's
+  `last_changed`, so a restart no longer disarms it for the first hour — a restart otherwise wipes the notification with the binary still
   latched (the edge can never re-fire), and a second camera crossing its
   threshold while latched would otherwise never page; recreating the same
   notification_id is idempotent, so the re-assert adds no churn.

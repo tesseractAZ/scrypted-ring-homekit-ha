@@ -10,11 +10,15 @@ honest: valid->200 fresh JPEG, bad token->401, bad/dead device->error.
 
 Detects (v3 hardening, after a stale-cache wedge the old logic missed):
   - down   : hard failure (non-200 / tiny) for DOWN_AFTER consecutive probes.
-  - frozen : BYTE-IDENTICAL JPEG for FREEZE_PROBES consecutive probes = a wedged
-             source. Healthy cameras return a DISTINCT frame EVERY probe (a live
-             prebuffered stream never repeats a JPEG; the on-demand cam's 15s
-             capture also changes between 120s probes), so an identical hash is
-             a reliable stuck-source signal. Catches in ~10 min vs the old 2 h.
+  - frozen : BYTE-IDENTICAL JPEG for FREEZE_PROBES consecutive probes.
+             HONEST NAMING: this is a STALE SNAPSHOT, not proof of a wedged
+             camera. On a snapshot timeout the webhook serves the engine's CACHED
+             last-good JPEG - HTTP 200, full size - so the probe scores it a
+             success and only the identical hash betrays it. The tier therefore
+             measures "the snapshot request is timing out and we are being served
+             cache", which is inherently bursty and rotates across cameras (it
+             falls hardest on the BUSIEST ones). Treat it as a snapshot-pipeline
+             signal, not a per-camera hardware verdict.
   - slow   : takePicture latency > SLOW_SECS for SLOW_AFTER consecutive probes
              (degraded / near-timeout). NOTE the probe fires all 9 cameras
              concurrently, so a healthy camera can transiently spike to 4-7s from
@@ -90,7 +94,7 @@ def main():
             st[name] = {"hash": h, "same": same, "fails": 0, "slowc": slowc}
             if same >= FREEZE_PROBES:
                 frozen.append(name)
-                detail[name] = f"frozen ({same + 1} identical frames)"
+                detail[name] = f"stale snapshot ({same + 1} identical frames - cached)"
             elif slowc >= SLOW_AFTER:
                 slow.append(name)
                 detail[name] = f"slow ({latency:.1f}s x{slowc})"
@@ -134,7 +138,7 @@ def main():
         if down:
             parts.append(f"{n_down} down: " + ", ".join(down))
         if frozen:
-            parts.append(f"{n_frozen} frozen: " + ", ".join(frozen))
+            parts.append(f"{n_frozen} stale-snapshot: " + ", ".join(frozen))
         if slow:
             parts.append(f"{n_slow} slow: " + ", ".join(slow))
         summary = " | ".join(parts)
@@ -145,7 +149,7 @@ def main():
     if fleet_miss:
         summary = "FLEET-MISS: %d/%d probes failed this cycle | " % (miss_now, len(CAMS)) + summary
     if fleet_stale:
-        summary = "FLEET-STALE: %d/%d frames identical to last probe | " % (stale_now, len(CAMS)) + summary
+        summary = "FLEET-STALE: %d/%d frames identical to last probe (snapshot pipeline serving cache) | " % (stale_now, len(CAMS)) + summary
 
     print(json.dumps({
         "healthy": healthy, "down_count": n_down, "frozen_count": n_frozen, "slow_count": n_slow,

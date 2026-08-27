@@ -71,18 +71,32 @@ GRID_X, GRID_Y = 8, 6          # 48 blocks of 6x5 px
 THRESH_FLOOR = 12.0            # never more sensitive than this
 THRESH_CAP = 60.0              # never less sensitive than this
 NOISE_K = 5.0                  # threshold = K x learned noise for this cam+mode
-SETTLE_SAMPLES = 2             # comparisons to skip after a day/night flip
-                               # (auto-exposure hunts for a few frames)
+SETTLE_SAMPLES = 2             # legacy; drained only, no longer armed on a flip
+BASELINE_MAX_AGE_S = 900.0     # PER-MODE BASELINE FRAMES. Previously ONE baseline
+                               # was kept per camera, so every day<->IR flip
+                               # compared across two different exposures and had to
+                               # be blanked by the settle guard. On a camera whose
+                               # IR illuminator cycles every ~60s that blanked most
+                               # of its samples - it was effectively excluded from
+                               # the monitor (measured: 0 of 11 polls compared,
+                               # vs 9 of 11 after this change). One baseline PER
+                               # MODE makes a flip free: the frame is compared with
+                               # the last frame in the SAME mode. A baseline older
+                               # than this is discarded rather than compared.
 MIN_BLOCKS = 2                 # localized change needs at least this many hot blocks
 MAX_FRACTION = 0.7             # more than this fraction hot = global change, ignore
-SAT_IR_ENTER = 8.0             # mean saturation below this = switch to IR/night
-SAT_IR_EXIT = 12.0             # ...and above this = switch back to day. The gap
-                               # is hysteresis: a low-colour interior camera whose
-                               # mean saturation sits near a single threshold will
-                               # dither across it hundreds of times a day, blanking
-                               # most of its samples behind the settle guard and
-                               # logging phantom "visual changes" on the flips that
-                               # get through. Inside the band the previous mode holds.
+# IR/day classification is keyed to mean LUMA, not saturation. Mean HSV
+# saturation is mathematically unstable at low luma - S=(max-min)/max as max->0 -
+# so a near-black frame can read sat~90 while a bright IR-illuminated frame reads
+# 0.00. A saturation threshold (and any hysteresis band over it) therefore cannot
+# separate the two populations: measured on a camera whose IR illuminator cycles
+# ~60s, mode flips ran at an identical rate before AND after a saturation
+# hysteresis band was added. Luma separates the same two cleanly.
+LUMA_IR_ENTER = 60.0           # mean luma below this = dark scene -> IR/night
+LUMA_IR_EXIT = 90.0            # ...above this = lit scene -> day. Between the two
+                               # the PREVIOUS mode holds, so a scene sitting near
+                               # the boundary cannot dither.
+SAT_IR_FALLBACK = 10.0         # only used to seed the very first sample
 KEEP_HOURS = 48.0
 TIMEOUT = 12
 
@@ -112,12 +126,13 @@ def fetch(cam):
 
 
 def analyze(body):
-    """Return (luma_bytes_1440, mean_saturation) or None."""
+    """Return (luma_bytes_1440, mean_saturation, mean_luma) or None."""
     img = Image.open(io.BytesIO(body))
     img.thumbnail((96, 60))
     sat = ImageStat.Stat(img.convert("HSV")).mean[1]
-    luma = img.convert("L").resize(RESIZE)
-    return luma.tobytes(), sat
+    grey = img.convert("L")
+    lum = ImageStat.Stat(grey).mean[0]
+    return grey.resize(RESIZE).tobytes(), sat, lum
 
 
 def block_diffs(a, b):
@@ -159,24 +174,36 @@ def main():
         entry = {"log": log, "events": events, "noise": noise}
         if body:
             try:
-                luma, sat = analyze(body)
+                luma, sat, lum = analyze(body)
             except Exception:
-                luma, sat = None, None
+                luma, sat, lum = None, None, None
             if luma is not None:
                 prev_ir = prev.get("ir")
-                if sat < SAT_IR_ENTER:
+                if lum < LUMA_IR_ENTER:
                     is_ir = True
-                elif sat > SAT_IR_EXIT:
+                elif lum > LUMA_IR_EXIT:
                     is_ir = False
+                elif prev_ir is not None:
+                    is_ir = prev_ir           # inside the band: hold previous mode
                 else:
-                    # hysteresis band: hold the previous mode
-                    is_ir = prev_ir if prev_ir is not None else sat < 10.0
+                    is_ir = sat < SAT_IR_FALLBACK   # first ever sample
                 mode = "ir" if is_ir else "day"
-                old = prev.get("frame")
-                if prev.get("ir") is not None and prev.get("ir") != is_ir:
-                    settle = SETTLE_SAMPLES        # mode flip: let exposure settle
-                elif settle > 0:
-                    settle -= 1                    # still settling, skip compare
+                # frames = {mode: [b64_luma, ts]} - one baseline per exposure mode.
+                frames = dict(prev.get("frames") or {})
+                if not frames and prev.get("frame"):
+                    # Migrate the legacy single baseline as ALREADY EXPIRED: its
+                    # true age and capture mode are both unknown, so comparing
+                    # against it would be a cross-mode comparison of unknown age.
+                    frames[mode] = [prev["frame"], now - BASELINE_MAX_AGE_S - 1.0]
+                base = frames.get(mode)
+                old = None
+                if base and (now - float(base[1])) <= BASELINE_MAX_AGE_S:
+                    old = base[0]
+                # With like-for-like comparison there is nothing to settle: a flip
+                # no longer costs a comparison. `settle` is only drained so state
+                # written by the previous schema finishes cleanly.
+                if settle > 0:
+                    settle -= 1
                 elif old is not None:
                     old_b = base64.b64decode(old)
                     if old_b != luma:
@@ -187,7 +214,8 @@ def main():
                         ema = float(noise.get(mode, 4.0))
                         thr = min(THRESH_CAP, max(THRESH_FLOOR, NOISE_K * ema))
                         hot = sum(1 for d in norm if d > thr)
-                        maxdiff[name] = {"d": round(peak, 1), "thr": round(thr, 1), "m": mode}
+                        maxdiff[name] = {"d": round(peak, 1), "thr": round(thr, 1), "m": mode,
+                                         "lum": round(lum, 1)}
                         if MIN_BLOCKS <= hot <= int(MAX_FRACTION * len(bd)):
                             log.append(now)
                             events.append([now, mode])
@@ -200,14 +228,21 @@ def main():
                             # excursions it exists to catch. Decay stays uncapped.
                             ema_new = 0.9 * ema + 0.1 * max(peak, 0.0)
                             noise[mode] = round(min(ema_new, max(ema * 1.15, 0.5)), 2)
-                entry["frame"] = base64.b64encode(luma).decode()
+                frames[mode] = [base64.b64encode(luma).decode(), now]
+                frames = {m: v for m, v in frames.items()
+                          if (now - float(v[1])) <= BASELINE_MAX_AGE_S * 4}
+                entry["frames"] = frames
+                entry["frame"] = frames[mode][0]   # back-compat for readers
                 entry["ir"] = is_ir
                 entry["settle"] = settle
                 entry["noise"] = noise
             else:
-                entry.update({k: prev[k] for k in ("frame", "ir", "settle") if k in prev})
+                entry.update({k: prev[k] for k in ("frame", "frames", "ir", "settle") if k in prev})
         else:
-            entry.update({k: prev[k] for k in ("frame", "ir", "settle") if k in prev})
+            # A failed FETCH must carry the per-mode baselines forward exactly as
+            # the failed-ANALYZE branch does; dropping "frames" here silently
+            # reverted the camera to the legacy single-baseline path on every miss.
+            entry.update({k: prev[k] for k in ("frame", "frames", "ir", "settle") if k in prev})
         st[name] = entry
         day_events += sum(1 for e in events if now - e[0] < 24 * 3600 and e[1] == "day")
         ir_events += sum(1 for e in events if now - e[0] < 24 * 3600 and e[1] == "ir")

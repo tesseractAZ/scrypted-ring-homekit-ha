@@ -24,6 +24,10 @@ command_line:
         - verdicts
         - summary
         - error
+        - host_gap_min
+        - applied_window
+        - visual_localized_hours
+        - visual_localized_count
 
 template:
   - binary_sensor:

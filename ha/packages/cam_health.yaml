@@ -34,6 +34,8 @@ command_line:
         - all_down
         - summary
         - detail
+        - pending
+        - healthy
 
 template:
   - binary_sensor:

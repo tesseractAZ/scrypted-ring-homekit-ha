@@ -1,7 +1,7 @@
 {
  "id": "cameras_motion_stale_alert",
  "alias": "Cameras - stale motion alert (daytime pipeline check)",
- "description": "Fleet-wide motion-pipeline dead-man, hourly rolling window: pages if NO camera has reported a motion EVENT for 4+ hours, checked hourly during active hours (10:00-20:00). Replaced the twice-daily since-08:00 check after a real Ring event-listener wedge ran ~12h before paging (2026-07-24). REBASED 2026-08-17 onto sensor.camera_motion_stale's recorder-derived hours_since map: the old template read entity last_changed, which (a) resets on every restart, blinding the check for up to 4h, and (b) treated a sensor stuck 'on' as fresh motion - one camera's motion binary_sensor sat latched 'on' for 85h and pinned the staleness clock to zero for ~35 consecutive hourly checks. The recorder survives both. If the staleness sensor itself dies this condition reads false - that hole is covered by the camera_motion_monitor_down dead-man.",
+ "description": "Fleet-wide motion-pipeline dead-man, hourly rolling window: pages if NO camera has reported a motion EVENT for 4+ hours, checked hourly during active hours (10:00-20:00). Replaced the twice-daily since-08:00 check after a real Ring event-listener wedge ran ~12h before paging (2026-07-24). REBASED 2026-08-17 onto sensor.camera_motion_stale's recorder-derived hours_since map: the old template read entity last_changed, which (a) resets on every restart, blinding the check for up to 4h, and (b) treated a sensor stuck 'on' as fresh motion - one camera's motion binary_sensor sat latched 'on' for 85h (2026-07-29 -> 08-01) and pinned the staleness clock to zero for ~35 consecutive hourly checks. The recorder survives both. If the staleness sensor itself dies this condition reads false - that hole is covered by the camera_motion_monitor_down dead-man. AGE GATE ADDED 2026-08-27: this condition reads sensor.camera_motion_stale, which refreshes only every 30 min, while the check runs hourly - so it was asserting a present-tense fact from a snapshot up to half an hour old and false-paged on 2026-08-22 off 27m43s-stale data, 20 minutes after motion had actually resumed. It now refuses to evaluate a sample older than 35 min AND subtracts the sample's age from the measured gap, so the threshold is applied to the worst-case true elapsed time rather than to a stale reading.",
  "triggers": [
   {
    "platform": "time_pattern",
@@ -16,7 +16,7 @@
   },
   {
    "condition": "template",
-   "value_template": "{% set hs = state_attr('sensor.camera_motion_stale','hours_since') %}{% set vals = (hs or {}).values() | reject('none') | list %}{{ vals | length > 0 and (vals | min) > 4.0 }}"
+   "value_template": "{% set s = states['sensor.camera_motion_stale'] %}{% set age = (as_timestamp(now()) - as_timestamp(s.last_updated)) if s is not none else 99999 %}{% set hs = state_attr('sensor.camera_motion_stale','hours_since') %}{% set vals = (hs or {}).values() | reject('none') | list %}{{ age <= 2100 and vals | length > 0 and ((vals | min) - (age / 3600.0)) > 4.0 }}"
   }
  ],
  "actions": [

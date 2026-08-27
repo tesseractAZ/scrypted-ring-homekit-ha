@@ -1,0 +1,34 @@
+{
+ "id": "camera_host_down_alert",
+ "alias": "Cameras - host was down (recorder gap)",
+ "description": "Reports an outage of the HOST after the fact. Every camera monitor is a process inside the thing it monitors, so a host-down event produces no alert of any kind while it is happening - the two monitor dead-men can only fire while HA is up, and every gate is >=5 min while a cold boot restores service in ~2 min. A 2026-08-26 mains cut took the whole fleet dark for 56.9 min and raised nothing at all. cam_motion.py now publishes host_gap_min: the largest hole spanning EVERY entity in the recorder over the last 24h, which is only explicable by the host being down. Fires once per outage (the value decays out of the 24h window on its own) and is dismiss-only on recovery. Added 2026-08-27. TRIGGER NOTE: numeric_state is deliberately NOT used here. It only fires from an ARMED state, and after a cold boot neither ordering arms it - if the automation attaches while the sensor is still 'unknown' the arming check raises and the entity is never armed, and if the sensor's first poll lands first the value is already above the threshold so it is never armed either. The automation would have been structurally incapable of reporting the very outage it was written for. A template trigger plus an unconditional half-hourly sweep, both gated on the same condition, fire regardless of boot ordering; recreating the same notification_id is idempotent.",
+ "triggers": [
+  {
+   "platform": "template",
+   "value_template": "{{ (state_attr('sensor.camera_motion_stale','host_gap_min')|float(0)) > 15 }}",
+   "id": "gap"
+  },
+  {
+   "platform": "time_pattern",
+   "minutes": "/30",
+   "id": "sweep"
+  }
+ ],
+ "conditions": [
+  {
+   "condition": "template",
+   "value_template": "{{ (state_attr('sensor.camera_motion_stale','host_gap_min')|float(0)) > 15 }}"
+  }
+ ],
+ "actions": [
+  {
+   "action": "persistent_notification.create",
+   "data": {
+    "notification_id": "camera_host_down",
+    "title": "\u26a0\ufe0f Camera host was down",
+    "message": "The Home Assistant host stopped recording for {{ state_attr('sensor.camera_motion_stale','host_gap_min') }} minutes within the last 24h - a gap spanning EVERY entity, which means the host itself was down, not any one integration. The camera fleet was unmonitored for that period and no camera alert could have fired during it (all nine cameras keep recording to the Ring cloud regardless). If this was not a planned reboot, check power to the host. {{ now().strftime('%b %-d %-I:%M %p') }}."
+   }
+  }
+ ],
+ "mode": "single"
+}

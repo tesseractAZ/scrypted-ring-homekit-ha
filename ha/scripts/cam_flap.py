@@ -8,10 +8,15 @@ structurally incapable of firing. It reported "no faults" when it meant
 
   RECORDING FAILURES (per camera, the user-facing harm — a lost/truncated
   HKSV clip):   "[Cam] motion recording error ..."
-                (closed_with_error is RETIRED: current Scrypted builds never emit a
-                "(error code: N)" parenthetical - the close line ends bare - so
-                the match was dead code pinned at 0 that read as evidence of
-                health. The attribute is kept, hard-zero, for schema stability.)
+                "[Cam] motion recording closed (error code: N)"
+                (RESTORED. It had been retired on the claim that the engine
+                "never emits" the parenthetical - that claim was FALSE: 25 such
+                lines appeared in a single 23h window, concentrated on one camera
+                whose HKSV clips were arriving effectively empty. A hard-zeroed
+                counter reads as "checked, none found", the exact anti-pattern the
+                v2 rewrite existed to remove. It stays OUT of the alert metric -
+                code 3 also covers a benign max-duration cancel - but it is
+                counted, published, and surfaced in the summary.)
   STREAM FAULTS (fleet-wide; these lines carry no camera bracket):
                 "timeout waiting for data, killing parser session"
                 "rebroadcast error", "rtsp read loop exited",
@@ -165,7 +170,7 @@ def main():
         span_min = WINDOW_MIN
 
     rec = {n: 0 for n in CAMS.values()}
-    closed_err = {n: 0 for n in CAMS.values()}  # retired, hard-zero (see docstring)
+    closed_err = {n: 0 for n in CAMS.values()}  # context tier, NOT the alert metric
     probes = {n: 0 for n in DEVICE_IDS.values()}
     stream_errors = 0
     push_drops = 0
@@ -175,10 +180,13 @@ def main():
             m = PROBE_RE.search(ln)
             if m and m.group(1) in DEVICE_IDS:
                 probes[DEVICE_IDS[m.group(1)]] += 1
-        if "motion recording error" in ln:
+        if "motion recording error" in ln or "motion recording closed (error code:" in ln:
             for label, name in CAMS.items():
                 if ("[%s]" % label) in ln:
-                    rec[name] += 1
+                    if "motion recording error" in ln:
+                        rec[name] += 1
+                    else:
+                        closed_err[name] += 1
                     break
         elif PUSH_DECRYPT in ln:
             push_drops += 1
@@ -210,6 +218,10 @@ def main():
         summary += "; push drops %.1f/hr" % push_drop_rate
     if shortfall:
         summary += "; probe shortfall: " + ",".join(shortfall)
+    err_closes = sorted((n for n, v in closed_err.items() if v), key=lambda n: -closed_err[n])
+    if err_closes:
+        summary += "; error-coded closes: " + ",".join(
+            "%s=%d" % (n, closed_err[n]) for n in err_closes)
 
     emit({
         "span_min": round(span_min, 1),
