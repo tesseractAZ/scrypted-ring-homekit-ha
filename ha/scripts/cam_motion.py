@@ -28,6 +28,10 @@ STALE_HOURS = 72.0      # a camera silent this long while the fleet is active
 STALE_HOURS_OVERRIDES = {
     # e.g.  "<naturally_quiet_outdoor_cam>": 120.0,
     #       "<rarely_visited_interior_cam>": 168.0,
+    # Fit these from OCCUPIED-period data only, and only from periods the
+    # recorder was actually writing: a window fitted just above a "quiet gap"
+    # that is mostly a recorder blackout is fitted to hours in which the camera
+    # was UNOBSERVED, not hours in which it was quiet.
 }
 FLEET_ACTIVE_HOURS = 24.0   # ...and someone else fired within this window
 QUERY_TIMEOUT_S = 20
@@ -35,10 +39,48 @@ QUERY_TIMEOUT_S = 20
 # is a process inside the thing it monitors, so a host-down outage produces NO
 # alert of any kind: the fleet simply stops being observed and every gate is
 # evaluated only while the host is up. This is the after-the-fact detector - a
-# hole spanning every entity means the host was down, and it is visible once the
-# host returns. (A real mains cut took a fleet dark for 56.9 min and raised
-# nothing at all.) Measured cost ~0.1 s.
+# hole in the recorder spanning every entity means the host was down, and it is
+# visible once the host returns. (A 2026-08-26 mains cut took the whole fleet
+# dark for 56.9 min and raised nothing.) Measured cost ~0.1 s.
 HOST_GAP_LOOKBACK_H = 24.0
+
+# ---------------------------------------------------------------------------
+# CROSS-CAMERA CORROBORATION.
+# Frame-differencing answers "did this camera's SCENE change?", which on an
+# outdoor view is guaranteed by sun, shadow and vegetation - so for a camera
+# aimed at open ground the "detection/event path suspect" branch is the only
+# reachable one and the verdict carries no information (measured 2026-08-30:
+# 416 of 416 recorded samples for one camera read identically).
+#
+# Cameras that share a sight-line co-fire at a stable rate, and that rate is a
+# real per-camera test of the EVENT path, computable from motion rows already in
+# the recorder - no walk test, no new hardware, no physical access. For a stale
+# camera, take each partner's motion clusters, measure how often the target
+# historically appeared in them, then count how often it has appeared since it
+# went quiet. Zero out of enough opportunities is a proof, not a suspicion.
+#
+# Measured on <cam_9>, 2026-08-30: <cam_6> co-fired 49.0% (72/147)
+# before 2026-08-23 16:48Z and 0 of 32 after - P(observed | still working)
+# = 4.4e-10, with five other partners agreeing. Over the same period
+# <cam_8>'s share of <cam_6> clusters rose 28.1% -> 100%, so the scene
+# was MORE active, not quiet.
+#
+# The test is honest about its own power: a camera with no high-rate partner
+# (a spatially isolated view, or an interior room) returns "cannot be tested",
+# never a false all-clear. <cam_5>'s best partner rate is 6.1%, so it
+# is explicitly declared untestable rather than exonerated or condemned.
+CORROBORATE_LOOKBACK_D = 30.0    # history used to fit partner co-fire rates
+CORROBORATE_LINK_S = 300.0       # events this close chain into one cluster
+CORROBORATE_MIN_RATE = 0.15      # a partner below this has too little power
+CORROBORATE_MIN_PRE = 20         # ...and needs this many historical clusters
+CORROBORATE_MIN_POST = 8         # ...and this many opportunities since the cut
+CORROBORATE_P = 1e-3             # P(silence | still working) below this = broken
+# The 89.4h recorder blackout (zero rows for ANY entity). Hours in which a
+# camera was UNOBSERVED are not hours in which it was quiet, so they must not
+# enter either the historical rate or the post-cut opportunity count.
+# Fill with (start_epoch, end_epoch) pairs for any period your recorder was not
+# writing (a database outage, a restore, a migration). Leave empty if none.
+EXCLUDE_SPANS = []  # e.g. [(1785641610.0, 1785933763.0)]
 
 # binary_sensor.<name>_motion for each camera in the fleet
 CAMS = [
@@ -54,6 +96,100 @@ CAMS = [
 ]
 
 
+def _excluded(ts):
+    return any(a <= ts < b for a, b in EXCLUDE_SPANS)
+
+
+def _clusters(events, link_s):
+    """[(ts, cam)] sorted -> [set(cam)] for runs chained within link_s."""
+    out = []
+    cur_t, cur_c = None, set()
+    for ts, cam in events:
+        if cur_t is not None and ts - cur_t <= link_s:
+            cur_c.add(cam)
+        else:
+            if cur_c:
+                out.append(cur_c)
+            cur_c = {cam}
+        cur_t = ts
+    if cur_c:
+        out.append(cur_c)
+    return out
+
+
+def corroborate(events, target, cut_ts):
+    """Is `target`'s silence since cut_ts explicable by a quiet scene?
+
+    Returns a dict describing the strongest partner test available, or a dict
+    saying plainly that no partner has enough statistical power. Never returns
+    a reassuring verdict it cannot support.
+    """
+    ev = [(t, c) for t, c in events if not _excluded(t)]
+    pre = _clusters([e for e in ev if e[0] < cut_ts], CORROBORATE_LINK_S)
+    # Start the post window one link-width AFTER the camera's own last event, so
+    # the cluster that contains that event cannot count as a co-fire. Leaving it
+    # in credits the camera with one hit it earned on the way out and makes the
+    # test look better-behaved than it is.
+    post = _clusters([e for e in ev if e[0] >= cut_ts + CORROBORATE_LINK_S],
+                     CORROBORATE_LINK_S)
+    best = None
+    for partner in {c for _, c in ev} - {target}:
+        n_pre = [cl for cl in pre if partner in cl]
+        n_post = [cl for cl in post if partner in cl]
+        if len(n_pre) < CORROBORATE_MIN_PRE or len(n_post) < CORROBORATE_MIN_POST:
+            continue
+        rate = sum(1 for cl in n_pre if target in cl) / float(len(n_pre))
+        hits = sum(1 for cl in n_post if target in cl)
+        if best is None or rate > best["rate"]:
+            best = {"partner": partner, "rate": round(rate, 3),
+                    "pre_clusters": len(n_pre), "post_clusters": len(n_post),
+                    "post_hits": hits}
+    if best is None or best["rate"] < CORROBORATE_MIN_RATE:
+        return {"testable": False, "best_rate": best["rate"] if best else None,
+                "partner": best["partner"] if best else None,
+                "verdict": ("cannot be tested by co-firing - no partner camera "
+                            "shares enough of this view (best historical "
+                            "co-fire rate %s)" %
+                            ("%.1f%%" % (100 * best["rate"]) if best else "none"))}
+    # P(observing zero co-fires | the camera still works at its historical rate).
+    # This doubles as the test's POWER: if it is not small even at zero hits,
+    # the test could not have detected a break, and no reassuring conclusion may
+    # be drawn from silence. Reporting "consistent with a quiet area" from an
+    # underpowered test is the exact false-all-clear this whole discriminator
+    # exists to remove, so an underpowered result is reported as inconclusive.
+    p = (1.0 - best["rate"]) ** best["post_clusters"]
+    powered = p < CORROBORATE_P
+    broken = best["post_hits"] == 0 and powered
+    best["p_value"] = float("%.2g" % p)
+    best["testable"] = True
+    best["powered"] = powered
+    best["broken"] = broken
+    if broken:
+        best["verdict"] = (
+            "EVENT PATH BROKEN (proof): %s co-fired with this camera in %.1f%% "
+            "of its motion clusters historically (%d/%d), and in %d of %d since "
+            "this camera went quiet - P(that | still working) = %.1g. The scene "
+            "is demonstrably active; this camera is not reporting it."
+            % (best["partner"], 100 * best["rate"],
+               int(round(best["rate"] * best["pre_clusters"])), best["pre_clusters"],
+               best["post_hits"], best["post_clusters"], p))
+    elif not powered:
+        best["testable"] = False
+        best["verdict"] = (
+            "inconclusive - the only partner sharing this view (%s, %.1f%% "
+            "historically) has produced just %d clusters since this camera went "
+            "quiet; even total silence would only reach P=%.2g, so this test "
+            "cannot distinguish a quiet area from a broken event path"
+            % (best["partner"], 100 * best["rate"], best["post_clusters"], p))
+    else:
+        best["verdict"] = (
+            "consistent with a quiet area - %s co-fires %.1f%% historically and "
+            "this camera still appeared in %d of %d of its clusters since"
+            % (best["partner"], 100 * best["rate"], best["post_hits"],
+               best["post_clusters"]))
+    return best
+
+
 def emit(payload):
     base = {
         "stale": [],
@@ -64,6 +200,8 @@ def emit(payload):
         "visual_localized_count": None,
         "applied_window": None,
         "verdicts": None,
+        "corroboration": None,
+        "vision_blind": None,
         "oldest_cam": None,
         "oldest_hours": None,
         "hours_since": None,
@@ -93,19 +231,33 @@ def main():
         "GROUP BY m.entity_id" % placeholders
     )
     # COALESCE to the cutoff so a gap that STRADDLES the lookback edge is
-    # truncated to the visible part rather than dropped: without it the first row
-    # inside the window has no LAG partner, so an outage still running at the
-    # boundary - and every outage longer than the lookback - reported nothing.
+    # truncated to the visible part rather than dropped entirely: without it the
+    # first row inside the window has no LAG partner, so an outage still running
+    # at the boundary - and every outage longer than the lookback - reported
+    # nothing at all, which is the exact blindness this field exists to remove.
     gap_sql = (
         "SELECT MAX(gap) FROM (SELECT last_updated_ts - "
         "COALESCE(LAG(last_updated_ts) OVER (ORDER BY last_updated_ts), ?) "
         "AS gap FROM states WHERE last_updated_ts > ?)"
     )
+    # Every motion ON row over the corroboration window, for the co-firing test.
+    ev_sql = (
+        "SELECT s.last_updated_ts, m.entity_id "
+        "FROM states s JOIN states_meta m ON s.metadata_id = m.metadata_id "
+        "WHERE m.entity_id IN (%s) AND s.state = 'on' AND s.last_updated_ts > ? "
+        "ORDER BY s.last_updated_ts" % placeholders
+    )
     host_gap_min = None
+    motion_events = []
     try:
         conn = sqlite3.connect("file:%s?mode=ro" % DB, uri=True, timeout=QUERY_TIMEOUT_S)
         try:
             rows = conn.execute(sql, list(entities.keys())).fetchall()
+            ev_cut = time.time() - CORROBORATE_LOOKBACK_D * 86400
+            motion_events = [
+                (float(t), entities[e]) for t, e in
+                conn.execute(ev_sql, list(entities.keys()) + [ev_cut]).fetchall()
+            ]
             cutoff = time.time() - HOST_GAP_LOOKBACK_H * 3600
             g = conn.execute(gap_sql, (cutoff, cutoff)).fetchone()
             if g and g[0] is not None:
@@ -150,14 +302,14 @@ def main():
     # A bare "the vision log is non-empty" test has NO discriminating power: an
     # outdoor scene guarantees entries via sun, shadow and IR transitions, so
     # every stale outdoor camera reads "suspect" no matter its true state. Two
-    # filters give the test something to discriminate ON:
+    # filters give the test something to actually discriminate ON:
     #   1. CO-CHANGE REJECTION. A sample where several cameras change at once is
-    #      a global event - a lighting/IR transition, a cloud shadow, or the first
-    #      frame after a restart (which has no valid prior frame and so registers
-    #      on EVERY camera simultaneously). Only changes LOCALIZED to this camera
-    #      are evidence about this camera.
-    #   2. MULTIPLICITY. One surviving sample is noise; an active scene produces
-    #      several.
+    #      a global event - a lighting/IR transition, a passing cloud shadow, or
+    #      the first frame after a restart (which has no valid prior frame and so
+    #      registers on EVERY camera simultaneously). Only changes that are
+    #      LOCALIZED to this camera are evidence about this camera.
+    #   2. MULTIPLICITY. One surviving sample is noise; a scene that is genuinely
+    #      active produces several.
     CO_CHANGE_WINDOW_S = 180.0  # events this close together across cameras...
     CO_CHANGE_MIN = 3           # ...on this many cameras = global, not localized
     MIN_VISUAL_EVENTS = 2       # localized changes needed before calling it active
@@ -170,9 +322,24 @@ def main():
         vs, vision_age_min = {}, None
 
     # An unusable vision sample must publish None, never a measured-looking 0:
-    # a 0 count reads as "we looked and found nothing changing", the reassuring
-    # direction, when the truth is "we could not look at all".
+    # a 0 count reads as "we looked and found nothing changing", which is the
+    # reassuring direction, when the truth is "we could not look at all".
     vision_ok = vision_age_min is not None and vision_age_min <= VISION_STALE_MIN
+    # PER-CAMERA freshness. The file's mtime only says the MONITOR ran; it is
+    # rewritten every cycle even for a camera whose fetch failed, so a global
+    # gate cannot separate "we looked and the scene was quiet" from "we could
+    # not look at this camera at all" - and both landed on the reassuring
+    # branch. cam_vision.py now stamps probe_ts per camera on a successful
+    # sample only; a camera without a fresh stamp gets NO verdict.
+    VISION_BLIND_MIN = 15.0
+    cam_probe_age = {}
+    for cam in CAMS:
+        pts = (vs.get(cam) or {}).get("probe_ts") if vision_ok else None
+        cam_probe_age[cam] = round((now - float(pts)) / 60.0, 1) if pts else None
+    vision_blind = sorted(
+        c for c in CAMS
+        if vision_ok and (cam_probe_age[c] is None or cam_probe_age[c] > VISION_BLIND_MIN)
+    )
     raw_log = {cam: sorted((vs.get(cam) or {}).get("log") or []) for cam in CAMS}
     visual_hours, localized_hours, localized_count = {}, {}, {}
     for cam in CAMS:
@@ -197,6 +364,14 @@ def main():
         if vision_age_min is None or vision_age_min > VISION_STALE_MIN:
             age = "missing" if vision_age_min is None else "%.0f min old" % vision_age_min
             verdicts[cam] = "visual monitor not reporting (state %s) - no verdict" % age
+        elif cam in vision_blind:
+            # Reaching the "quiet area" branch from an empty log would be a
+            # false all-clear: the log is empty because this camera was never
+            # successfully sampled, not because its scene was still.
+            seen_ago = ("never" if cam_probe_age[cam] is None
+                        else "%.0f min ago" % cam_probe_age[cam])
+            verdicts[cam] = ("visual monitor could not SEE this camera (last "
+                             "successful frame %s) - no verdict" % seen_ago)
         elif loc_n >= MIN_VISUAL_EVENTS and loc_h is not None:
             verdicts[cam] = ("%d localized scene changes in the last %.0fh (most "
                              "recent %.1fh ago) with no motion event - "
@@ -212,11 +387,30 @@ def main():
                              "shorter than the stale span) - consistent with a "
                              "quiet area" % VISION_KEEP_H)
 
-    oldest_cam = max(seen, key=lambda c: seen[c])
+    # CORROBORATION. Run for every stale camera. This is stronger evidence than
+    # frame-differencing and is reported first by the alert, but it is only
+    # available where a partner camera shares enough of the view - where it is
+    # not, it says so rather than falling back on a reassuring guess.
+    corroboration = {}
+    for cam in stale:
+        ts = last.get(cam)
+        if ts is None:
+            corroboration[cam] = {
+                "testable": False,
+                "verdict": "never seen in the recorder - no baseline to test against",
+            }
+            continue
+        try:
+            corroboration[cam] = corroborate(motion_events, cam, float(ts))
+        except Exception as exc:  # noqa: BLE001 - an annotation must never fail the sensor
+            corroboration[cam] = {"testable": False,
+                                  "verdict": "corroboration failed: %s" % exc}
+
     # The card used to print the DEFAULT window even when a per-camera override
-    # was the one actually applied, making the excursion look far worse than it
-    # was (e.g. "151h vs 72h" when the applied window was 120h).
+    # was the one actually applied, which made the excursion look far worse than
+    # it was (e.g. "151h vs 72h" when the applied window was 120h).
     applied_window = {c: STALE_HOURS_OVERRIDES.get(c, STALE_HOURS) for c in CAMS}
+    oldest_cam = max(seen, key=lambda c: seen[c])
     if stale:
         summary = "%d stale (%s); oldest %s %.1fh" % (
             len(stale),
@@ -227,6 +421,9 @@ def main():
         summary = "0 stale; oldest %s %.1fh" % (oldest_cam, seen[oldest_cam])
     if not fleet_active:
         summary = "fleet quiet (no motion anywhere in %.0fh) - staleness not evaluated" % FLEET_ACTIVE_HOURS
+    proven = sorted(c for c, v in corroboration.items() if v.get("broken"))
+    if proven:
+        summary = "EVENT PATH BROKEN: %s | %s" % (", ".join(proven), summary)
     if host_gap_min and host_gap_min > 15.0:
         summary = ("HOST WAS DOWN %.0f min in the last %.0fh | " %
                    (host_gap_min, HOST_GAP_LOOKBACK_H)) + summary
@@ -244,6 +441,8 @@ def main():
         "visual_localized_count": localized_count,
         "applied_window": applied_window,
         "verdicts": verdicts,
+        "corroboration": corroboration,
+        "vision_blind": vision_blind,
         "summary": summary,
     })
 

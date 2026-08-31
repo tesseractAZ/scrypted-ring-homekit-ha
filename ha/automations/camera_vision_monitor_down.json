@@ -1,0 +1,84 @@
+{
+  "alias": "Cameras - vision monitor down",
+  "description": "Dead-man for the frame-differencing visual monitor (sensor.camera_visual_activity). Added 2026-08-30. Until now this was the ONLY monitor of the four with no dead-man, no derived binary_sensor and no availability guard - grep for camera_visual_activity across all 35 automations returned zero. That mattered because its most likely failure is not a crash but going BLIND while still running: cam_vision.py rewrites its state file every cycle regardless, and cam_motion.py used that file's mtime as its only freshness gate, so a camera nobody could actually see read as a camera that was quiet - the reassuring branch. The one signal that might have caught the monitor stopping (cam_flap's probe_shortfall) was calibrated for a single prober while two sensors probe the same endpoints, so cam_vision dying merely halved the probe stream to a level still above the bar. Fires on death OR on any camera going unseen for 15+ min; re-asserts hourly (:29) as a restart-wipe guard.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.camera_vision_monitor_problem",
+      "to": "on",
+      "for": {
+        "minutes": 30
+      },
+      "id": "dead"
+    },
+    {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
+    },
+    {
+      "platform": "time_pattern",
+      "minutes": "29",
+      "id": "reassert"
+    }
+  ],
+  "conditions": [
+    {
+      "condition": "or",
+      "conditions": [
+        {
+          "condition": "state",
+          "entity_id": "binary_sensor.camera_vision_monitor_problem",
+          "state": "on",
+          "for": {
+            "minutes": 30
+          }
+        },
+        {
+          "condition": "state",
+          "entity_id": "sensor.camera_visual_activity",
+          "state": [
+            "unavailable",
+            "unknown",
+            "-1"
+          ],
+          "for": {
+            "minutes": 30
+          }
+        }
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "action": "persistent_notification.create",
+      "data": {
+        "notification_id": "camera_vision_monitor_down",
+        "title": "📷 Camera vision monitor degraded",
+        "message": "The frame-differencing visual monitor has been degraded for 30+ min (state: {{ states('sensor.camera_visual_activity') }}). While it is down, every per-camera staleness verdict falls back to \"no verdict\" rather than silently reading as a quiet area - that guard is deliberate. Summary: {{ state_attr('sensor.camera_visual_activity','summary') or 'attributes wiped' }}. Cameras not seen: {{ state_attr('sensor.camera_visual_activity','blind') or 'n/a' }}. Cross-camera corroboration in cam_motion.py is unaffected and still works. {{ now().strftime('%b %-d %-I:%M %p') }}."
+      }
+    },
+    {
+      "choose": [
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{{ trigger.id != 'reassert' }}"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "notify.<your_mobile_app_target>",
+              "data": {
+                "title": "📷 Camera vision monitor degraded",
+                "message": "{{ state_attr('sensor.camera_visual_activity','summary') or 'vision monitor not reporting' }}"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "mode": "single"
+}

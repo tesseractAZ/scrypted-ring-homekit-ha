@@ -22,6 +22,8 @@ command_line:
         - fleet_active
         - visual_hours
         - verdicts
+        - corroboration
+        - vision_blind
         - summary
         - error
         - host_gap_min

@@ -1,0 +1,24 @@
+{
+  "alias": "Cameras - vision monitor recovered",
+  "description": "Dismisses the vision-monitor card once the monitor is healthy again and every camera is being seen. Dismiss-only, no recovery notification (same churn-avoidance pattern as the other recovery automations). Added 2026-08-30.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.camera_vision_monitor_problem",
+      "to": "off",
+      "for": {
+        "minutes": 30
+      }
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "action": "persistent_notification.dismiss",
+      "data": {
+        "notification_id": "camera_vision_monitor_down"
+      }
+    }
+  ],
+  "mode": "single"
+}

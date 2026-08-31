@@ -19,5 +19,27 @@ command_line:
         - ir_mode
         - max_norm_diff
         - active_count
+        - probe_age_min
+        - blind
+        - blind_count
         - summary
         - error
+
+# cam_vision was the ONLY monitor with no dead-man and no availability guard, so
+# it could die and nothing anywhere would say so — while cam_motion.py's verdict
+# for every stale camera silently degraded to the reassuring branch. The one
+# signal that might have caught it (cam_flap's probe_shortfall) was calibrated
+# for a single prober, so cam_vision stopping merely halved the probe stream to
+# a level still above the bar. This binary_sensor is the dead-man's input.
+template:
+  - binary_sensor:
+      - name: Camera vision monitor problem
+        unique_id: camera_vision_monitor_problem
+        device_class: problem
+        state: >-
+          {{ states('sensor.camera_visual_activity') in ['unknown','unavailable','-1']
+             or state_attr('sensor.camera_visual_activity','error') is not none
+             or (state_attr('sensor.camera_visual_activity','blind_count') | int(0)) > 0 }}
+        attributes:
+          summary: "{{ state_attr('sensor.camera_visual_activity','summary') }}"
+          blind: "{{ state_attr('sensor.camera_visual_activity','blind') }}"

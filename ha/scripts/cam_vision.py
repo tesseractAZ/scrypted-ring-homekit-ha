@@ -13,8 +13,11 @@ Method (deliberately boring): grayscale, downscale to 48x30, split into an
 frame, then subtract the MEDIAN block difference (removes uniform lighting
 shifts). A "visual change" needs >= MIN_BLOCKS hot blocks (localized, like a
 person) but <= MAX_FRACTION of the grid (a scene-wide delta is sun/clouds/
-exposure, not motion). IR/day-night transitions are detected via mean
-saturation and reset the baseline instead of comparing across modes.
+exposure, not motion). Each camera is classified into one of THREE exposure
+regimes every sample (see SAT_IR / LUMA_DARK below) and keeps a SEPARATE
+baseline frame and noise estimate per regime, so a regime flip costs nothing:
+the frame is compared against the last frame in the SAME regime rather than
+across two different exposures. Nothing is reset on a flip.
 
 Honest limitations: samples every ~2 min, so brief walk-throughs can fall
 between frames — absence of visual change over hours is strong evidence of
@@ -50,15 +53,15 @@ except Exception:
 
 HOST = "<HA_HOST_IP>:11080"
 CAMS = [
-    ("<cam_1>", "<device_id>", "<webhook_token>"),
-    ("<cam_2>", "<device_id>", "<webhook_token>"),
-    ("<cam_3>", "<device_id>", "<webhook_token>"),
-    ("<cam_4>", "<device_id>", "<webhook_token>"),
-    ("<cam_5>", "<device_id>", "<webhook_token>"),
-    ("<cam_6>", "<device_id>", "<webhook_token>"),
-    ("<cam_7>", "<device_id>", "<webhook_token>"),
-    ("<cam_8>", "<device_id>", "<webhook_token>"),
-    ("<cam_9>", "<device_id>", "<webhook_token>"),
+    ("<cam_1>", "28", "<webhook_token>"),
+    ("<cam_2>", "29", "<webhook_token>"),
+    ("<cam_3>", "30", "<webhook_token>"),
+    ("<cam_4>", "31", "<webhook_token>"),
+    ("<cam_5>", "34", "<webhook_token>"),
+    ("<cam_6>", "38", "<webhook_token>"),
+    ("<cam_7>", "41", "<webhook_token>"),
+    ("<cam_8>", "44", "<webhook_token>"),
+    ("<cam_9>", "47", "<webhook_token>"),
 ]
 
 STATE = "/config/.cam_vision_state.json"
@@ -71,40 +74,52 @@ GRID_X, GRID_Y = 8, 6          # 48 blocks of 6x5 px
 THRESH_FLOOR = 12.0            # never more sensitive than this
 THRESH_CAP = 60.0              # never less sensitive than this
 NOISE_K = 5.0                  # threshold = K x learned noise for this cam+mode
-SETTLE_SAMPLES = 2             # legacy; drained only, no longer armed on a flip
-BASELINE_MAX_AGE_S = 900.0     # PER-MODE BASELINE FRAMES. Previously ONE baseline
+SETTLE_SAMPLES = 2             # comparisons to skip when a mode has no usable
+                               # baseline yet (auto-exposure hunts for a frame or
+                               # two). NOT armed on a bare mode flip any more -
+                               # see BASELINE_MAX_AGE_S.
+BASELINE_MAX_AGE_S = 900.0     # PER-MODE BASELINE FRAMES. Previously one baseline
                                # was kept per camera, so every day<->IR flip
-                               # compared across two different exposures and had to
-                               # be blanked by the settle guard. On a camera whose
-                               # IR illuminator cycles every ~60s that blanked most
-                               # of its samples - it was effectively excluded from
-                               # the monitor (measured: 0 of 11 polls compared,
-                               # vs 9 of 11 after this change). One baseline PER
-                               # MODE makes a flip free: the frame is compared with
-                               # the last frame in the SAME mode. A baseline older
-                               # than this is discarded rather than compared.
+                               # compared across two different exposures and had
+                               # to be blanked by the settle guard. On a camera
+                               # whose IR illuminator cycles ~60s that blanked
+                               # ~57% of its samples - it was effectively excluded
+                               # from the monitor. Keeping one baseline PER MODE
+                               # lets a flip cost nothing: the frame is compared
+                               # against the last frame in the SAME mode. A
+                               # baseline older than this is discarded rather than
+                               # compared, since the scene has moved on.
 MIN_BLOCKS = 2                 # localized change needs at least this many hot blocks
 MAX_FRACTION = 0.7             # more than this fraction hot = global change, ignore
-# IR/day classification is keyed to mean LUMA, not saturation. Mean HSV
-# saturation is mathematically unstable at low luma - S=(max-min)/max as max->0 -
-# so a near-black frame can read sat~90 while a bright IR-illuminated frame reads
-# 0.00. A saturation threshold (and any hysteresis band over it) therefore cannot
-# separate the two populations: measured on a camera whose IR illuminator cycles
-# ~60s, mode flips ran at an identical rate before AND after a saturation
-# hysteresis band was added. Luma separates the same two cleanly.
-LUMA_IR_ENTER = 60.0           # mean luma below this = dark scene -> IR/night
-LUMA_IR_EXIT = 90.0            # ...above this = lit scene -> day. Between the two
-                               # the PREVIOUS mode holds, so a scene sitting near
-                               # the boundary cannot dither.
-SAT_IR_FALLBACK = 10.0         # only used to seed the very first sample
+# EXPOSURE-REGIME classification. Neither saturation nor luma alone is right:
+#   * A true IR-illuminated night frame is GRAYSCALE and BRIGHT (sat 0.00,
+#     luma ~95-124). Saturation identifies it correctly; luma alone calls it
+#     "day" and then blends real daylight and IR-night into one noise estimate,
+#     which collapses the daytime threshold (measured: one camera's day EMA fell
+#     9.55 -> 1.19 overnight, i.e. its daytime bar dropped ~48 -> the floor).
+#   * A camera whose IR illuminator is OFF gives a near-black COLOUR frame whose
+#     mean saturation is meaningless - S=(max-min)/max is unstable as max->0, so
+#     it reads ~92. Saturation alone calls that "day"; only luma identifies it.
+# So test BOTH, in the order that matches the physics: grayscale first (the
+# illuminator is on), then darkness (the illuminator is off), else daylight.
+# These are three genuinely different EXPOSURE REGIMES, and because each keeps
+# its own baseline frame and its own noise estimate, switching between them is
+# free - there is no need for hysteresis to suppress the switching itself.
+SAT_IR = 10.0                  # mean saturation below this = grayscale = IR on
+LUMA_DARK = 40.0               # ...else mean luma below this = unlit/near-black
 KEEP_HOURS = 48.0
 TIMEOUT = 12
+PROBE_BLIND_MIN = 15.0   # a camera not successfully probed in this long is
+                         # reported as BLIND rather than quiet. cam_motion.py
+                         # reads the same per-camera stamp to refuse a verdict.
 
 
 def emit(payload):
     base = {
         "hours_since_visual": None, "changes_24h": None, "ir_mode": None,
-        "max_norm_diff": None, "active_count": None, "summary": "", "error": None,
+        "max_norm_diff": None, "active_count": None,
+        "probe_age_min": None, "blind": None, "blind_count": None,
+        "summary": "", "error": None,
     }
     base.update(payload)
     print(json.dumps(base))
@@ -164,7 +179,7 @@ def main():
         results = list(ex.map(fetch, CAMS))
 
     hours, changes, irs, maxdiff = {}, {}, {}, {}
-    day_events = ir_events = 0
+    day_events = ir_events = dark_events = 0
     for name, body in results:
         prev = st.get(name, {})
         log = [t for t in prev.get("log", []) if now - t < KEEP_HOURS * 3600]
@@ -172,36 +187,45 @@ def main():
         noise = dict(prev.get("noise", {}))
         settle = int(prev.get("settle", 0))
         entry = {"log": log, "events": events, "noise": noise}
+        # Carry the previous successful-probe stamp forward by default; it is
+        # refreshed ONLY on a sample this camera was actually seen in. The state
+        # file's mtime says the MONITOR ran, not that this camera was reachable,
+        # so a per-camera stamp is the only thing that lets a reader tell "we
+        # looked and the scene was quiet" from "we could not look at all".
+        if prev.get("probe_ts") is not None:
+            entry["probe_ts"] = prev["probe_ts"]
         if body:
             try:
                 luma, sat, lum = analyze(body)
             except Exception:
                 luma, sat, lum = None, None, None
             if luma is not None:
-                prev_ir = prev.get("ir")
-                if lum < LUMA_IR_ENTER:
-                    is_ir = True
-                elif lum > LUMA_IR_EXIT:
-                    is_ir = False
-                elif prev_ir is not None:
-                    is_ir = prev_ir           # inside the band: hold previous mode
+                if sat < SAT_IR:
+                    mode = "ir"        # grayscale: IR illuminator on
+                elif lum < LUMA_DARK:
+                    mode = "dark"      # colour but near-black: illuminator off
                 else:
-                    is_ir = sat < SAT_IR_FALLBACK   # first ever sample
-                mode = "ir" if is_ir else "day"
+                    mode = "day"       # lit scene
+                is_ir = mode != "day"
                 # frames = {mode: [b64_luma, ts]} - one baseline per exposure mode.
                 frames = dict(prev.get("frames") or {})
                 if not frames and prev.get("frame"):
-                    # Migrate the legacy single baseline as ALREADY EXPIRED: its
-                    # true age and capture mode are both unknown, so comparing
-                    # against it would be a cross-mode comparison of unknown age.
+                    # migrate the old single-baseline schema into this mode's slot
+                    # Stamp the migrated legacy frame as ALREADY EXPIRED: its true
+                    # age and its capture mode are both unknown (no "frame_ts" key
+                    # was ever written), so comparing against it would be a
+                    # cross-mode comparison of unknown age. Seed the slot instead
+                    # and let the next poll produce the first honest comparison.
                     frames[mode] = [prev["frame"], now - BASELINE_MAX_AGE_S - 1.0]
                 base = frames.get(mode)
                 old = None
                 if base and (now - float(base[1])) <= BASELINE_MAX_AGE_S:
                     old = base[0]
-                # With like-for-like comparison there is nothing to settle: a flip
-                # no longer costs a comparison. `settle` is only drained so state
-                # written by the previous schema finishes cleanly.
+                # With like-for-like (same-mode) comparison there is nothing to
+                # settle: a flip no longer costs a comparison. If this mode has no
+                # usable baseline we simply seed it and compare on the next poll.
+                # `settle` is only drained here so state written by the previous
+                # schema finishes cleanly.
                 if settle > 0:
                     settle -= 1
                 elif old is not None:
@@ -229,10 +253,12 @@ def main():
                             ema_new = 0.9 * ema + 0.1 * max(peak, 0.0)
                             noise[mode] = round(min(ema_new, max(ema * 1.15, 0.5)), 2)
                 frames[mode] = [base64.b64encode(luma).decode(), now]
+                # drop any mode baseline that has aged out, so state cannot grow
                 frames = {m: v for m, v in frames.items()
                           if (now - float(v[1])) <= BASELINE_MAX_AGE_S * 4}
                 entry["frames"] = frames
                 entry["frame"] = frames[mode][0]   # back-compat for readers
+                entry["probe_ts"] = now            # this camera WAS seen
                 entry["ir"] = is_ir
                 entry["settle"] = settle
                 entry["noise"] = noise
@@ -240,12 +266,19 @@ def main():
                 entry.update({k: prev[k] for k in ("frame", "frames", "ir", "settle") if k in prev})
         else:
             # A failed FETCH must carry the per-mode baselines forward exactly as
-            # the failed-ANALYZE branch does; dropping "frames" here silently
-            # reverted the camera to the legacy single-baseline path on every miss.
+            # the failed-ANALYZE branch above does. Dropping "frames" here silently
+            # reverted the camera to the legacy single-baseline path, which then
+            # seeded the surviving frame into whichever mode the NEXT frame
+            # happened to be - i.e. it restored the cross-exposure comparison this
+            # release exists to remove, on every probe miss.
             entry.update({k: prev[k] for k in ("frame", "frames", "ir", "settle") if k in prev})
         st[name] = entry
         day_events += sum(1 for e in events if now - e[0] < 24 * 3600 and e[1] == "day")
         ir_events += sum(1 for e in events if now - e[0] < 24 * 3600 and e[1] == "ir")
+        # "dark" was added as a third regime without extending this tally, so
+        # its events were counted in changes_24h yet invisible in the summary
+        # line - measured 2026-08-30 as summary 84 against changes_24h 87.
+        dark_events += sum(1 for e in events if now - e[0] < 24 * 3600 and e[1] == "dark")
         last = max(log) if log else None
         hours[name] = round((now - last) / 3600.0, 1) if last else None
         changes[name] = len([t for t in log if now - t < 24 * 3600])
@@ -258,13 +291,24 @@ def main():
 
     active = sum(1 for v in hours.values() if v is not None and v < 24)
     quiet = sorted(n for n, v in hours.items() if v is None or v >= 24)
-    summary = "%d/%d cams visually active <24h (day %d / ir %d events)" % (
-        active, len(CAMS), day_events, ir_events)
+    summary = "%d/%d cams visually active <24h (day %d / ir %d%s events)" % (
+        active, len(CAMS), day_events, ir_events,
+        " / dark %d" % dark_events if dark_events else "")
     if quiet:
         summary += "; visually quiet: " + ",".join(quiet)
+    probe_age_min = {}
+    for name in [c[0] for c in CAMS]:
+        pts = st.get(name, {}).get("probe_ts")
+        probe_age_min[name] = round((now - float(pts)) / 60.0, 1) if pts else None
+    blind = sorted(n for n, v in probe_age_min.items()
+                   if v is None or v > PROBE_BLIND_MIN)
+    if blind:
+        summary += "; NOT SEEN >%.0fm: %s" % (PROBE_BLIND_MIN, ",".join(blind))
     emit({
         "hours_since_visual": hours, "changes_24h": changes, "ir_mode": irs,
-        "max_norm_diff": maxdiff, "active_count": active, "summary": summary,
+        "max_norm_diff": maxdiff, "active_count": active,
+        "probe_age_min": probe_age_min, "blind": blind, "blind_count": len(blind),
+        "summary": summary,
     })
 
 

@@ -18,19 +18,34 @@ before deploying (grep for `<` to find them).
 
 ## Deploy order
 
-1. **Fill placeholders.** `scripts/cam_health.py` needs the HA host IP plus each
-   camera's Scrypted device id and webhook token (how to obtain them:
-   [`docs/migration-runbook.md`](../docs/migration-runbook.md)).
+1. **Fill placeholders.** ALL FOUR scripts carry them — grep each for `<`.
+   `scripts/cam_health.py` and `scripts/cam_vision.py` each need the HA host IP
+   plus every camera's Scrypted device id and webhook token (how to obtain them:
+   [`docs/migration-runbook.md`](../docs/migration-runbook.md)); they probe the
+   same nine endpoints, so the two lists must match.
+   `scripts/cam_motion.py` needs the nine camera entity stems (it queries
+   `binary_sensor.<stem>_motion`) and, optionally, per-camera staleness
+   overrides and `EXCLUDE_SPANS` for any period your recorder was not writing.
    `scripts/cam_flap.py` needs: `<scrypted_addon_slug>` (visible in the add-on's
    URL in the HA UI, e.g. `xxxxxxxx_scrypted`); its `CAMS` dict keys must
    byte-match the camera names Scrypted prints in log brackets (`[Front Door]`);
-   `TP_PER_MIN` = camera_count ÷ probe_interval_minutes (the default 4.5 assumes
-   9 cameras probed every 120 s — recompute if either differs); and
+   `PROBE_INTERVAL_MIN` = the scan_interval of ONE probing sensor in minutes,
+   and `PROBERS` = how many sensors probe those endpoints on that interval
+   (2 as shipped: `cam_health.yaml` and `cam_vision.yaml` both run
+   `scan_interval: 120` against the identical URLs). Getting `PROBERS` wrong
+   halves the expected-probe denominator and silently detunes the
+   probe-shortfall detector by that factor; and
    `ALERT_HR_OVERRIDES` ships empty — add a raised threshold per known-chronic
    camera if you have one. `automations/front_door_doorbell_announce.json`
    needs your speaker and TTS entity ids.
    `automations/go2rtc_reload_on_start.json` needs the go2rtc config-entry id —
    find it with `GET /api/config/config_entries/entry` (filter `domain: go2rtc`).
+   Every fault alert also carries a `notify.<your_mobile_app_target>` action —
+   replace it with your own push target, or delete those steps if you only want
+   the in-UI cards. Leaving them unreplaced makes the automation error at run
+   time. Note the push steps are deliberately gated so that a re-assert (which
+   exists only to restore a card a restart erased) does not re-notify: only
+   genuinely new information reaches the device.
 2. **Snapshot first.** Take a full backup immediately before deploying, so a
    bad change is a restore rather than a reconstruction. Note that manual
    backups are usually **exempt** from the supervisor's automatic-backup
@@ -51,7 +66,7 @@ before deploying (grep for `<` to find them).
    [`docs/operations.md`](../docs/operations.md) §3 — deploy those three only
    after MQTT discovery is live, and replace their camera entity lists with
    your own (on an install where the sensors don't exist yet, the stale-motion
-   check reads as "no motion" and false-alarms at the next 15:00/18:00 check).
+   check reads as "no motion" and false-alarms at the next hourly check).
    For each JSON file:
    `POST /api/config/automation/config/<filename-without-extension>` with the
    file body. They take effect immediately, no restart.
@@ -66,7 +81,7 @@ before deploying (grep for `<` to find them).
 
 ## What each automation does
 
-- `camera_health_alert` — pages on a **sustained** fault only, three tiers:
+- `camera_health_alert` — pages on a **sustained** fault only, four tiers:
   camera down 8 min (fast); degraded (frozen/slow) 30 min — transient stream
   blips self-heal in under ~22 min and paging on them is pure noise; and
   fleet-stale 5 min (fastest) — multiple cameras returning byte-identical
@@ -109,8 +124,17 @@ before deploying (grep for `<` to find them).
   failure can't silence the other) + a persistent notification.
 - `cameras_motion_stale_alert` / `_clear` — fleet-wide dead-man's switch,
   checked hourly during active hours: if **zero** cameras report motion over
-  a rolling 4-hour window, the motion pipeline itself is down (a single quiet
-  camera is normal; a silent fleet is not). Catches the silent event-listener
+  a rolling 6-hour window, the motion pipeline itself is down (a single quiet
+  camera is normal; a silent fleet is not). Fit that window to your own fleet's
+  occupied data, not to intuition — on this one, 456 inter-event gaps over ten
+  occupied days gave p50 0.04 h, p95 2.41 h, p99 6.45 h and a max of 8.46 h, so
+  a 4-hour threshold fired on 4.0% of in-window checks (about one page every
+  2.5 days) and every firing observed resolved itself with no intervention.
+  Note two structural limits: it tests the **minimum** staleness across the
+  fleet, so any one healthy camera suppresses it entirely — it can only ever
+  catch a *total* pipeline outage, never a single camera — and the active-hours
+  gate leaves it un-evaluable for the rest of the day. Per-camera failure is
+  `camera_motion_dead_alert`'s job. Catches the silent event-listener
   wedge described in `docs/operations.md` §3. The condition reads the
   staleness sensor's **recorder-derived** `hours_since` map, NOT entity
   `last_changed`: last_changed resets on every restart (blinding the check
@@ -127,6 +151,19 @@ before deploying (grep for `<` to find them).
   the monitor's clock). Also carries a tripwire on cloud push-decryption
   failures - each one is a dropped motion push; a sustained climb means the
   event transport is degrading and the camera-source plugin needs re-auth.
+- `camera_vision_monitor_down` / `_recovered` — dead-man for the visual monitor.
+  It was the only one of the four without one, which mattered because its most
+  likely failure is not a crash but going **blind while still running**:
+  `cam_vision.py` rewrites its state file every cycle regardless of whether any
+  given camera answered, and `cam_motion.py` used that file's mtime as its only
+  freshness gate — so a camera nobody could actually see read downstream as a
+  camera that was quiet, the reassuring direction. `cam_vision.py` now stamps a
+  per-camera `probe_ts` on successful samples only, publishes `probe_age_min`
+  and `blind`, and `cam_motion.py` refuses a verdict for any camera it could not
+  see. Do not rely on the stream-fault monitor to notice the visual monitor
+  dying: both scripts probe the same endpoints, so `PROBERS` must be set to 2 or
+  cam_vision stopping merely halves the probe count to a level still above the
+  shortfall bar.
 - `camera_host_down_alert` / `_recovered` — reports an outage of the HOST, after
   the fact. Every monitor here is a process inside the thing it monitors, so a
   host-down event raises nothing at all while it is happening: the monitor
@@ -149,7 +186,23 @@ before deploying (grep for `<` to find them).
   can mean a genuinely unvisited area, disabled/zoned-out motion detection in
   the camera app, or a dead event-push path — a walk-test discriminates, and
   under a 24/7-recording plan the camera records continuously regardless.
-  The staleness page carries an AUTOMATED discriminator: `cam_vision.py`
+  The staleness page carries TWO automated discriminators, printed strongest
+  first. **Cross-camera corroboration** is the decisive one: cameras that share
+  a sight-line co-fire at a stable rate, and that rate is a real test of one
+  camera's event path, computable from motion rows already in the recorder — no
+  walk test, no new hardware, no physical access. For a stale camera it measures
+  how often each partner's motion clusters historically contained the target,
+  then counts how often they have since it went quiet; zero out of enough
+  opportunities is a proof. On this fleet it identified a genuinely broken
+  camera at P = 2e-08 (a partner that co-fired in 42.6% of its clusters
+  historically produced 32 clusters with zero co-fires afterwards, while a
+  different partner's share of the same clusters rose to 100% — so the scene was
+  demonstrably *more* active, not quiet). Crucially it also reports its own
+  power: a camera with no high-rate partner (a spatially isolated view, an
+  interior room) returns "cannot be tested", and a partner too sparse to reach
+  significance returns "inconclusive" with the p-value it could have reached.
+  It never converts weak evidence into an all-clear. Second, and weaker:
+  `cam_vision.py`
   compares each camera's snapshots over time (block-based frame differencing,
   lighting-normalized, IR-aware) and the alert states whether the scene has
   visibly changed without events (detection/event path suspect) or not changed
@@ -177,5 +230,10 @@ before deploying (grep for `<` to find them).
   threshold while latched would otherwise never page; recreating the same
   notification_id is idempotent, so the re-assert adds no churn.
 
-As shipped, alerts use `persistent_notification` (HA notification center) —
-swap in your `notify.*` service of choice (e.g. mobile push) in the JSON.
+Every fault alert writes a `persistent_notification` (the HA notification
+centre) **and** sends a push via `notify.<your_mobile_app_target>`. Both matter:
+persistent notifications are in-memory, so a restart erases every card with the
+fault still latched — which is why each alert also carries a re-assert trigger —
+and they are only visible to someone with the HA UI open, which is no use to an
+operator who is away from the property. The push steps are gated to fire on new
+information only, never on a re-assert.

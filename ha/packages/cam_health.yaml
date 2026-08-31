@@ -3,7 +3,7 @@
 # stale cached 200 on failure). Automations are storage-managed (created via API).
 # v3: fast freeze detection (byte-identical frame for N consecutive probes, ~10 min
 # vs the old 2h) + slow-snapshot flag — catches a wedged camera that returns a
-# stale-but-valid 200 JPEG (a stale-cache failure the old logic missed).
+# stale-but-valid 200 JPEG (the <cam_3> failure the old logic missed).
 # v4: fleet-stale fast indicator — a MAJORITY (>=5) of cameras byte-identical to their previous
 # probe simultaneously (healthy cams re-frame every probe; Ring dedupe tops out ~30s
 # << the 120s cadence) => snapshot pipeline is

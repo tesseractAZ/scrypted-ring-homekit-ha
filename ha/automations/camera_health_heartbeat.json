@@ -1,23 +1,28 @@
 {
- "id": "camera_health_heartbeat",
- "alias": "Cameras - daily heartbeat",
- "triggers": [
-  {
-   "platform": "time",
-   "at": "08:00:00"
-  }
- ],
- "conditions": [],
- "actions": [
-  {
-   "data": {
-    "notification_id": "camera_health_status",
-    "title": "\ud83d\udcf7 Camera health",
-    "message": "Snapshot probes: {{ states('sensor.camera_health') }}/9 OK \u2014 {{ state_attr('sensor.camera_health','summary') }}\nMotion events: {% if state_attr('sensor.camera_motion_stale','stale_count') is none %}motion monitor not reporting{% else %}{% set sc = state_attr('sensor.camera_motion_stale','stale_count')|int(0) %}{% set st = state_attr('sensor.camera_motion_stale','stale') or [] %}{{ sc }} camera(s) beyond their staleness window{% if st %} ({{ st|join(', ') }}){% endif %}{% endif %}\nStream faults: {{ state_attr('sensor.camera_flap_rate','summary') or 'flap monitor not reporting' }}\n\nDaily check {{ now().strftime('%b %-d, %-I:%M %p') }}."
-   },
-   "action": "persistent_notification.create"
-  }
- ],
- "mode": "single",
- "description": "Daily proactive status card. Sourced from ALL THREE monitors - the 2026-08-13 card said '9/9 healthy' from the snapshot probe alone while a camera stood 185h past its motion-staleness window on the same panel. 'Probes OK' is the honest claim: the probe measures the snapshot path, not motion-event delivery."
+  "alias": "Cameras - daily heartbeat",
+  "description": "Daily proactive status card. Sourced from ALL THREE monitors - the 2026-08-13 card said '9/9 healthy' from the snapshot probe alone while a camera stood 185h past its motion-staleness window on the same panel. 'Probes OK' is the honest claim: the probe measures the snapshot path, not motion-event delivery. 2026-08-30: now sourced from ALL FOUR monitors (cam_vision was missing entirely, and it is the one with no dead-man). Each line carries its own NOT REPORTING fallback. The motion guard used to test stale_count is none, but cam_motion.py's fail() path leaves stale_count at 0, so a monitor that had just failed rendered as the affirmative all-clear \"0 camera(s) beyond their staleness window\"; it now tests error and hours_since, which do go null on that path. A BOOT TRIGGER was added because a bare 08:00 time trigger means any restart after 08:00 erases the only proactive positive signal for the rest of the day, and its absence is indistinguishable from a healthy fleet - it went silently missing on 3 of the 7 days to 2026-08-30.",
+  "triggers": [
+    {
+      "platform": "time",
+      "at": "08:00:00",
+      "id": "daily"
+    },
+    {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "data": {
+        "notification_id": "camera_health_status",
+        "title": "📷 Camera health",
+        "message": "Snapshot probes: {% if states('sensor.camera_health') in ['unknown', 'unavailable', '-1'] %}PROBE MONITOR NOT REPORTING (state {{ states('sensor.camera_health') }}){% else %}{{ states('sensor.camera_health') }}/9 OK — {{ state_attr('sensor.camera_health','summary') }}{% endif %}\nMotion events: {% if state_attr('sensor.camera_motion_stale','error') is not none or state_attr('sensor.camera_motion_stale','hours_since') is none %}MOTION MONITOR NOT REPORTING ({{ state_attr('sensor.camera_motion_stale','error') or 'no data' }}){% else %}{% set sc = state_attr('sensor.camera_motion_stale','stale_count')|int(0) %}{% set st = state_attr('sensor.camera_motion_stale','stale') or [] %}{{ sc }} camera(s) beyond their staleness window{% if st %} ({{ st|join(', ') }}){% endif %}{% endif %}\nVisual monitor: {% if state_attr('sensor.camera_visual_activity','error') is not none or state_attr('sensor.camera_visual_activity','probe_age_min') is none %}VISION MONITOR NOT REPORTING{% else %}{{ state_attr('sensor.camera_visual_activity','summary') }}{% endif %}\nStream faults: {% if state_attr('sensor.camera_flap_rate','error') is not none or state_attr('sensor.camera_flap_rate','summary') is none %}FLAP MONITOR NOT REPORTING{% else %}{{ state_attr('sensor.camera_flap_rate','summary') }}{% endif %}\n{% set corr = state_attr('sensor.camera_motion_stale','corroboration') or {} %}{% set broke = corr.items() | selectattr('1.broken', 'defined') | selectattr('1.broken') | map(attribute='0') | list %}{% if broke %}PROVEN EVENT-PATH FAILURE: {{ broke | join(', ') }}\n{% endif %}Daily check {{ now().strftime('%b %-d, %-I:%M %p') }}."
+      },
+      "action": "persistent_notification.create"
+    }
+  ],
+  "mode": "single"
 }

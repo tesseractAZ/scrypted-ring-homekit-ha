@@ -24,11 +24,14 @@ command_line:
         - stream_errors
         - push_drops
         - push_drop_rate
+        - push_undecryptable
+        - push_undecryptable_rate
         - probe_counts
         - probe_shortfall
         - flapping
         - flap_count
         - worst
+        - worst_rate
         - summary
         - error
 

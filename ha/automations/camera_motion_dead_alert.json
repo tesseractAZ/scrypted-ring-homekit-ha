@@ -1,50 +1,70 @@
 {
- "id": "camera_motion_dead_alert",
- "alias": "Cameras - single camera motion dead",
- "description": "Pages when a camera has reported no motion EVENTS beyond its own staleness window while the rest of the fleet is active. REWORKED 2026-08-27. Three triggers: the onset edge; a change to the STALE SET (so an additional camera crossing its threshold raises a genuinely new card instead of silently rewriting an existing one); a boot trigger (neither the onset edge nor a set-change can fire at startup, so without it a restart-wiped card took up to the full re-assert period to return) and a slow 2-hourly re-assert purely to restore a card wiped by a restart. The re-assert used to run HOURLY, which produced 260 identical recreations against 3 real state transitions in 26 days and trained the reader to ignore the channel - behind 50 identical pages sat one genuinely broken camera and one physically misaimed one. The condition now reads the recorder-derived stale_count instead of the template entity's last_changed, so a restart no longer disarms it for the first hour. Read the page as an observation, not a verdict: under a 24/7-recording plan the camera still records to the cloud regardless.",
- "triggers": [
-  {
-   "platform": "state",
-   "entity_id": "binary_sensor.camera_motion_stale",
-   "to": "on",
-   "for": {
-    "hours": 1
-   },
-   "id": "onset"
-  },
-  {
-   "platform": "state",
-   "entity_id": "sensor.camera_motion_stale",
-   "attribute": "stale",
-   "id": "setchange"
-  },
-  {
-   "platform": "homeassistant",
-   "event": "start",
-   "id": "boot"
-  },
-  {
-   "platform": "time_pattern",
-   "hours": "/2",
-   "minutes": "23",
-   "id": "reassert"
-  }
- ],
- "conditions": [
-  {
-   "condition": "template",
-   "value_template": "{{ (state_attr('sensor.camera_motion_stale','stale_count')|int(0)) > 0 }}"
-  }
- ],
- "actions": [
-  {
-   "data": {
-    "notification_id": "camera_motion_dead",
-    "title": "\ud83d\udcf7 No motion events: {% set st = state_attr('sensor.camera_motion_stale','stale') or [] %}{{ st | join(', ') if st else 'none' }}",
-    "message": "{{ state_attr('sensor.camera_motion_stale','summary') }}\n\nQuiet beyond window: {% set st = state_attr('sensor.camera_motion_stale','stale') or [] %}{% set aw = state_attr('sensor.camera_motion_stale','applied_window') or {} %}{% set hs = state_attr('sensor.camera_motion_stale','hours_since') or {} %}{{ st | join(', ') }}\n\nAUTOMATED DISCRIMINATOR (frame differencing, no walk test needed):\n{% for k, v in (state_attr('sensor.camera_motion_stale','verdicts') or {}).items() %}{{ '- %s: %s\\n' % (k, v) }}{% endfor %}\nPer-camera detail (event age vs its OWN applied window):\n{% for k in st %}{{ '- %s: %sh silent, window %sh, localized visual changes %s\\n' % (k, hs.get(k), aw.get(k), (state_attr('sensor.camera_motion_stale','visual_localized_count') or {}).get(k)) }}{% endfor %}\n'Localized' excludes scene changes that fired on several cameras at once (lighting transitions, cloud shadow, or the first frame after a restart) - those say nothing about one camera. A verdict of 'suspect' means check that camera's motion settings/zones in the Ring app first. This measures motion EVENTS reaching HA; the camera records to the cloud regardless. {{ now().strftime('%b %-d %-I:%M %p') }}."
-   },
-   "action": "persistent_notification.create"
-  }
- ],
- "mode": "single"
+  "alias": "Cameras - single camera motion dead",
+  "description": "Pages when a camera has reported no motion EVENTS beyond its own staleness window while the rest of the fleet is active. REWORKED 2026-08-27. Three triggers: the onset edge; a change to the STALE SET (so an additional camera crossing its threshold raises a genuinely new card instead of silently rewriting an existing one); a boot trigger (neither the onset edge nor a set-change can fire at startup, so without it a restart-wiped card took up to the full re-assert period to return) and a slow 2-hourly re-assert purely to restore a card wiped by a restart. The re-assert used to run HOURLY, which produced 260 identical recreations against 3 real state transitions in 26 days and trained the reader to ignore the channel - behind 50 identical pages sat one genuinely broken camera and one physically misaimed one. The condition now reads the recorder-derived stale_count instead of the template entity's last_changed, so a restart no longer disarms it for the first hour. Read the page as an observation, not a verdict: under a 24/7-recording plan the camera still records to the cloud regardless.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.camera_motion_stale",
+      "to": "on",
+      "for": {
+        "hours": 1
+      },
+      "id": "onset"
+    },
+    {
+      "platform": "state",
+      "entity_id": "sensor.camera_motion_stale",
+      "attribute": "stale",
+      "id": "setchange"
+    },
+    {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
+    },
+    {
+      "platform": "time_pattern",
+      "hours": "/2",
+      "minutes": "23",
+      "id": "reassert"
+    }
+  ],
+  "conditions": [
+    {
+      "condition": "template",
+      "value_template": "{{ (state_attr('sensor.camera_motion_stale','stale_count')|int(0)) > 0 }}"
+    }
+  ],
+  "actions": [
+    {
+      "data": {
+        "notification_id": "camera_motion_dead",
+        "title": "📷 No motion events: {% set st = state_attr('sensor.camera_motion_stale','stale') or [] %}{{ st | join(', ') if st else 'none' }}",
+        "message": "{{ state_attr('sensor.camera_motion_stale','summary') }}\n\nQuiet beyond window: {% set st = state_attr('sensor.camera_motion_stale','stale') or [] %}{% set aw = state_attr('sensor.camera_motion_stale','applied_window') or {} %}{% set hs = state_attr('sensor.camera_motion_stale','hours_since') or {} %}{{ st | join(', ') }}\n\nCROSS-CAMERA CORROBORATION (strongest evidence - reads only motion rows already in the recorder; no walk test, no physical access):\n{% for k, v in (state_attr('sensor.camera_motion_stale','corroboration') or {}).items() %}{{ '- %s: %s\\n' % (k, v.get('verdict')) }}{% endfor %}\nFRAME DIFFERENCING (weaker - an outdoor scene changes by itself):\n{% for k, v in (state_attr('sensor.camera_motion_stale','verdicts') or {}).items() %}{{ '- %s: %s\\n' % (k, v) }}{% endfor %}\nPer-camera detail (event age vs its OWN applied window):\n{% for k in st %}{{ '- %s: %sh silent, window %sh, localized visual changes %s\\n' % (k, hs.get(k), aw.get(k), (state_attr('sensor.camera_motion_stale','visual_localized_count') or {}).get(k)) }}{% endfor %}\n'Localized' excludes scene changes that fired on several cameras within three minutes. That covers lighting transitions, cloud shadow and the first frame after a restart - but ALSO a person or vehicle crossing a group of cameras that share a path, so a discarded change is not always ambient. Read the two discriminators in order of strength: 'EVENT PATH BROKEN' is a proof and means the camera's motion settings/zones in the Ring app are the first thing to check. 'Cannot be tested' and 'inconclusive' mean exactly that - no conclusion, not an all-clear. A frame-differencing verdict of 'suspect' is weak on its own: a camera aimed at open ground generates guaranteed lighting change and can only ever read 'suspect'. Note some faults are PHYSICAL (aim, obstruction) and no Ring-app setting fixes them. This measures motion EVENTS reaching HA; the camera records to the cloud regardless. {{ now().strftime('%b %-d %-I:%M %p') }}."
+      },
+      "action": "persistent_notification.create"
+    },
+    {
+      "choose": [
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{{ trigger.id in ['onset','setchange'] }}"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "notify.<your_mobile_app_target>",
+              "data": {
+                "title": "📷 No motion events: {{ (state_attr('sensor.camera_motion_stale','stale') or []) | join(', ') }}",
+                "message": "{% set corr = state_attr('sensor.camera_motion_stale','corroboration') or {} %}{% set broke = corr.items() | selectattr('1.broken','defined') | selectattr('1.broken') | map(attribute='0') | list %}{% if broke %}PROVEN event-path failure: {{ broke | join(', ') }}. {% endif %}{{ state_attr('sensor.camera_motion_stale','summary') }}"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "mode": "single"
 }

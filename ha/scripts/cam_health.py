@@ -8,17 +8,17 @@ Why NOT /api/camera_proxy: it returns HTTP 200 + a STALE cached JPEG when the
 upstream camera is dead, so it can't detect failure. The :11080 webhook is
 honest: valid->200 fresh JPEG, bad token->401, bad/dead device->error.
 
-Detects (v3 hardening, after a stale-cache wedge the old logic missed):
+Detects (v3 hardening, after the <cam_3> wedge the old logic missed):
   - down   : hard failure (non-200 / tiny) for DOWN_AFTER consecutive probes.
   - frozen : BYTE-IDENTICAL JPEG for FREEZE_PROBES consecutive probes.
-             HONEST NAMING: this is a STALE SNAPSHOT, not proof of a wedged
-             camera. On a snapshot timeout the webhook serves the engine's CACHED
-             last-good JPEG - HTTP 200, full size - so the probe scores it a
-             success and only the identical hash betrays it. The tier therefore
+             HONEST NAMING (corrected): this is a STALE SNAPSHOT, not proof of a
+             wedged camera. On a snapshot timeout the webhook serves Scrypted's
+             CACHED last-good JPEG - HTTP 200, full size - so the probe scores it
+             a success and only the identical hash betrays it. The tier therefore
              measures "the snapshot request is timing out and we are being served
              cache", which is inherently bursty and rotates across cameras (it
              falls hardest on the BUSIEST ones). Treat it as a snapshot-pipeline
-             signal, not a per-camera hardware verdict.
+             signal, not as a per-camera hardware verdict.
   - slow   : takePicture latency > SLOW_SECS for SLOW_AFTER consecutive probes
              (degraded / near-timeout). NOTE the probe fires all 9 cameras
              concurrently, so a healthy camera can transiently spike to 4-7s from
@@ -33,15 +33,15 @@ from concurrent.futures import ThreadPoolExecutor
 
 HOST = "<HA_HOST_IP>:11080"
 CAMS = [
-    ("<cam_1>", "<device_id>", "<webhook_token>"),
-    ("<cam_2>", "<device_id>", "<webhook_token>"),
-    ("<cam_3>", "<device_id>", "<webhook_token>"),
-    ("<cam_4>", "<device_id>", "<webhook_token>"),
-    ("<cam_5>", "<device_id>", "<webhook_token>"),
-    ("<cam_6>", "<device_id>", "<webhook_token>"),
-    ("<cam_7>", "<device_id>", "<webhook_token>"),
-    ("<cam_8>", "<device_id>", "<webhook_token>"),
-    ("<cam_9>", "<device_id>", "<webhook_token>"),
+    ("<cam_1>", "28", "<webhook_token>"),
+    ("<cam_2>", "29", "<webhook_token>"),
+    ("<cam_3>", "30", "<webhook_token>"),
+    ("<cam_4>", "31", "<webhook_token>"),
+    ("<cam_5>", "34", "<webhook_token>"),
+    ("<cam_6>", "38", "<webhook_token>"),
+    ("<cam_7>", "41", "<webhook_token>"),
+    ("<cam_8>", "44", "<webhook_token>"),
+    ("<cam_9>", "47", "<webhook_token>"),
 ]
 STATE = "/config/.cam_health_state.json"
 MIN_BYTES = 2000        # smaller => error placeholder, not a real frame
@@ -112,7 +112,8 @@ def main():
                 detail[name] = f"{reason} x{fails}"
             else:
                 # First miss of the tolerance window. Previously counted healthy,
-                # which published '9/9 OK' during a 9/9 probe blackout. A missed
+                # which published '9/9 OK' during a 9/9 probe blackout (6 recorder
+                # samples read 'FLEET-MISS: 9/9 probes failed | 9/9 OK'). A missed
                 # probe is pending, not healthy.
                 pending += 1
                 detail[name] = f"miss({code or 'timeout'})"
@@ -163,6 +164,12 @@ def main():
 try:
     main()
 except Exception as e:
+    # The error path must emit the SAME key set as the success path. Omitting a
+    # key does not make it null - json_attributes is an allowlist and a missing
+    # key simply vanishes, so `state_attr(...)|int(0)` reads 0, i.e. "no fault",
+    # which is the reassuring direction from a script that has just failed.
     print(json.dumps({"healthy": -1, "down_count": 0, "frozen_count": 0, "slow_count": 0,
                       "down": [], "frozen": [], "slow": [], "all_down": False,
+                      "stale_count": 0, "all_stale": False, "fleet_stale": False,
+                      "miss_count": 0, "fleet_miss": False, "pending": 0,
                       "summary": f"probe script error: {e}", "detail": {}}))

@@ -9,14 +9,15 @@ structurally incapable of firing. It reported "no faults" when it meant
   RECORDING FAILURES (per camera, the user-facing harm — a lost/truncated
   HKSV clip):   "[Cam] motion recording error ..."
                 "[Cam] motion recording closed (error code: N)"
-                (RESTORED. It had been retired on the claim that the engine
-                "never emits" the parenthetical - that claim was FALSE: 25 such
-                lines appeared in a single 23h window, concentrated on one camera
-                whose HKSV clips were arriving effectively empty. A hard-zeroed
-                counter reads as "checked, none found", the exact anti-pattern the
-                v2 rewrite existed to remove. It stays OUT of the alert metric -
-                code 3 also covers a benign max-duration cancel - but it is
-                counted, published, and surfaced in the summary.)
+                (RESTORED 2026-08-27. It had been retired on the claim that this
+                build "never emits" the parenthetical - that claim was FALSE:
+                25 such lines appeared in a single 23h window, concentrated on
+                one camera whose HKSV clips were arriving effectively empty. A
+                hard-zeroed counter reads as "checked, none found", which is the
+                exact anti-pattern the v2 rewrite existed to remove. It stays OUT
+                of the alert metric - code 3 also covers a benign max-duration
+                cancel - but it is counted, published, and surfaced in the
+                summary so a camera failing this way is visible.)
   STREAM FAULTS (fleet-wide; these lines carry no camera bracket):
                 "timeout waiting for data, killing parser session"
                 "rebroadcast error", "rtsp read loop exited",
@@ -50,14 +51,27 @@ from datetime import datetime, timedelta
 ADDON = "<scrypted_addon_slug>"
 LINES = 60000
 WINDOW_MIN = 360.0      # rate window is bounded by TIME, not by LINES: the 60k-line
-                        # span floats with engine chattiness (~85%% of it is the
-                        # monitors' own probe traffic), so identical error counts
-                        # could publish rates differing ~7x. Lines older than this
-                        # are dropped before counting.
+                        # span was observed anywhere from ~106 to ~727 min depending
+                        # on engine chattiness (~85%% of it is our own probe traffic),
+                        # so identical error counts published rates differing ~7x.
+                        # Lines older than this are dropped before counting.
 MIN_SPAN_MIN = 10.0     # below this the rates are too noisy to publish
 ALERT_HR = 2.0          # per-camera recording failures/hour -> flagged
 MIN_EVENTS = 3          # ...and at least this many absolute failures
-PROBE_INTERVAL_MIN = 2.0  # cam_health scan_interval; expected probes = span / this
+PROBE_INTERVAL_MIN = 2.0  # scan_interval of ONE probing sensor, in minutes
+PROBERS = 2               # ...and this many sensors probe the SAME nine webhook
+                          # endpoints on that interval: cam_health.yaml and
+                          # cam_vision.yaml both run scan_interval 120 against
+                          # the identical takePicture URLs. Measured 2026-08-30:
+                          # 34,807 takePicture requests in 62.7 h = 2.06x a
+                          # single prober, and probe_counts read 362 against an
+                          # `expected` of 180. Omitting this factor halved the
+                          # denominator, so the shortfall bar sat at 37% of the
+                          # real rate: a camera had to lose 63% of its probes to
+                          # trip it rather than the intended 25%, and cam_vision
+                          # dying outright (probes halve to ~181) stayed ABOVE
+                          # the bar - which is exactly the failure this signal is
+                          # relied on to catch, since cam_vision has no dead-man.
 PROBE_SHORTFALL = 0.75    # camera probed < this fraction of EXPECTED cycles
 
 ALERT_HR_OVERRIDES = {}  # e.g. "<chronic_cam>": 6.0
@@ -74,18 +88,20 @@ CAMS = {
     "<Scrypted Camera Name 9>": "<cam_9>",
 }
 DEVICE_IDS = {  # scrypted device id -> short name, for probe accounting
-    "<device_id_1>": "<cam_1>",
-    "<device_id_2>": "<cam_2>",
-    "<device_id_3>": "<cam_3>",
-    "<device_id_4>": "<cam_4>",
-    "<device_id_5>": "<cam_5>",
-    "<device_id_6>": "<cam_6>",
-    "<device_id_7>": "<cam_7>",
-    "<device_id_8>": "<cam_8>",
-    "<device_id_9>": "<cam_9>",
+    "<device_id_1>": "<cam_1>", "29": "<cam_2>", "30": "<cam_3>",
+    "<device_id_4>": "<cam_4>", "34": "<cam_5>", "38": "<cam_6>",
+    "<device_id_7>": "<cam_7>", "44": "<cam_8>", "47": "<cam_9>",
 }
 
-PUSH_DECRYPT = "ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY"  # each hit = one dropped Ring push
+# UNDECRYPTABLE PUSH MESSAGES. Deliberately NOT called "dropped pushes": that
+# causal claim was measured and REFUTED - across 14 of these failures, 30 of 30
+# Scrypted-side motion detections reached HA at the same second, zero misses.
+# The stack sits in the FCM push receiver, which is separate from the RMS
+# signalling session that actually delivers motion here. Do NOT re-authenticate
+# the Ring plugin on this signal alone; gate any lost-event claim on an actual
+# motion-delivery gap. Rate is also confounded by push VOLUME (which tracks
+# motion), so normalise before calling a trend.
+PUSH_DECRYPT = "ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY"
 
 STREAM_FAULTS = (
     "timeout waiting for data, killing parser session",
@@ -102,7 +118,8 @@ def emit(payload):
     base = {
         "span_min": None, "rates": None, "counts": None,
         "recording_errors": None, "closed_with_error": None, "stream_errors": None,
-        "push_drops": None, "push_drop_rate": None,
+        "push_undecryptable": None, "push_undecryptable_rate": None,
+        "push_drops": None, "push_drop_rate": None,   # legacy aliases, same value
         "probe_counts": None, "probe_shortfall": [],
         "flapping": [], "flap_count": 0,
         "worst": None, "worst_rate": -1, "summary": "", "error": None,
@@ -173,7 +190,7 @@ def main():
     closed_err = {n: 0 for n in CAMS.values()}  # context tier, NOT the alert metric
     probes = {n: 0 for n in DEVICE_IDS.values()}
     stream_errors = 0
-    push_drops = 0
+    push_undecryptable = 0
 
     for ln in lines:
         if "takePicture" in ln:
@@ -188,8 +205,12 @@ def main():
                     else:
                         closed_err[name] += 1
                     break
-        elif PUSH_DECRYPT in ln:
-            push_drops += 1
+        elif PUSH_DECRYPT in ln and "code:" not in ln:
+            # One Node uncaughtException writes its code on a SECOND line
+            # ("  code: 'ERR_...',"), so matching the bare string counted every
+            # error twice - measured on this engine as 212 EPIPE lines for 106
+            # errors. Skipping the `code:` continuation counts errors, not lines.
+            push_undecryptable += 1
         elif any(f in ln for f in STREAM_FAULTS):
             stream_errors += 1
 
@@ -207,15 +228,15 @@ def main():
     # A camera whose watchdog probes are quietly not completing. Measured
     # against expected cycles, because per-camera totals also contain HA
     # dashboard pulls which are NOT evenly spread across cameras.
-    expected = span_min / PROBE_INTERVAL_MIN
+    expected = span_min / PROBE_INTERVAL_MIN * PROBERS
     shortfall = sorted(n for n, v in probes.items()
                        if expected >= 10 and v < expected * PROBE_SHORTFALL)
 
-    push_drop_rate = round(push_drops / span_min * 60, 1)
+    push_undecryptable_rate = round(push_undecryptable / span_min * 60, 1)
     summary = "worst %s %.1f/hr over %.0fm; %d cam(s) over threshold" % (
         worst, rates[worst], span_min, len(flapping))
-    if push_drop_rate >= 1.0:
-        summary += "; push drops %.1f/hr" % push_drop_rate
+    if push_undecryptable_rate >= 1.0:
+        summary += "; undecryptable push msgs %.1f/hr" % push_undecryptable_rate
     if shortfall:
         summary += "; probe shortfall: " + ",".join(shortfall)
     err_closes = sorted((n for n, v in closed_err.items() if v), key=lambda n: -closed_err[n])
@@ -228,7 +249,12 @@ def main():
         "rates": rates, "counts": fails,
         "recording_errors": rec, "closed_with_error": closed_err,
         "stream_errors": stream_errors,
-        "push_drops": push_drops, "push_drop_rate": push_drop_rate,
+        "push_undecryptable": push_undecryptable,
+        "push_undecryptable_rate": push_undecryptable_rate,
+        # Legacy names retained so an existing template/automation cannot break
+        # on this rename. Both carry the SAME value; new readers should use the
+        # push_undecryptable_* pair, whose name does not assert a lost event.
+        "push_drops": push_undecryptable, "push_drop_rate": push_undecryptable_rate,
         "probe_counts": probes, "probe_shortfall": shortfall,
         "flapping": flapping, "flap_count": len(flapping),
         "worst": worst, "worst_rate": rates[worst], "summary": summary,
