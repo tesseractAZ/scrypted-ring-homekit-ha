@@ -45,7 +45,13 @@ before deploying (grep for `<` to find them).
    the in-UI cards. Leaving them unreplaced makes the automation error at run
    time. Note the push steps are deliberately gated so that a re-assert (which
    exists only to restore a card a restart erased) does not re-notify: only
-   genuinely new information reaches the device.
+   genuinely new information reaches the device. One gate is subtler than it
+   looks: `camera_motion_dead_alert` watches the proven-broken set with a template
+   trigger, and a template trigger does NOT fire from an initially-true state - the
+   same arming trap `numeric_state` has here - so it also pushes on BOOT whenever a
+   camera is already proven broken. Without that clause a proof raised before the
+   automation loaded would never page, and since the cards are in-memory, the
+   restart that wiped the card would be the very event guaranteeing the silence.
 2. **Snapshot first.** Take a full backup immediately before deploying, so a
    bad change is a restore rather than a reconstruction. Note that manual
    backups are usually **exempt** from the supervisor's automatic-backup
