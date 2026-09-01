@@ -55,7 +55,7 @@
           "conditions": [
             {
               "condition": "template",
-              "value_template": "{{ trigger.id in ['onset','setchange','proven'] }}"
+              "value_template": "{% set corr = state_attr('sensor.camera_motion_stale','corroboration') or {} %}{% set broke = corr.items() | selectattr('1.broken', 'defined') | selectattr('1.broken') | list | count %}{{ trigger.id in ['onset','setchange','proven'] or (trigger.id == 'boot' and broke > 0) }}"
             }
           ],
           "sequence": [
