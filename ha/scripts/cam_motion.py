@@ -13,6 +13,7 @@ whole window after any restart. The recorder survives restarts.
 Emits ONE JSON object on stdout, always, exit 0 (command_line sensor contract).
 """
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -75,12 +76,26 @@ CORROBORATE_MIN_RATE = 0.15      # a partner below this has too little power
 CORROBORATE_MIN_PRE = 20         # ...and needs this many historical clusters
 CORROBORATE_MIN_POST = 8         # ...and this many opportunities since the cut
 CORROBORATE_P = 1e-3             # P(silence | still working) below this = broken
-# The 89.4h recorder blackout (zero rows for ANY entity). Hours in which a
-# camera was UNOBSERVED are not hours in which it was quiet, so they must not
-# enter either the historical rate or the post-cut opportunity count.
-# Fill with (start_epoch, end_epoch) pairs for any period your recorder was not
-# writing (a database outage, a restore, a migration). Leave empty if none.
-EXCLUDE_SPANS = []  # e.g. [(1785641610.0, 1785933763.0)]
+CORROBORATE_MIN_HITS = 8         # ...and the rate must rest on at least this many
+                                 # actual historical co-fires. A rate fitted from 4
+                                 # co-fires has a 95% interval spanning 0.06-0.35;
+                                 # calling anything derived from it a "proof" is
+                                 # unearned regardless of how many post-clusters
+                                 # accumulate. Measured 2026-08-31: a 4/25 fit was
+                                 # ~1 day from stamping EVENT PATH BROKEN on a
+                                 # camera, and would then have self-retracted two
+                                 # days later when the sliding window dropped that
+                                 # partner below MIN_PRE - a verdict decided by
+                                 # window alignment, not by the camera.
+# NO EXCLUDE_SPANS. A recorder blackout is DEFINED by having no rows, so excluding
+# one removes nothing - there is nothing there to remove. The mechanism can only
+# ever delete real data, and it did: this file shipped 2026-08-31 with a hard-coded
+# span whose epochs were four days off their own comment, silently discarding 999 of
+# the 2,525 motion rows (39.6%) in the corroboration lookback while the window it
+# named held exactly 1 row. Removing it strengthened the one true positive
+# (p 2.1e-09 -> 6.4e-11) and dissolved a developing false one. If a future recorder
+# gap ever does need masking, mask it where it is measurable - as a gap in the data -
+# not as a constant that no test can see.
 
 # binary_sensor.<name>_motion for each camera in the fleet
 CAMS = [
@@ -96,8 +111,24 @@ CAMS = [
 ]
 
 
-def _excluded(ts):
-    return any(a <= ts < b for a, b in EXCLUDE_SPANS)
+def _wilson_lower(k, n, z=1.96):
+    """Lower bound of the 95% CI for k/n. Used instead of the point estimate.
+
+    The historical co-fire rate is ESTIMATED, and the p-value is exponentially
+    sensitive to it: p = (1-rate)**post. Plugging in the point estimate asserts
+    the rate is known exactly, which turns a thin sample into a confident
+    verdict. Using the lower bound makes the strength of the conclusion scale
+    with how well the rate is actually known - a 26/61 fit barely moves
+    (0.426 -> 0.310, still decisive) while a 4/25 fit collapses
+    (0.160 -> 0.064) and can no longer manufacture a proof.
+    """
+    if n <= 0:
+        return 0.0
+    p = k / float(n)
+    d = 1.0 + z * z / n
+    centre = p + z * z / (2.0 * n)
+    margin = z * math.sqrt(p * (1.0 - p) / n + z * z / (4.0 * n * n))
+    return max(0.0, (centre - margin) / d)
 
 
 def _clusters(events, link_s):
@@ -124,7 +155,7 @@ def corroborate(events, target, cut_ts):
     saying plainly that no partner has enough statistical power. Never returns
     a reassuring verdict it cannot support.
     """
-    ev = [(t, c) for t, c in events if not _excluded(t)]
+    ev = list(events)
     pre = _clusters([e for e in ev if e[0] < cut_ts], CORROBORATE_LINK_S)
     # Start the post window one link-width AFTER the camera's own last event, so
     # the cluster that contains that event cannot count as a co-fire. Leaving it
@@ -138,10 +169,13 @@ def corroborate(events, target, cut_ts):
         n_post = [cl for cl in post if partner in cl]
         if len(n_pre) < CORROBORATE_MIN_PRE or len(n_post) < CORROBORATE_MIN_POST:
             continue
-        rate = sum(1 for cl in n_pre if target in cl) / float(len(n_pre))
+        pre_hits = sum(1 for cl in n_pre if target in cl)
+        rate = pre_hits / float(len(n_pre))
         hits = sum(1 for cl in n_post if target in cl)
         if best is None or rate > best["rate"]:
             best = {"partner": partner, "rate": round(rate, 3),
+                    "pre_hits": pre_hits,
+                    "rate_lb": round(_wilson_lower(pre_hits, len(n_pre)), 3),
                     "pre_clusters": len(n_pre), "post_clusters": len(n_post),
                     "post_hits": hits}
     if best is None or best["rate"] < CORROBORATE_MIN_RATE:
@@ -157,8 +191,9 @@ def corroborate(events, target, cut_ts):
     # be drawn from silence. Reporting "consistent with a quiet area" from an
     # underpowered test is the exact false-all-clear this whole discriminator
     # exists to remove, so an underpowered result is reported as inconclusive.
-    p = (1.0 - best["rate"]) ** best["post_clusters"]
-    powered = p < CORROBORATE_P
+    p = (1.0 - best["rate_lb"]) ** best["post_clusters"]
+    thin = best["pre_hits"] < CORROBORATE_MIN_HITS
+    powered = p < CORROBORATE_P and not thin
     broken = best["post_hits"] == 0 and powered
     best["p_value"] = float("%.2g" % p)
     best["testable"] = True
@@ -167,20 +202,30 @@ def corroborate(events, target, cut_ts):
     if broken:
         best["verdict"] = (
             "EVENT PATH BROKEN (proof): %s co-fired with this camera in %.1f%% "
-            "of its motion clusters historically (%d/%d), and in %d of %d since "
-            "this camera went quiet - P(that | still working) = %.1g. The scene "
-            "is demonstrably active; this camera is not reporting it."
-            % (best["partner"], 100 * best["rate"],
-               int(round(best["rate"] * best["pre_clusters"])), best["pre_clusters"],
+            "of its motion clusters historically (%d/%d; 95%% CI lower bound "
+            "%.1f%%, which is the figure used), and in %d of %d since this camera "
+            "went quiet - P(that | still working) = %.1g. The scene is "
+            "demonstrably active; this camera is not reporting it."
+            % (best["partner"], 100 * best["rate"], best["pre_hits"],
+               best["pre_clusters"], 100 * best["rate_lb"],
                best["post_hits"], best["post_clusters"], p))
+    elif thin:
+        best["testable"] = False
+        best["verdict"] = (
+            "cannot be tested - the best partner (%s) shares this view on only %d "
+            "historical occasions (%d/%d = %.1f%%, 95%% CI lower bound %.1f%%), too "
+            "few to fit a rate that could support any verdict"
+            % (best["partner"], best["pre_hits"], best["pre_hits"],
+               best["pre_clusters"], 100 * best["rate"], 100 * best["rate_lb"]))
     elif not powered:
         best["testable"] = False
         best["verdict"] = (
-            "inconclusive - the only partner sharing this view (%s, %.1f%% "
-            "historically) has produced just %d clusters since this camera went "
-            "quiet; even total silence would only reach P=%.2g, so this test "
-            "cannot distinguish a quiet area from a broken event path"
-            % (best["partner"], 100 * best["rate"], best["post_clusters"], p))
+            "inconclusive - %s (%.1f%% historically, 95%% CI lower bound %.1f%%) has "
+            "produced just %d clusters since this camera went quiet; even total "
+            "silence would only reach P=%.2g, so this test cannot distinguish a "
+            "quiet area from a broken event path"
+            % (best["partner"], 100 * best["rate"], 100 * best["rate_lb"],
+               best["post_clusters"], p))
     else:
         best["verdict"] = (
             "consistent with a quiet area - %s co-fires %.1f%% historically and "

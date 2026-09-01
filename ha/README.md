@@ -201,7 +201,31 @@ before deploying (grep for `<` to find them).
   power: a camera with no high-rate partner (a spatially isolated view, an
   interior room) returns "cannot be tested", and a partner too sparse to reach
   significance returns "inconclusive" with the p-value it could have reached.
-  It never converts weak evidence into an all-clear. Second, and weaker:
+  It never converts weak evidence into an all-clear.
+
+  Two guards matter more than they look, because p is exponentially sensitive to
+  a rate that is only ESTIMATED. The test uses the **Wilson 95% lower bound** of
+  the historical rate, not the point estimate - plugging in the point estimate
+  asserts the rate is known exactly, which lets a thin sample manufacture a
+  confident verdict. It also requires at least `CORROBORATE_MIN_HITS` actual
+  historical co-fires, not merely enough clusters. Both were added after a rate
+  fitted from **4 co-fires in 25 clusters** came within about a day of stamping
+  "EVENT PATH BROKEN (proof)" on a camera - and would then have self-retracted two
+  days later, when the sliding lookback dropped that partner below
+  `CORROBORATE_MIN_PRE`. A verdict decided by window alignment rather than by the
+  camera is worse than no verdict. Under the bound a 26/61 fit barely moves
+  (0.426 -> 0.310, still decisive) while a 4/25 fit collapses (0.160 -> 0.064) and
+  can no longer support a proof.
+
+  Note there is deliberately **no exclusion list for recorder outages**. A recorder
+  blackout is *defined* by having no rows, so excluding one removes nothing - the
+  mechanism can only ever delete real data. A hard-coded span whose epochs were
+  four days off its own comment silently discarded 39.6% of the motion history on
+  this fleet while the window it named held exactly one row. If a gap ever does
+  need masking, mask it where it is measurable - as a gap in the data - not as a
+  constant no test can see.
+
+  Second, and weaker:
   `cam_vision.py`
   compares each camera's snapshots over time (block-based frame differencing,
   lighting-normalized, IR-aware) and the alert states whether the scene has

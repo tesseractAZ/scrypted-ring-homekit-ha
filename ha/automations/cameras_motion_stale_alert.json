@@ -1,6 +1,6 @@
 {
   "alias": "Cameras - stale motion alert (daytime pipeline check)",
-  "description": "Fleet-wide motion-pipeline dead-man, hourly rolling window: pages if NO camera has reported a motion EVENT for 4+ hours, checked hourly during active hours (10:00-20:00). Replaced the twice-daily since-08:00 check after a real Ring event-listener wedge ran ~12h before paging (2026-07-24). REBASED 2026-08-17 onto sensor.camera_motion_stale's recorder-derived hours_since map: the old template read entity last_changed, which (a) resets on every restart, blinding the check for up to 4h, and (b) treated a sensor stuck 'on' as fresh motion - binary_sensor.garage_north_motion sat latched 'on' for 85h (2026-07-29 -> 08-01) and pinned the staleness clock to zero for ~35 consecutive hourly checks. The recorder survives both. If the staleness sensor itself dies this condition reads false - that hole is covered by the camera_motion_monitor_down dead-man. AGE GATE ADDED 2026-08-27: this condition reads sensor.camera_motion_stale, which refreshes only every 30 min, while the check runs hourly - so it was asserting a present-tense fact from a snapshot up to half an hour old and false-paged on 2026-08-22 off 27m43s-stale data, 20 minutes after motion had actually resumed. It now refuses to evaluate a sample older than 35 min AND subtracts the sample's age from the measured gap, so the threshold is applied to the worst-case true elapsed time rather than to a stale reading. THRESHOLD RAISED 4.0h -> 6.0h on 2026-08-30, measured against this fleet's own occupied data: 456 inter-event gaps over 10 occupied days give p50 0.04h, p95 2.41h, p99 6.45h, max 8.46h. At 4.0h, 4.0% of the hourly in-window checks fire - about one page every 2.5 days - and every firing actually observed self-resolved with no intervention. 6.0h removes essentially all of them for about two extra hours of detection latency. A BOOT TRIGGER was added at the same time: this was the only fault alert with no restart-wipe guard, so an evening restart erased its card with the fault still latched and nothing could recreate it until 10:11 the next morning - up to 14h08m. NOTE the 10:00-20:00 gate leaves this alert un-evaluable ~14h a day, and it tests the MINIMUM hours_since across the fleet, so any one healthy camera suppresses it entirely: it covers a TOTAL pipeline outage, never a single camera. Per-camera failure is camera_motion_dead_alert's job, and the cross-camera corroboration test in cam_motion.py is what actually proves it.",
+  "description": "Fleet-wide motion-pipeline dead-man, hourly rolling window: pages if NO camera has reported a motion EVENT for 4+ hours, checked hourly during active hours (10:00-20:00). Replaced the twice-daily since-08:00 check after a real Ring event-listener wedge ran ~12h before paging (2026-07-24). REBASED 2026-08-17 onto sensor.camera_motion_stale's recorder-derived hours_since map: the old template read entity last_changed, which (a) resets on every restart, blinding the check for up to 4h, and (b) treated a sensor stuck 'on' as fresh motion - binary_sensor.garage_north_motion sat latched 'on' for 85h (2026-07-29 -> 08-01) and pinned the staleness clock to zero for ~35 consecutive hourly checks. The recorder survives both. If the staleness sensor itself dies this condition reads false - that hole is covered by the camera_motion_monitor_down dead-man. AGE GATE ADDED 2026-08-27: this condition reads sensor.camera_motion_stale, which refreshes only every 30 min, while the check runs hourly - so it was asserting a present-tense fact from a snapshot up to half an hour old and false-paged on 2026-08-22 off 27m43s-stale data, 20 minutes after motion had actually resumed. It now refuses to evaluate a sample older than 35 min AND subtracts the sample's age from the measured gap, so the threshold is applied to the worst-case true elapsed time rather than to a stale reading. THRESHOLD RAISED 4.0h -> 6.0h on 2026-08-30, measured against this fleet's own occupied data: 456 inter-event gaps over 10 occupied days give p50 0.04h, p95 2.41h, p99 6.45h, max 8.46h. At 4.0h, 4.0% of the hourly in-window checks fire - about one page every 2.5 days - and every firing actually observed self-resolved with no intervention. 6.0h removes essentially all of them for about two extra hours of detection latency. A BOOT TRIGGER was added at the same time: this was the only fault alert with no restart-wipe guard, so an evening restart erased its card with the fault still latched and nothing could recreate it until 10:11 the next morning - up to 14h08m. NOTE the 10:00-20:00 gate leaves this alert un-evaluable ~14h a day, and it tests the MINIMUM hours_since across the fleet, so any one healthy camera suppresses it entirely: it covers a TOTAL pipeline outage, never a single camera. Per-camera failure is camera_motion_dead_alert's job, and the cross-camera corroboration test in cam_motion.py is what actually proves it. PUSH GATE REMOVED 2026-09-01. The push briefly carried a \"first hour past threshold\" gate (fire only while the measured gap was <= 7.0h) so a sustained outage would not re-notify hourly. That suppressed exactly the case this alert exists for: the condition is only evaluable 10:00-20:00 local, and ordinary nocturnal quiet already reaches 8.46h, so an evening-onset outage first becomes visible at the 10:11 check with the gap ALREADY past 7h - card created, page silently withheld. That is the 2026-07-24 twelve-hour wedge scenario exactly. The push is now unconditional: at the 6.0h threshold the measured false-positive rate over 12 occupied days is ZERO, so repeat pages can only happen during a genuine total-fleet outage, where being paged hourly is the correct behaviour.",
   "triggers": [
     {
       "platform": "time_pattern",
@@ -34,25 +34,11 @@
       "action": "persistent_notification.create"
     },
     {
-      "choose": [
-        {
-          "conditions": [
-            {
-              "condition": "template",
-              "value_template": "{% set s = states['sensor.camera_motion_stale'] %}{% set age = (as_timestamp(now()) - as_timestamp(s.last_updated)) if s is not none else 99999 %}{% set hs = state_attr('sensor.camera_motion_stale','hours_since') or {} %}{% set vals = hs.values() | reject('none') | list %}{{ vals | length > 0 and ((vals | min) - (age / 3600.0)) <= 7.0 }}"
-            }
-          ],
-          "sequence": [
-            {
-              "action": "notify.<your_mobile_app_target>",
-              "data": {
-                "title": "⚠️ Cameras: no motion from ANY camera",
-                "message": "{% set hs = state_attr('sensor.camera_motion_stale','hours_since') or {} %}{% set vals = hs.values() | reject('none') | list %}No motion event from any of the 9 cameras in {{ (vals | min) | round(1) if vals else '?' }}h. The Ring->Scrypted->MQTT->HA motion path may be wedged."
-              }
-            }
-          ]
-        }
-      ]
+      "action": "notify.<your_mobile_app_target>",
+      "data": {
+        "title": "⚠️ Cameras: no motion from ANY camera",
+        "message": "{% set hs = state_attr('sensor.camera_motion_stale','hours_since') or {} %}{% set vals = hs.values() | reject('none') | list %}No motion event from any of the 9 cameras in {{ (vals | min) | round(1) if vals else '?' }}h. The Ring->Scrypted->MQTT->HA motion path may be wedged."
+      }
     }
   ],
   "mode": "single"
