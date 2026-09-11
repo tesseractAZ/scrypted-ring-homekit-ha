@@ -129,18 +129,28 @@ before deploying (grep for `<` to find them).
   two independent speaker paths (`continue_on_error` on both, so one path's
   failure can't silence the other) + a persistent notification.
 - `cameras_motion_stale_alert` / `_clear` — fleet-wide dead-man's switch,
-  checked hourly, **24/7**, against a time-dependent bar: **6 hours** during
-  10:00–20:00 local and **10 hours** overnight. If zero cameras report motion
+  checked hourly, **24/7**, against a **flat 9-hour** bar. If zero cameras report motion
   across that window the motion pipeline itself is down (a single quiet camera is
-  normal; a silent fleet is not). The split exists because the fleet is genuinely
-  quieter at night — fitted on this fleet's occupied data, daytime gaps top out
-  at 4.64 h while overnight gaps reach 8.46 h — and a single bar therefore has to
-  choose between false pages at night and no coverage at all. It used to choose
-  the latter: a hard 10:00–20:00 time condition meant a total pipeline outage
-  starting at 20:01 raised nothing until 10:11 the next morning, up to **14 h 10 m
-  of unmonitored fleet, every night**. At the 10 h overnight bar, zero of 876
-  overnight gaps and zero of 873 daytime gaps would have fired across 36 days;
-  at 8 h, four would have fired falsely. Fit that window to your own fleet's
+  normal; a silent fleet is not). It used to carry a hard 10:00–20:00 time
+  condition, so a total pipeline outage starting at 20:01 raised nothing until
+  10:11 the next morning — up to **14 h of unmonitored fleet, every night**.
+
+  Fit the bar by **simulating the checks the automation actually makes**, not by
+  looking at gap durations. A day/night split was tried first and was unsound:
+  the fit classified a gap by its *start* hour while the automation picks a bar at
+  *check* time, so a gap beginning overnight under the loose bar got judged
+  against the tight one once the check crossed the boundary. And gap *duration* is
+  not what an hourly sampler sees — over 36 clean days here the largest elapsed
+  ever presented to a check was **7.89 h**, even though several gaps ran past 8 h.
+  A flat 9 h bar gives zero false pages with 1.11 h of headroom, and removes the
+  boundary class of bug entirely. Worst-case detection latency is the bar plus one
+  check interval.
+
+  One more trap in the same condition: `hours_since` is measured as of the
+  sample instant, so the true elapsed *now* is `hours_since + sample_age`. The
+  original subtracted it, making the test read `true − 2×age` — so the effective
+  bar drifted with the sensor's refresh phase, which resets on every restart
+  (measured 10.15 h to 10.97 h against a nominal 10 h). Fit that window to your own fleet's
   occupied data, not to intuition — on this one, 456 inter-event gaps over ten
   occupied days gave p50 0.04 h, p95 2.41 h, p99 6.45 h and a max of 8.46 h, so
   a 4-hour threshold fired on 4.0% of in-window checks (about one page every
@@ -165,7 +175,15 @@ no monitor could use them. They are the only signal in the stack that is
 *independent of the camera event path*: a door physically opened, whatever the
 cameras did or did not report. `cam_flap.py` now publishes `door_openings`,
 `doors` (per door), and `door_orphans` — openings with no camera motion within
-`DOOR_MOTION_WINDOW_S` anywhere on the fleet.
+`DOOR_MOTION_WINDOW_S` anywhere on the fleet. `door_orphan_times` carries
+`[timestamp, door]` **pairs**, not bare timestamps: the per-door counts live in a
+separate attribute that has no times, the reporting window rolls every few hours,
+and the add-on log that could rejoin them retains only ~2.3 days — so an orphan
+recorded without its door becomes permanently unattributable, destroying exactly
+the history the feature exists to accumulate. Note also that summing
+`door_orphans` across recorder samples **double-counts heavily**: the monitor
+reports over a rolling multi-hour window at a much shorter cadence, so one event
+appears in dozens of consecutive samples. Deduplicate via `door_orphan_times`.
 
 Two deliberate limits. It does **not** adjudicate individual cameras: fitting a
 per-camera expectation needs history that does not exist, since the add-on log
@@ -202,6 +220,19 @@ shows up here first.
   the monitor's clock). Also carries a tripwire on cloud push-decryption
   failures - each one is a dropped motion push; a sustained climb means the
   event transport is degrading and the camera-source plugin needs re-auth.
+- `camera_monitor_stalled` / `_recovered` — **freshness** dead-man for all four
+  monitors, and the one that closes the largest hole in this design. Every other
+  dead-man here triggers on `unavailable`/`unknown`/`-1`, and none of them looks
+  at *age*. Home Assistant rewrites `last_updated` only when the state or an
+  attribute **changes**, and a healthy fleet emits a byte-identical payload for
+  hours — so a monitor whose update loop has stopped sits pinned at its last
+  reading indefinitely: no bad state, no recorder row, no page, nothing. Measured
+  here before the fix, the probe monitor had gone **37 minutes** without writing a
+  row while perfectly healthy, and legitimate steady periods reach 1 h 56 m — which
+  is why a naive age bar false-fires. The fix is a bucketed `updated_at` published
+  by each script, so `last_updated` advances at least once per bucket whenever the
+  loop actually runs, at roughly one extra recorder row per bucket rather than one
+  per poll. Bars are per sensor because the poll intervals differ 15×.
 - `camera_vision_monitor_down` / `_recovered` — dead-man for the visual monitor.
   It was the only one of the four without one, which mattered because its most
   likely failure is not a crash but going **blind while still running**:

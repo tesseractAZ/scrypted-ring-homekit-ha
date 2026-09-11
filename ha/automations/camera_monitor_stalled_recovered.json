@@ -1,0 +1,24 @@
+{
+  "alias": "Cameras - monitor updating again",
+  "description": "Dismisses the stalled-monitor card once every monitor is publishing again. Dismiss-only, no recovery notification, matching the other recovery automations here. The 15-minute gate matches the raise tier so a single late publish cannot clear and re-raise the card once per cycle.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.camera_monitor_stalled",
+      "to": "off",
+      "for": {
+        "minutes": 15
+      }
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "action": "persistent_notification.dismiss",
+      "data": {
+        "notification_id": "camera_monitor_stalled"
+      }
+    }
+  ],
+  "mode": "single"
+}

@@ -109,6 +109,7 @@ SAT_IR = 10.0                  # mean saturation below this = grayscale = IR on
 LUMA_DARK = 40.0               # ...else mean luma below this = unlit/near-black
 KEEP_HOURS = 48.0
 TIMEOUT = 12
+HEARTBEAT_BUCKET_S = 600  # see the emit heartbeat note below
 PROBE_BLIND_MIN = 15.0   # a camera not successfully probed in this long is
                          # reported as BLIND rather than quiet. cam_motion.py
                          # reads the same per-camera stamp to refuse a verdict.
@@ -119,7 +120,7 @@ def emit(payload):
         "hours_since_visual": None, "changes_24h": None, "ir_mode": None,
         "max_norm_diff": None, "active_count": None,
         "probe_age_min": None, "blind": None, "blind_count": None,
-        "summary": "", "error": None,
+        "summary": "", "error": None, "updated_at": None,
     }
     base.update(payload)
     print(json.dumps(base))
@@ -309,6 +310,7 @@ def main():
         "max_norm_diff": maxdiff, "active_count": active,
         "probe_age_min": probe_age_min, "blind": blind, "blind_count": len(blind),
         "summary": summary,
+        "updated_at": int(time.time() // HEARTBEAT_BUCKET_S) * HEARTBEAT_BUCKET_S,
     })
 
 

@@ -30,6 +30,7 @@ command_line:
         - applied_window
         - visual_localized_hours
         - visual_localized_count
+        - updated_at
 
 template:
   - binary_sensor:

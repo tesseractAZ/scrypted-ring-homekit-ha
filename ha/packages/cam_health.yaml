@@ -36,6 +36,7 @@ command_line:
         - detail
         - pending
         - healthy
+        - updated_at
 
 template:
   - binary_sensor:
@@ -51,3 +52,56 @@ template:
              or (state_attr('sensor.camera_health','fleet_miss') == true) }}
         attributes:
           summary: "{{ state_attr('sensor.camera_health','summary') }}"
+
+# ---------------------------------------------------------------------------
+# FRESHNESS. Every dead-man in this stack triggers on unavailable/unknown/-1 and
+# NONE of them looks at age. That leaves a whole failure class invisible: Home
+# Assistant only rewrites last_updated when the state or an attribute CHANGES,
+# and a healthy fleet emits a byte-identical payload for hours, so a monitor
+# whose update loop has STOPPED stays pinned at "9 / 0.0 / 9/9 OK" forever - no
+# bad state, no recorder row, no page, indefinitely. Measured on this instance,
+# legitimate steady periods already reach 1h56m (health) and 2h20m (flap), which
+# is why a naive age bar would false-fire and why each script now publishes a
+# bucketed `updated_at` instead: with the heartbeat, last_updated advances at
+# least once per bucket whenever the loop is actually running.
+# Bars are per sensor because the poll intervals differ by 15x (120s .. 1800s).
+  - binary_sensor:
+      - name: Camera monitor stalled
+        unique_id: camera_monitor_stalled
+        device_class: problem
+        state: >-
+          {% set now_ts = as_timestamp(now()) %}
+          {% set age = namespace(v={}) %}
+          {% for e, bar in [('sensor.camera_health', 2700),
+                            ('sensor.camera_visual_activity', 2700),
+                            ('sensor.camera_flap_rate', 2700),
+                            ('sensor.camera_motion_stale', 5400)] %}
+            {% set st = states[e] %}
+            {% if st is not none and (now_ts - as_timestamp(st.last_updated)) > bar %}
+              {% set age.v = dict(age.v, **{e: ((now_ts - as_timestamp(st.last_updated)) / 60) | round(0)}) %}
+            {% endif %}
+          {% endfor %}
+          {{ age.v | length > 0 }}
+        attributes:
+          stalled: >-
+            {% set now_ts = as_timestamp(now()) %}
+            {% set ns = namespace(v=[]) %}
+            {% for e, bar in [('sensor.camera_health', 2700),
+                              ('sensor.camera_visual_activity', 2700),
+                              ('sensor.camera_flap_rate', 2700),
+                              ('sensor.camera_motion_stale', 5400)] %}
+              {% set st = states[e] %}
+              {% if st is not none and (now_ts - as_timestamp(st.last_updated)) > bar %}
+                {% set ns.v = ns.v + ['%s %dm' % (e.split('.')[1], ((now_ts - as_timestamp(st.last_updated)) / 60) | round(0))] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.v | join(', ') }}
+          ages_min: >-
+            {% set now_ts = as_timestamp(now()) %}
+            {% set ns = namespace(v=[]) %}
+            {% for e in ['sensor.camera_health', 'sensor.camera_visual_activity',
+                         'sensor.camera_flap_rate', 'sensor.camera_motion_stale'] %}
+              {% set st = states[e] %}
+              {% set ns.v = ns.v + ['%s=%d' % (e.split('.')[1], ((now_ts - as_timestamp(st.last_updated)) / 60) | round(0) if st is not none else -1)] %}
+            {% endfor %}
+            {{ ns.v | join(' ') }}

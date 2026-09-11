@@ -63,6 +63,7 @@ STALE_HOURS_OVERRIDES = {
 }
 FLEET_ACTIVE_HOURS = 24.0   # ...and someone else fired within this window
 QUERY_TIMEOUT_S = 20
+HEARTBEAT_BUCKET_S = 600  # see the emit heartbeat note below
 # Largest ALL-ENTITY hole in the recorder over this window. Every camera monitor
 # is a process inside the thing it monitors, so a host-down outage produces NO
 # alert of any kind: the fleet simply stops being observed and every gate is
@@ -320,7 +321,7 @@ def emit(payload):
         "oldest_hours": None,
         "hours_since": None,
         "fleet_active": None,
-        "summary": "",
+        "summary": "", "updated_at": None,
         "error": None,
     }
     base.update(payload)
@@ -624,6 +625,7 @@ def main():
         "corroboration": corroboration,
         "vision_blind": vision_blind,
         "summary": summary,
+        "updated_at": int(time.time() // HEARTBEAT_BUCKET_S) * HEARTBEAT_BUCKET_S,
     })
 
 

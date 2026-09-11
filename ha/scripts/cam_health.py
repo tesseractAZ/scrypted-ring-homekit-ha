@@ -51,6 +51,7 @@ SLOW_SECS = 9.0         # >this = degraded/near-timeout. Above the 4-7s concurre
                         # contention band so healthy cameras aren't false-flagged.
 SLOW_AFTER = 2          # ...for this many consecutive probes (tolerate one-off spikes)
 TIMEOUT = 15
+HEARTBEAT_BUCKET_S = 600  # see the emit heartbeat note below
 FLEET_STALE_MIN = 5     # majority of cams identical-to-previous-probe => fleet-level wedge
 FLEET_MISS_MIN = 5      # majority of cams failing THIS cycle => fleet-level outage,
                         # reported immediately instead of waiting out DOWN_AFTER
@@ -158,6 +159,7 @@ def main():
         "stale_count": stale_now, "all_stale": all_stale, "fleet_stale": fleet_stale,
         "miss_count": miss_now, "fleet_miss": fleet_miss, "pending": pending,
         "summary": summary, "detail": detail,
+        "updated_at": int(time.time() // HEARTBEAT_BUCKET_S) * HEARTBEAT_BUCKET_S,
     }))
 
 
@@ -172,4 +174,5 @@ except Exception as e:
                       "down": [], "frozen": [], "slow": [], "all_down": False,
                       "stale_count": 0, "all_stale": False, "fleet_stale": False,
                       "miss_count": 0, "fleet_miss": False, "pending": 0,
-                      "summary": f"probe script error: {e}", "detail": {}}))
+                      "summary": f"probe script error: {e}", "detail": {},
+                      "updated_at": int(time.time() // HEARTBEAT_BUCKET_S) * HEARTBEAT_BUCKET_S}))

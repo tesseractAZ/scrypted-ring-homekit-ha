@@ -1,0 +1,67 @@
+{
+  "alias": "Cameras - a monitor has stopped updating",
+  "description": "Freshness dead-man for the four camera monitors. Every other dead-man here triggers only on unavailable/unknown/-1, and NONE of them looks at age - which left a whole failure class invisible. Home Assistant rewrites last_updated only when the state or an attribute CHANGES, and a healthy fleet emits a byte-identical payload for hours, so a monitor whose update loop has STOPPED sits pinned at \"9 / 0.0 / 9/9 OK\" indefinitely: no bad state, no recorder row, no page. Measured before the fix, sensor.camera_health had already gone 37 minutes without a row while perfectly healthy, and legitimate steady periods reach 1h56m (health) and 2h20m (flap) - which is why a naive age bar would false-fire, and why each script now publishes a bucketed `updated_at` so last_updated advances at least once per 600s bucket whenever the loop actually runs. Bars are per sensor because poll intervals differ 15x: 45 min for the three fast monitors, 90 min for the 30-minute motion monitor. Re-asserts hourly at :17 as a restart-wipe guard, and pushes on anything except that re-assert.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.camera_monitor_stalled",
+      "to": "on",
+      "for": {
+        "minutes": 15
+      },
+      "id": "stalled"
+    },
+    {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
+    },
+    {
+      "platform": "time_pattern",
+      "minutes": "17",
+      "id": "reassert"
+    }
+  ],
+  "conditions": [
+    {
+      "condition": "state",
+      "entity_id": "binary_sensor.camera_monitor_stalled",
+      "state": "on",
+      "for": {
+        "minutes": 15
+      }
+    }
+  ],
+  "actions": [
+    {
+      "action": "persistent_notification.create",
+      "data": {
+        "notification_id": "camera_monitor_stalled",
+        "title": "📷 Camera monitor stopped updating",
+        "message": "A camera monitor has stopped publishing. This is NOT the same as a monitor reporting a fault - it means the monitor itself has gone silent while still showing its last value, so whatever it watches is currently unwatched and every other alert sourced from it is frozen at its last reading.\nStalled: {{ state_attr('binary_sensor.camera_monitor_stalled','stalled') }}\nAges (minutes since last publish): {{ state_attr('binary_sensor.camera_monitor_stalled','ages_min') }}\nEach script publishes a bucketed updated_at every 600s, so a healthy monitor can never exceed ~10 min here. Check the HA core log for command_line errors and confirm the script still runs from a shell. {{ now().strftime('%b %-d %-I:%M %p') }}."
+      }
+    },
+    {
+      "choose": [
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{{ trigger.id != 'reassert' }}"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "notify.<your_mobile_app_target>",
+              "data": {
+                "title": "📷 Camera monitor stopped updating",
+                "message": "{{ state_attr('binary_sensor.camera_monitor_stalled','stalled') }}"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "mode": "single"
+}

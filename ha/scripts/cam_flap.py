@@ -44,6 +44,7 @@ entries=:0:N returns the OLDEST frozen slice.
 import json
 import os
 import re
+import time
 import sys
 import urllib.request
 from datetime import datetime, timedelta
@@ -121,8 +122,8 @@ TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.\d+ ")
 # This does NOT try to adjudicate a single camera. Fitting a per-camera
 # expectation needs history that does not exist - the add-on log retains ~2.3
 # days while the cameras currently dark went quiet 19 and 24 days ago - and
-# against what history there is, the one plausible camera/door
-# pairing on this fleet is already explained: that camera's historical
+# against what history there is, the one plausible pairing (the garage workroom
+# camera vs the garage back door) is already explained: that camera's historical
 # co-fire rate with its own neighbours is ~13%, so zero hits in ten openings is
 # the EXPECTED outcome, not evidence of a fault.
 #
@@ -138,6 +139,7 @@ TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.\d+ ")
 DOOR_RE = re.compile(r" i ([A-Za-z][A-Za-z ]+?) entryOpen: true\s*$")
 MOTION_RE = re.compile(r": ([A-Za-z][A-Za-z ]+?) onMotionDetected\s*$")
 DOOR_MOTION_WINDOW_S = 180.0
+HEARTBEAT_BUCKET_S = 600  # see emit()
 PROBE_RE = re.compile(r"public/(\d+)/[a-f0-9]+/takePicture")
 
 
@@ -149,7 +151,7 @@ def emit(payload):
         "push_drops": None, "push_drop_rate": None,   # legacy aliases, same value
         "probe_counts": None, "probe_shortfall": [],
         "flapping": [], "flap_count": 0,
-        "worst": None, "worst_rate": -1,
+        "worst": None, "worst_rate": -1, "updated_at": None,
         "door_openings": None, "door_orphans": None, "door_orphan_rate": None,
         "doors": None, "door_orphans_by_door": None, "door_orphan_times": None,
         "summary": "", "error": None,
@@ -268,6 +270,11 @@ def main():
             motion_ts.append(_ep(t))
         except Exception:  # noqa: BLE001
             pass
+    # orphan_times entries are [timestamp, door]. The timestamp alone is useless
+    # after ~2.3 days: the window rolls, the add-on log rotates, and
+    # door_orphans_by_door carries the door but not the time - so the two can
+    # never be rejoined and the per-door history this feature exists to build is
+    # destroyed. Keep them paired at the point of measurement.
     door_by_name, orphan_by_name, orphan_times = {}, {}, []
     for t, name in door_events:
         door_by_name[name] = door_by_name.get(name, 0) + 1
@@ -277,7 +284,7 @@ def main():
             continue
         if not any(abs(mt - te) <= DOOR_MOTION_WINDOW_S for mt in motion_ts):
             orphan_by_name[name] = orphan_by_name.get(name, 0) + 1
-            orphan_times.append(t)
+            orphan_times.append([t, name])
     door_openings = len(door_events)
     door_orphans = sum(orphan_by_name.values())
     door_orphan_rate = round(door_orphans / float(door_openings), 3) if door_openings else None
@@ -330,6 +337,7 @@ def main():
         "probe_counts": probes, "probe_shortfall": shortfall,
         "flapping": flapping, "flap_count": len(flapping),
         "worst": worst, "worst_rate": rates[worst],
+        "updated_at": int(time.time() // HEARTBEAT_BUCKET_S) * HEARTBEAT_BUCKET_S,
         "door_openings": door_openings, "door_orphans": door_orphans,
         "door_orphan_rate": door_orphan_rate, "doors": door_by_name,
         "door_orphans_by_door": orphan_by_name, "door_orphan_times": orphan_times,

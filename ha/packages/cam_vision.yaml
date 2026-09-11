@@ -24,6 +24,7 @@ command_line:
         - blind_count
         - summary
         - error
+        - updated_at
 
 # cam_vision was the ONLY monitor with no dead-man and no availability guard, so
 # it could die and nothing anywhere would say so — while cam_motion.py's verdict

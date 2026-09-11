@@ -40,6 +40,7 @@ command_line:
         - door_orphan_times
         - summary
         - error
+        - updated_at
 
 template:
   - binary_sensor:
