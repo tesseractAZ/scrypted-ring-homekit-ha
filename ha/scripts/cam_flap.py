@@ -136,8 +136,17 @@ TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.\d+ ")
 # Deliberately published WITHOUT an alert threshold: 26 openings is far too thin
 # to fit one, and inventing a bar from noise is how this project has gone wrong
 # before. Let the history accumulate first.
-DOOR_RE = re.compile(r" i ([A-Za-z][A-Za-z ]+?) entryOpen: true\s*$")
-MOTION_RE = re.compile(r": ([A-Za-z][A-Za-z ]+?) onMotionDetected\s*$")
+# Name classes are deliberately wider than the current roster. The first version
+# accepted [A-Za-z ] only, which meant a device renamed to contain a digit,
+# hyphen, apostrophe, period or ampersand would stop matching with NO error - and
+# in the motion case that is not a quiet degradation but an actively WRONG
+# result: MOTION_RE feeds the pool that decides whether a door opening was
+# witnessed, so a camera dropping out of the pool MANUFACTURES orphans on every
+# door in the house and reads as a fleet-wide detection failure. A name the
+# script does not recognise is now counted and published (unknown_motion_names)
+# rather than silently discarded, so the failure announces itself.
+DOOR_RE = re.compile(r" i ([A-Za-z][\w '&.\-]*?) entryOpen: true\s*$")
+MOTION_RE = re.compile(r": ([A-Za-z][\w '&.\-]*?) onMotionDetected\s*$")
 DOOR_MOTION_WINDOW_S = 180.0
 # HEARTBEAT. Home Assistant rewrites last_updated only when the state or an
 # attribute CHANGES, and a healthy fleet emits a byte-identical payload for hours
@@ -235,6 +244,7 @@ def main():
     push_undecryptable = 0
     door_events = []     # [(ts_string, door_name)]
     cam_motion = []      # [(ts_string, camera_name)]
+    unknown_motion = {}  # camera names seen in the log but absent from CAMS
 
     for ln in lines:
         # Door and motion lines are their own shapes and are collected BEFORE
@@ -246,10 +256,16 @@ def main():
                 door_events.append((tsm.group(1), dm.group(1).strip()))
         else:
             mm = MOTION_RE.search(ln)
-            if mm and mm.group(1).strip() in CAMS:
+            if mm:
+                nm = mm.group(1).strip()
                 tsm = TS_RE.match(ln)
-                if tsm:
-                    cam_motion.append((tsm.group(1), mm.group(1).strip()))
+                if nm in CAMS:
+                    if tsm:
+                        cam_motion.append((tsm.group(1), nm))
+                else:
+                    # Do NOT drop it silently: an unrecognised camera is missing
+                    # from the witness pool, which inflates the orphan count.
+                    unknown_motion[nm] = unknown_motion.get(nm, 0) + 1
 
         if "takePicture" in ln:
             m = PROBE_RE.search(ln)
@@ -322,6 +338,10 @@ def main():
         worst, rates[worst], span_min, len(flapping))
     if push_undecryptable_rate >= 1.0:
         summary += "; undecryptable push msgs %.1f/hr" % push_undecryptable_rate
+    if unknown_motion:
+        # Loud, because it silently corrupts the orphan metric.
+        summary += ("; UNRECOGNISED CAMERA NAME(S) IN LOG: %s - orphan counts are "
+                    "unreliable until CAMS is updated" % ",".join(sorted(unknown_motion)))
     if door_openings:
         summary += "; doors %d open" % door_openings
         if door_orphans:
