@@ -32,6 +32,12 @@ command_line:
         - flap_count
         - worst
         - worst_rate
+        - door_openings
+        - door_orphans
+        - door_orphan_rate
+        - doors
+        - door_orphans_by_door
+        - door_orphan_times
         - summary
         - error
 

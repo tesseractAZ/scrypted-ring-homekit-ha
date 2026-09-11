@@ -111,6 +111,33 @@ STREAM_FAULTS = (
     "camera_unexpected_close",
 )
 TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.\d+ ")
+# ---------------------------------------------------------------------------
+# DOOR CONTACTS. The Ring door/contact sensors reach this engine but are NOT
+# published to Home Assistant - there is no binary_sensor for any of them, so
+# the recorder has never seen one and no monitor here could use them. They are
+# the only signal in the stack INDEPENDENT of the camera event path: a door
+# physically opened, whatever the cameras did or did not report.
+#
+# This does NOT try to adjudicate a single camera. Fitting a per-camera
+# expectation needs history that does not exist - the add-on log retains ~2.3
+# days while the cameras currently dark went quiet 19 and 24 days ago - and
+# against what history there is, the one plausible camera/door
+# pairing on this fleet is already explained: that camera's historical
+# co-fire rate with its own neighbours is ~13%, so zero hits in ten openings is
+# the EXPECTED outcome, not evidence of a fault.
+#
+# What it does do is RECORD the events, so the recorder accumulates the history
+# that would make such a test possible later, and publish the one statistic that
+# needs no baseline: a door opening that produced no camera motion anywhere.
+# Expected value ~0 (measured 1 of 26 openings over 2.3 days), and unlike the
+# fleet dead-man - which must wait 6 hours of total silence - it is an immediate,
+# physically grounded check that the detection path as a whole is alive.
+# Deliberately published WITHOUT an alert threshold: 26 openings is far too thin
+# to fit one, and inventing a bar from noise is how this project has gone wrong
+# before. Let the history accumulate first.
+DOOR_RE = re.compile(r" i ([A-Za-z][A-Za-z ]+?) entryOpen: true\s*$")
+MOTION_RE = re.compile(r": ([A-Za-z][A-Za-z ]+?) onMotionDetected\s*$")
+DOOR_MOTION_WINDOW_S = 180.0
 PROBE_RE = re.compile(r"public/(\d+)/[a-f0-9]+/takePicture")
 
 
@@ -122,7 +149,10 @@ def emit(payload):
         "push_drops": None, "push_drop_rate": None,   # legacy aliases, same value
         "probe_counts": None, "probe_shortfall": [],
         "flapping": [], "flap_count": 0,
-        "worst": None, "worst_rate": -1, "summary": "", "error": None,
+        "worst": None, "worst_rate": -1,
+        "door_openings": None, "door_orphans": None, "door_orphan_rate": None,
+        "doors": None, "door_orphans_by_door": None, "door_orphan_times": None,
+        "summary": "", "error": None,
     }
     base.update(payload)
     print(json.dumps(base))
@@ -191,8 +221,24 @@ def main():
     probes = {n: 0 for n in DEVICE_IDS.values()}
     stream_errors = 0
     push_undecryptable = 0
+    door_events = []     # [(ts_string, door_name)]
+    cam_motion = []      # [(ts_string, camera_name)]
 
     for ln in lines:
+        # Door and motion lines are their own shapes and are collected BEFORE
+        # the fault chain below; they must not disturb its if/elif ordering.
+        dm = DOOR_RE.search(ln)
+        if dm:
+            tsm = TS_RE.match(ln)
+            if tsm:
+                door_events.append((tsm.group(1), dm.group(1).strip()))
+        else:
+            mm = MOTION_RE.search(ln)
+            if mm and mm.group(1).strip() in CAMS:
+                tsm = TS_RE.match(ln)
+                if tsm:
+                    cam_motion.append((tsm.group(1), mm.group(1).strip()))
+
         if "takePicture" in ln:
             m = PROBE_RE.search(ln)
             if m and m.group(1) in DEVICE_IDS:
@@ -213,6 +259,28 @@ def main():
             push_undecryptable += 1
         elif any(f in ln for f in STREAM_FAULTS):
             stream_errors += 1
+
+    def _ep(t):
+        return datetime.strptime(t, "%Y-%m-%d %H:%M:%S").timestamp()
+    motion_ts = []
+    for t, _ in cam_motion:
+        try:
+            motion_ts.append(_ep(t))
+        except Exception:  # noqa: BLE001
+            pass
+    door_by_name, orphan_by_name, orphan_times = {}, {}, []
+    for t, name in door_events:
+        door_by_name[name] = door_by_name.get(name, 0) + 1
+        try:
+            te = _ep(t)
+        except Exception:  # noqa: BLE001
+            continue
+        if not any(abs(mt - te) <= DOOR_MOTION_WINDOW_S for mt in motion_ts):
+            orphan_by_name[name] = orphan_by_name.get(name, 0) + 1
+            orphan_times.append(t)
+    door_openings = len(door_events)
+    door_orphans = sum(orphan_by_name.values())
+    door_orphan_rate = round(door_orphans / float(door_openings), 3) if door_openings else None
 
     # Alert metric = hard recording errors only. Error-coded closes are
     # reported as context but excluded: code 3 also covers a benign
@@ -237,6 +305,10 @@ def main():
         worst, rates[worst], span_min, len(flapping))
     if push_undecryptable_rate >= 1.0:
         summary += "; undecryptable push msgs %.1f/hr" % push_undecryptable_rate
+    if door_openings:
+        summary += "; doors %d open" % door_openings
+        if door_orphans:
+            summary += " (%d with NO camera motion)" % door_orphans
     if shortfall:
         summary += "; probe shortfall: " + ",".join(shortfall)
     err_closes = sorted((n for n, v in closed_err.items() if v), key=lambda n: -closed_err[n])
@@ -257,7 +329,11 @@ def main():
         "push_drops": push_undecryptable, "push_drop_rate": push_undecryptable_rate,
         "probe_counts": probes, "probe_shortfall": shortfall,
         "flapping": flapping, "flap_count": len(flapping),
-        "worst": worst, "worst_rate": rates[worst], "summary": summary,
+        "worst": worst, "worst_rate": rates[worst],
+        "door_openings": door_openings, "door_orphans": door_orphans,
+        "door_orphan_rate": door_orphan_rate, "doors": door_by_name,
+        "door_orphans_by_door": orphan_by_name, "door_orphan_times": orphan_times,
+        "summary": summary,
     })
 
 

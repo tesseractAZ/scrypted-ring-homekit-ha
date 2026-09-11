@@ -149,6 +149,28 @@ before deploying (grep for `<` to find them).
   consecutive hourly checks, mathematically disabling the dead-man while it
   claimed to be watching.
 
+The stream-fault monitor also records **door contacts**. The Ring door/contact
+sensors reach the engine but are not published to Home Assistant — no
+`binary_sensor` exists for any of them, so the recorder had never seen one and
+no monitor could use them. They are the only signal in the stack that is
+*independent of the camera event path*: a door physically opened, whatever the
+cameras did or did not report. `cam_flap.py` now publishes `door_openings`,
+`doors` (per door), and `door_orphans` — openings with no camera motion within
+`DOOR_MOTION_WINDOW_S` anywhere on the fleet.
+
+Two deliberate limits. It does **not** adjudicate individual cameras: fitting a
+per-camera expectation needs history that does not exist, since the add-on log
+retains only ~2.3 days, and on this fleet the one plausible camera/door pairing
+is already explained by that camera's ~13% historical co-fire rate with its own
+neighbours — zero hits in ten openings is the *expected* outcome there, not a
+fault. And it ships **without an alert threshold**: the orphan rate needs no
+baseline in principle (its expected value is ~0, measured 1 of 26 openings over
+2.3 days) but 26 openings is far too thin to fit a bar, and inventing one from
+noise is a mistake this project has made before. The value now is that the
+recorder starts accumulating durable door history — which is what makes both a
+future threshold and a future door-based corroboration partner possible, and
+which the 2.3-day log rotation otherwise made impossible.
+
 - `camera_flap_alert` / `camera_flap_recovered` / `camera_flap_down` — the
   stream-fault monitor (see `docs/operations.md` §6): pages on a sustained
   per-camera **recording-error** rate, dismisses on recovery, and pages
