@@ -139,7 +139,17 @@ TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.\d+ ")
 DOOR_RE = re.compile(r" i ([A-Za-z][A-Za-z ]+?) entryOpen: true\s*$")
 MOTION_RE = re.compile(r": ([A-Za-z][A-Za-z ]+?) onMotionDetected\s*$")
 DOOR_MOTION_WINDOW_S = 180.0
-HEARTBEAT_BUCKET_S = 600  # see emit()
+# HEARTBEAT. Home Assistant rewrites last_updated only when the state or an
+# attribute CHANGES, and a healthy fleet emits a byte-identical payload for hours
+# - so a sensor whose update loop has STOPPED is indistinguishable from one that
+# is simply steady, and every dead-man in this stack triggers on
+# unavailable/unknown/-1 without ever looking at age. Measured 2026-09-11:
+# sensor.camera_health had gone 37 minutes without writing a recorder row while
+# perfectly healthy. Publishing a bucketed clock makes staleness observable;
+# bucketing costs one extra row per bucket rather than one per poll (this sensor
+# wrote ~139 rows/day against 720 polls, and stays ~144 with the heartbeat).
+# Consumed by binary_sensor.camera_monitor_stalled.
+HEARTBEAT_BUCKET_S = 600
 PROBE_RE = re.compile(r"public/(\d+)/[a-f0-9]+/takePicture")
 
 

@@ -51,7 +51,17 @@ SLOW_SECS = 9.0         # >this = degraded/near-timeout. Above the 4-7s concurre
                         # contention band so healthy cameras aren't false-flagged.
 SLOW_AFTER = 2          # ...for this many consecutive probes (tolerate one-off spikes)
 TIMEOUT = 15
-HEARTBEAT_BUCKET_S = 600  # see the emit heartbeat note below
+# HEARTBEAT. Home Assistant rewrites last_updated only when the state or an
+# attribute CHANGES, and a healthy fleet emits a byte-identical payload for hours
+# - so a sensor whose update loop has STOPPED is indistinguishable from one that
+# is simply steady, and every dead-man in this stack triggers on
+# unavailable/unknown/-1 without ever looking at age. Measured 2026-09-11:
+# sensor.camera_health had gone 37 minutes without writing a recorder row while
+# perfectly healthy. Publishing a bucketed clock makes staleness observable;
+# bucketing costs one extra row per bucket rather than one per poll (this sensor
+# wrote ~139 rows/day against 720 polls, and stays ~144 with the heartbeat).
+# Consumed by binary_sensor.camera_monitor_stalled.
+HEARTBEAT_BUCKET_S = 600
 FLEET_STALE_MIN = 5     # majority of cams identical-to-previous-probe => fleet-level wedge
 FLEET_MISS_MIN = 5      # majority of cams failing THIS cycle => fleet-level outage,
                         # reported immediately instead of waiting out DOWN_AFTER

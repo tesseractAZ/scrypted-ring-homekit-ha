@@ -109,7 +109,17 @@ SAT_IR = 10.0                  # mean saturation below this = grayscale = IR on
 LUMA_DARK = 40.0               # ...else mean luma below this = unlit/near-black
 KEEP_HOURS = 48.0
 TIMEOUT = 12
-HEARTBEAT_BUCKET_S = 600  # see the emit heartbeat note below
+# HEARTBEAT. Home Assistant rewrites last_updated only when the state or an
+# attribute CHANGES, and a healthy fleet emits a byte-identical payload for hours
+# - so a sensor whose update loop has STOPPED is indistinguishable from one that
+# is simply steady, and every dead-man in this stack triggers on
+# unavailable/unknown/-1 without ever looking at age. Measured 2026-09-11:
+# sensor.camera_health had gone 37 minutes without writing a recorder row while
+# perfectly healthy. Publishing a bucketed clock makes staleness observable;
+# bucketing costs one extra row per bucket rather than one per poll (this sensor
+# wrote ~139 rows/day against 720 polls, and stays ~144 with the heartbeat).
+# Consumed by binary_sensor.camera_monitor_stalled.
+HEARTBEAT_BUCKET_S = 600
 PROBE_BLIND_MIN = 15.0   # a camera not successfully probed in this long is
                          # reported as BLIND rather than quiet. cam_motion.py
                          # reads the same per-camera stamp to refuse a verdict.

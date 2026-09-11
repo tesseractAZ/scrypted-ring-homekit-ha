@@ -63,7 +63,17 @@ STALE_HOURS_OVERRIDES = {
 }
 FLEET_ACTIVE_HOURS = 24.0   # ...and someone else fired within this window
 QUERY_TIMEOUT_S = 20
-HEARTBEAT_BUCKET_S = 600  # see the emit heartbeat note below
+# HEARTBEAT. Home Assistant rewrites last_updated only when the state or an
+# attribute CHANGES, and a healthy fleet emits a byte-identical payload for hours
+# - so a sensor whose update loop has STOPPED is indistinguishable from one that
+# is simply steady, and every dead-man in this stack triggers on
+# unavailable/unknown/-1 without ever looking at age. Measured 2026-09-11:
+# sensor.camera_health had gone 37 minutes without writing a recorder row while
+# perfectly healthy. Publishing a bucketed clock makes staleness observable;
+# bucketing costs one extra row per bucket rather than one per poll (this sensor
+# wrote ~139 rows/day against 720 polls, and stays ~144 with the heartbeat).
+# Consumed by binary_sensor.camera_monitor_stalled.
+HEARTBEAT_BUCKET_S = 600
 # Largest ALL-ENTITY hole in the recorder over this window. Every camera monitor
 # is a process inside the thing it monitors, so a host-down outage produces NO
 # alert of any kind: the fleet simply stops being observed and every gate is
