@@ -46,7 +46,7 @@
     },
     {
       "data": {
-        "notification_id": "front_door_ding",
+        "notification_id": "doorbell_ding",
         "title": "🔔 Front door",
         "message": "Doorbell pressed at {{ now().strftime('%-I:%M %p') }}."
       },

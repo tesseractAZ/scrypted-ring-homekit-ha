@@ -68,10 +68,10 @@ Scrypted → Settings/Users → create a **new admin user** (your own username/p
 
 **Battery / motion‑event trap (from the Ring plugin guidance):**
 - On **battery** cameras: **do not enable Prebuffer**, PAM‑DIFF, or OpenCV — a persistent stream *stops motion‑event delivery* and *drains the battery faster than it charges*, and clutters the Ring app with Live‑View recordings. An always‑open RTSP pull has the same effect; prefer **snapshot‑only** Generic Cameras for battery cams.
-- On **wired / hardline** cameras: none of that applies. **Prebuffer is safe and desirable** here — it's what makes live view instant (see [operations.md §1](operations.md#1-instant-live-view-prebuffer-wired-cameras-only)). Leave it off during the migration and enable it as a post‑cutover step once each camera's wired status is confirmed.
+- On **wired / hardline** cameras the battery cost disappears but **the event suppression does not**. Ring progressively stops delivering motion events for *any* persistently‑streamed camera, wired included. Leave Prebuffer **off** on every camera whose motion events or HKSV clips matter — which, if you are reading this guide, is all of them. Instant live view is achieved instead by the on‑demand WebRTC path in [operations.md §1](operations.md#1-instant-live-view-and-why-prebuffer-is-not-how-you-get-it).
 - **Codec must be H.264** (H.265/MJPEG break WebRTC).
 
-> This corrects the blanket "never prebuffer Ring" advice — that warning is **battery‑specific**. Classify each camera wired‑vs‑battery before choosing.
+> ⚠️ **An earlier version of this runbook said prebuffer was "safe and desirable" on wired cameras. That was wrong and is retracted.** Battery drain is the battery‑specific cost; **event suppression is universal**. The failure is gradual and silent — events thin out over days rather than stopping outright — so it is easy to enable prebuffer, see live view improve, and not connect the motion loss that follows. Classify wired‑vs‑battery for the *battery* trade‑off only, never for event delivery.
 
 **VERIFY:** on battery cams, Prebuffer/PAM‑DIFF/OpenCV are off; snapshots + live still work in the console for all cameras.
 

@@ -1,0 +1,90 @@
+name: validate
+
+# Every check here exists because the corresponding mistake was actually made in
+# this repo, not because it is good practice in the abstract:
+#  - a raw apostrophe inside a single-quoted YAML scalar broke automations.yaml
+#  - a key emitted by a script but absent from its package json_attributes is
+#    silently dropped by Home Assistant and can never become an attribute
+#  - real Scrypted device ids and a real camera entity name reached ten published
+#    commits because the sanitising regex used \b, which does not match before an
+#    underscore, and because the sweep's pattern list was quietly narrowed
+#  - an automation whose `id` disagrees with its filename cannot be POSTed by the
+#    documented deploy step
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python compiles
+        run: python -m compileall -q ha/scripts
+
+      - name: YAML parses
+        run: |
+          pip install --quiet pyyaml
+          python - <<'PY'
+          import glob, yaml
+          for f in sorted(glob.glob('ha/packages/*.yaml')):
+              yaml.safe_load(open(f))
+              print('ok', f)
+          PY
+
+      - name: JSON parses, and every automation id matches its filename
+        run: |
+          python - <<'PY'
+          import glob, json, os, sys
+          bad = []
+          for f in sorted(glob.glob('ha/automations/*.json')):
+              d = json.load(open(f))
+              stem = os.path.basename(f)[:-5]
+              if 'id' in d and d['id'] != stem:
+                  bad.append((f, d['id'], stem))
+          if bad:
+              for f, got, want in bad:
+                  print(f'{f}: id={got!r} but filename implies {want!r}', file=sys.stderr)
+              sys.exit(1)
+          print(f'{len(glob.glob("ha/automations/*.json"))} automations parse; ids consistent')
+          PY
+
+      - name: json_attributes allowlist parity
+        run: |
+          pip install --quiet pyyaml
+          python - <<'PY'
+          import re, yaml, sys
+          fail = False
+          for name in ('cam_health', 'cam_motion', 'cam_vision', 'cam_flap'):
+              src = open(f'ha/scripts/{name}.py').read()
+              keys = set()
+              if 'def emit(' in src:
+                  keys |= set(re.findall(r'"([a-z_0-9]+)"\s*:',
+                              src.split('def emit(')[1].split('base.update')[0]))
+              for blk in re.findall(r'print\(json\.dumps\(\{(.*?)\}\)\)', src, re.S):
+                  keys |= set(re.findall(r'"([a-z_0-9]+)"\s*:', blk))
+              for blk in re.findall(r'    emit\(\{(.*?)\}\)', src, re.S):
+                  keys |= set(re.findall(r'"([a-z_0-9]+)"\s*:', blk))
+              allow = set(yaml.safe_load(open(f'ha/packages/{name}.yaml'))
+                          ['command_line'][0]['sensor']['json_attributes'])
+              dead, unused = keys - allow, allow - keys
+              status = 'ok' if not dead and not unused else 'MISMATCH'
+              print(f'{name}: {status} emitted={len(keys)} allowed={len(allow)}')
+              if dead:
+                  print(f'  emitted but NOT allowlisted (dead on arrival): {sorted(dead)}', file=sys.stderr)
+              if unused:
+                  print(f'  allowlisted but never emitted: {sorted(unused)}', file=sys.stderr)
+              fail |= bool(dead or unused)
+          sys.exit(1 if fail else 0)
+          PY
+
+      - name: Public-repo hygiene sweep
+        run: bash .github/hygiene-sweep.sh

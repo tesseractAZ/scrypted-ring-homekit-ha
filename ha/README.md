@@ -25,10 +25,11 @@ before deploying (grep for `<` to find them).
    same nine endpoints, so the two lists must match.
    `scripts/cam_motion.py` needs the nine camera entity stems (it queries
    `binary_sensor.<stem>_motion`) and, optionally, per-camera staleness
-   overrides and `EXCLUDE_SPANS` for any period your recorder was not writing.
+   overrides. (There is deliberately no recorder-outage exclusion knob — see
+   the corroboration section for why one can only ever delete real data.)
    `scripts/cam_flap.py` needs: `<scrypted_addon_slug>` (visible in the add-on's
    URL in the HA UI, e.g. `xxxxxxxx_scrypted`); its `CAMS` dict keys must
-   byte-match the camera names Scrypted prints in log brackets (`[Front Door]`);
+   byte-match the camera names Scrypted prints in log brackets (e.g. `[Kitchen Cam]`);
    `PROBE_INTERVAL_MIN` = the scan_interval of ONE probing sensor in minutes,
    and `PROBERS` = how many sensors probe those endpoints on that interval
    (2 as shipped: `cam_health.yaml` and `cam_vision.yaml` both run
@@ -89,9 +90,11 @@ before deploying (grep for `<` to find them).
 
 - `camera_health_alert` — pages on a **sustained** fault only, four tiers:
   camera down 8 min (fast); degraded (frozen/slow) 30 min — transient stream
-  blips self-heal in under ~22 min and paging on them is pure noise; and
+  blips self-heal in under ~22 min and paging on them is pure noise;
   fleet-stale 5 min (fastest) — multiple cameras returning byte-identical
-  frames simultaneously means a fleet-level snapshot-pipeline wedge.
+  frames simultaneously means a fleet-level snapshot-pipeline wedge; and
+  fleet-miss 5 min — every camera failing the same probe cycle, which is the
+  snapshot path being down rather than any camera being down.
   Re-asserts hourly while the problem binary has been on 30+ min (the longest
   tier's window, so a re-assert can never page a blip the tiers absorb):
   persistent notifications are in-memory, so a restart wipes the page with the
@@ -117,9 +120,11 @@ before deploying (grep for `<` to find them).
   valid JSON with exit 0 — the sensor stays numeric but its `error` attribute
   goes non-null, so a state trigger alone would miss the likeliest death (a
   recorder-DB failure).
-- `camera_health_heartbeat` — daily proactive status card, sourced from ALL
-  THREE monitors (snapshot probes, motion staleness, stream faults) with an
-  honest "not reporting" fallback per line. "Probes OK" is the deliberate
+- `camera_health_heartbeat` — daily proactive status card (plus a boot trigger, so
+  a restart cannot erase the only proactive positive signal for the rest of the
+  day), sourced from ALL FOUR monitors — snapshot probes, motion staleness, the
+  visual monitor and stream faults — with an honest "not reporting" fallback per
+  line, and it leads with any proven event-path failure. "Probes OK" is the deliberate
   wording: the probe measures the snapshot path, not motion-event delivery,
   and a card that says "healthy" from one monitor while another is latched is
   a false all-clear.
@@ -158,7 +163,7 @@ before deploying (grep for `<` to find them).
   Note two structural limits: it tests the **minimum** staleness across the
   fleet, so any one healthy camera suppresses it entirely — it can only ever
   catch a *total* pipeline outage, never a single camera — and the active-hours
-  gate leaves it un-evaluable for the rest of the day. Per-camera failure is
+  bar applies around the clock. Per-camera failure is
   `camera_motion_dead_alert`'s job. Catches the silent event-listener
   wedge described in `docs/operations.md` §3. The condition reads the
   staleness sensor's **recorder-derived** `hours_since` map, NOT entity
@@ -217,9 +222,14 @@ shows up here first.
   per-camera **recording-error** rate, dismisses on recovery, and pages
   separately if the monitor itself sits in an error state for an hour
   (dead-man's switch - covers the watchdog dying too, since that starves
-  the monitor's clock). Also carries a tripwire on cloud push-decryption
-  failures - each one is a dropped motion push; a sustained climb means the
-  event transport is degrading and the camera-source plugin needs re-auth.
+  the monitor's clock). Also carries a tripwire on UNDECRYPTABLE cloud push
+  messages (`push_undecryptable`). These are **not** dropped motion events: across
+  14 such failures, 30 of 30 engine-side motion detections still reached HA in the
+  same second, because the failure sits in the push receiver rather than in the
+  signalling session that actually delivers motion. Do **not** re-authenticate the
+  camera-source plugin on this signal alone — confirm a real motion-delivery gap
+  first. The rate is also confounded by push volume, which tracks motion, so
+  normalise before calling a trend.
 - `camera_monitor_stalled` / `_recovered` — **freshness** dead-man for all four
   monitors, and the one that closes the largest hole in this design. Every other
   dead-man here triggers on `unavailable`/`unknown`/`-1`, and none of them looks

@@ -33,15 +33,15 @@ from concurrent.futures import ThreadPoolExecutor
 
 HOST = "<HA_HOST_IP>:11080"
 CAMS = [
-    ("<cam_1>", "28", "<webhook_token>"),
-    ("<cam_2>", "29", "<webhook_token>"),
-    ("<cam_3>", "30", "<webhook_token>"),
-    ("<cam_4>", "31", "<webhook_token>"),
-    ("<cam_5>", "34", "<webhook_token>"),
-    ("<cam_6>", "38", "<webhook_token>"),
-    ("<cam_7>", "41", "<webhook_token>"),
-    ("<cam_8>", "44", "<webhook_token>"),
-    ("<cam_9>", "47", "<webhook_token>"),
+    ("<cam_1>", "<device_id_1>", "<webhook_token>"),
+    ("<cam_2>", "<device_id_2>", "<webhook_token>"),
+    ("<cam_3>", "<device_id_3>", "<webhook_token>"),
+    ("<cam_4>", "<device_id_4>", "<webhook_token>"),
+    ("<cam_5>", "<device_id_5>", "<webhook_token>"),
+    ("<cam_6>", "<device_id_6>", "<webhook_token>"),
+    ("<cam_7>", "<device_id_7>", "<webhook_token>"),
+    ("<cam_8>", "<device_id_8>", "<webhook_token>"),
+    ("<cam_9>", "<device_id_9>", "<webhook_token>"),
 ]
 STATE = "/config/.cam_health_state.json"
 MIN_BYTES = 2000        # smaller => error placeholder, not a real frame

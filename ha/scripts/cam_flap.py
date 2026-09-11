@@ -89,9 +89,9 @@ CAMS = {
     "<Scrypted Camera Name 9>": "<cam_9>",
 }
 DEVICE_IDS = {  # scrypted device id -> short name, for probe accounting
-    "<device_id_1>": "<cam_1>", "29": "<cam_2>", "30": "<cam_3>",
-    "<device_id_4>": "<cam_4>", "34": "<cam_5>", "38": "<cam_6>",
-    "<device_id_7>": "<cam_7>", "44": "<cam_8>", "47": "<cam_9>",
+    "<device_id_1>": "<cam_1>", "<device_id_2>": "<cam_2>", "<device_id_3>": "<cam_3>",
+    "<device_id_4>": "<cam_4>", "<device_id_5>": "<cam_5>", "<device_id_6>": "<cam_6>",
+    "<device_id_7>": "<cam_7>", "<device_id_8>": "<cam_8>", "<device_id_9>": "<cam_9>",
 }
 
 # UNDECRYPTABLE PUSH MESSAGES. Deliberately NOT called "dropped pushes": that
@@ -122,8 +122,8 @@ TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.\d+ ")
 # This does NOT try to adjudicate a single camera. Fitting a per-camera
 # expectation needs history that does not exist - the add-on log retains ~2.3
 # days while the cameras currently dark went quiet 19 and 24 days ago - and
-# against what history there is, the one plausible pairing (the garage workroom
-# camera vs the garage back door) is already explained: that camera's historical
+# against what history there is, the one plausible pairing (the <cam_7>
+# camera vs the <Door Contact Name>) is already explained: that camera's historical
 # co-fire rate with its own neighbours is ~13%, so zero hits in ten openings is
 # the EXPECTED outcome, not evidence of a fault.
 #
