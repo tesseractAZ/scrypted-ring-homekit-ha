@@ -129,9 +129,18 @@ before deploying (grep for `<` to find them).
   two independent speaker paths (`continue_on_error` on both, so one path's
   failure can't silence the other) + a persistent notification.
 - `cameras_motion_stale_alert` / `_clear` — fleet-wide dead-man's switch,
-  checked hourly during active hours: if **zero** cameras report motion over
-  a rolling 6-hour window, the motion pipeline itself is down (a single quiet
-  camera is normal; a silent fleet is not). Fit that window to your own fleet's
+  checked hourly, **24/7**, against a time-dependent bar: **6 hours** during
+  10:00–20:00 local and **10 hours** overnight. If zero cameras report motion
+  across that window the motion pipeline itself is down (a single quiet camera is
+  normal; a silent fleet is not). The split exists because the fleet is genuinely
+  quieter at night — fitted on this fleet's occupied data, daytime gaps top out
+  at 4.64 h while overnight gaps reach 8.46 h — and a single bar therefore has to
+  choose between false pages at night and no coverage at all. It used to choose
+  the latter: a hard 10:00–20:00 time condition meant a total pipeline outage
+  starting at 20:01 raised nothing until 10:11 the next morning, up to **14 h 10 m
+  of unmonitored fleet, every night**. At the 10 h overnight bar, zero of 876
+  overnight gaps and zero of 873 daytime gaps would have fired across 36 days;
+  at 8 h, four would have fired falsely. Fit that window to your own fleet's
   occupied data, not to intuition — on this one, 456 inter-event gaps over ten
   occupied days gave p50 0.04 h, p95 2.41 h, p99 6.45 h and a max of 8.46 h, so
   a 4-hour threshold fired on 4.0% of in-window checks (about one page every
@@ -170,6 +179,20 @@ noise is a mistake this project has made before. The value now is that the
 recorder starts accumulating durable door history — which is what makes both a
 future threshold and a future door-based corroboration partner possible, and
 which the 2.3-day log rotation otherwise made impossible.
+
+`stream_errors` is collected and published but deliberately **not wired to an
+alert**, and that is a measured decision rather than an oversight. Across 4,520
+samples the distribution is bimodal — p50 0, p95 2.16/h, p99 15.6/h — so a bar in
+the valley around 6/h is easy to pick and would have fired on four episode-days in
+55. The problem is that none of those episodes cost anything. On the largest
+(peak 25.6/h, 108 raw errors, ~15 h) motion delivery was completely normal, no
+camera went down, and the recording-error rate — the metric that *is* wired — was
+flat zero. The one episode that involved real trouble had already paged through
+`camera_flap_alert` and `camera_health_alert`. High `stream_errors` does correlate
+with recording errors (32% of samples vs 11%), but recording errors are already
+the alert metric, so wiring this would add duplicate and false pages without
+adding detection. Keep it as context on the card; revisit only if an outage ever
+shows up here first.
 
 - `camera_flap_alert` / `camera_flap_recovered` / `camera_flap_down` — the
   stream-fault monitor (see `docs/operations.md` §6): pages on a sustained
