@@ -21,6 +21,33 @@ import time
 
 DB = "/config/home-assistant_v2.db"
 VISION_STATE = "/config/.cam_vision_state.json"  # written by cam_vision.py
+MOTION_STATE = "/config/.cam_motion_state.json"  # written by THIS script
+# ---------------------------------------------------------------------------
+# PROOF LATCH. The corroboration fit window is bounded by the SQL fetch at
+# `ev_cut` below, which slides with now() while a stale camera's cut_ts is
+# FIXED at its last event - so the historical half of the evidence shrinks by a
+# day per day and a proof eventually starves itself. Measured on this fleet:
+# <cam_9> was proven broken at p=2e-08 on 44 co-fires, and by day six the
+# same camera, equally broken, was down to 11 co-fires and ~3 days from falling
+# under CORROBORATE_MIN_HITS - at which point the card would have flipped to
+# "cannot be tested", wording it itself defines as "no conclusion, not an
+# all-clear". Losing a TRUE positive to calendar arithmetic is worse than the
+# false positive the MIN_HITS floor exists to prevent.
+#
+# Widening the window was the obvious fix and is the wrong one: anchoring it at
+# [cut-30d, cut] fits the partner rate WORSE (mean absolute error 0.450 vs 0.269
+# against the actual post-period rate, measured over the five cameras alive
+# across the cut), and because p = (1-rate_lb)**post, overstating the rate makes
+# a proof CHEAPER - the zero-hit clusters needed to reach p<1e-3 fell from 61 to
+# 9 on one camera. That trades a lost true positive for manufactured false ones.
+#
+# Latching costs nothing statistically. A proof that once passed every gate is a
+# fact about a moment, not a claim that needs re-deriving hourly. The latch is
+# keyed to cut_ts, so the instant the camera produces any event its cut moves and
+# the latch no longer matches - it clears itself with no explicit reset path to
+# get wrong. Nothing here can CREATE a verdict; it can only preserve one that was
+# already earned.
+LATCH_MAX_AGE_D = 90.0   # forget a latch this old even if the camera stays quiet
 STALE_HOURS = 72.0      # a camera silent this long while the fleet is active
 # Naturally-quiet cameras get longer windows. Zero events is NOT proof of a
 # fault: an interior room can sit genuinely unvisited for a week, and under a
@@ -74,7 +101,8 @@ CORROBORATE_LOOKBACK_D = 30.0    # history used to fit partner co-fire rates
 CORROBORATE_LINK_S = 300.0       # events this close chain into one cluster
 CORROBORATE_MIN_RATE = 0.15      # a partner below this has too little power
 CORROBORATE_MIN_PRE = 20         # ...and needs this many historical clusters
-CORROBORATE_MIN_POST = 8         # ...and this many opportunities since the cut
+CORROBORATE_MIN_POST = 8
+CLIQUE_MIN_SPAN_S = 24 * 3600.0  # a partner is only "silent too" after this long         # ...and this many opportunities since the cut
 CORROBORATE_P = 1e-3             # P(silence | still working) below this = broken
 CORROBORATE_MIN_HITS = 8         # ...and the rate must rest on at least this many
                                  # actual historical co-fires. A rate fitted from 4
@@ -148,7 +176,7 @@ def _clusters(events, link_s):
     return out
 
 
-def corroborate(events, target, cut_ts):
+def corroborate(events, target, cut_ts, quiet_partners=None):
     """Is `target`'s silence since cut_ts explicable by a quiet scene?
 
     Returns a dict describing the strongest partner test available, or a dict
@@ -163,11 +191,35 @@ def corroborate(events, target, cut_ts):
     # test look better-behaved than it is.
     post = _clusters([e for e in ev if e[0] >= cut_ts + CORROBORATE_LINK_S],
                      CORROBORATE_LINK_S)
+    # How long the fleet has been observed since this camera went quiet.
+    post_span_s = (max(e[0] for e in ev) - cut_ts) if ev else 0.0
     best = None
+    if quiet_partners is None:
+        quiet_partners = []
     for partner in {c for _, c in ev} - {target}:
         n_pre = [cl for cl in pre if partner in cl]
         n_post = [cl for cl in post if partner in cl]
-        if len(n_pre) < CORROBORATE_MIN_PRE or len(n_post) < CORROBORATE_MIN_POST:
+        if len(n_pre) < CORROBORATE_MIN_PRE:
+            continue
+        if len(n_post) < CORROBORATE_MIN_POST:
+            # This partner has the history to judge but has itself gone quiet
+            # since the cut. Remember it: when a whole co-firing GROUP fails
+            # together, every member's only high-power partners are the other
+            # silent members, so MIN_POST removes exactly the cameras that could
+            # adjudicate and the survivor is some 3%-correlated camera that
+            # cannot. Reporting that as "no partner shares enough of this view"
+            # is misleading - the partners share plenty, they are just silent
+            # too, which is itself the more interesting fact.
+            # Only call a partner SILENT if it has produced nothing at all, and
+            # only once enough time has passed that it should have. Treating
+            # "fewer than MIN_POST clusters" as silence is wrong: for a camera
+            # that has only just gone quiet the post window is short and EVERY
+            # partner looks silent, which would print an alarming group-outage
+            # verdict for a perfectly healthy fleet.
+            rate_q = sum(1 for cl in n_pre if target in cl) / float(len(n_pre))
+            if (quiet_partners is not None and rate_q >= CORROBORATE_MIN_RATE
+                    and len(n_post) == 0 and post_span_s >= CLIQUE_MIN_SPAN_S):
+                quiet_partners.append((partner, round(rate_q, 3), len(n_post)))
             continue
         pre_hits = sum(1 for cl in n_pre if target in cl)
         rate = pre_hits / float(len(n_pre))
@@ -179,6 +231,23 @@ def corroborate(events, target, cut_ts):
                     "pre_clusters": len(n_pre), "post_clusters": len(n_post),
                     "post_hits": hits}
     if best is None or best["rate"] < CORROBORATE_MIN_RATE:
+        if quiet_partners:
+            quiet_partners.sort(key=lambda x: -x[1])
+            names = ", ".join("%s (%.0f%%)" % (n, 100 * r) for n, r, _ in quiet_partners[:3])
+            return {
+                "testable": False,
+                "best_rate": best["rate"] if best else None,
+                "partner": best["partner"] if best else None,
+                "quiet_partners": quiet_partners,
+                "verdict": (
+                    "cannot be tested - this camera's co-firing partners are "
+                    "SILENT TOO: %s would each have the history to judge it, but "
+                    "none has produced motion since this camera went quiet. A "
+                    "whole group going dark together is not evidence that any one "
+                    "of them is fine - it is a stronger signal than a single "
+                    "quiet camera, and this test cannot see it. Check them "
+                    "together, not one at a time." % names),
+            }
         return {"testable": False, "best_rate": best["rate"] if best else None,
                 "partner": best["partner"] if best else None,
                 "verdict": ("cannot be tested by co-firing - no partner camera "
@@ -437,6 +506,11 @@ def main():
     # available where a partner camera shares enough of the view - where it is
     # not, it says so rather than falling back on a reassuring guess.
     corroboration = {}
+    try:
+        latches = json.load(open(MOTION_STATE)).get("proofs", {})
+    except Exception:  # noqa: BLE001 - a missing/corrupt latch file must not fail the sensor
+        latches = {}
+    new_latches = {}
     for cam in stale:
         ts = last.get(cam)
         if ts is None:
@@ -450,6 +524,67 @@ def main():
         except Exception as exc:  # noqa: BLE001 - an annotation must never fail the sensor
             corroboration[cam] = {"testable": False,
                                   "verdict": "corroboration failed: %s" % exc}
+        v = corroboration[cam]
+        prior = latches.get(cam)
+        # A latch belongs to ONE silent span. Matching on cut_ts means any event
+        # from this camera moves its cut and orphans the latch automatically -
+        # there is no "clear the proof" path that can be forgotten or mis-fired.
+        prior_valid = (
+            isinstance(prior, dict)
+            and abs(float(prior.get("cut_ts", 0)) - float(ts)) < 1.0
+            and (now - float(prior.get("proven_at", 0))) <= LATCH_MAX_AGE_D * 86400
+        )
+        if v.get("broken"):
+            # Keep the FIRST proof's figures: they were measured when the
+            # evidence was strongest, and re-stating today's eroded numbers
+            # would understate a conclusion that has not weakened.
+            new_latches[cam] = prior if prior_valid else {
+                "cut_ts": float(ts),
+                "proven_at": now,
+                "p_value": v.get("p_value"),
+                "partner": v.get("partner"),
+                "rate": v.get("rate"),
+                "rate_lb": v.get("rate_lb"),
+                "pre_hits": v.get("pre_hits"),
+                "pre_clusters": v.get("pre_clusters"),
+                "post_clusters": v.get("post_clusters"),
+            }
+        elif prior_valid:
+            # The proof stands; only the window that re-derives it has shrunk.
+            # Report the latched finding rather than letting a true positive
+            # decay into "cannot be tested" through calendar arithmetic alone.
+            age_d = (now - float(prior["proven_at"])) / 86400.0
+            corroboration[cam] = {
+                "testable": True,
+                "broken": True,
+                "latched": True,
+                "proven_days_ago": round(age_d, 1),
+                "partner": prior.get("partner"),
+                "p_value": prior.get("p_value"),
+                "rate": prior.get("rate"),
+                "rate_lb": prior.get("rate_lb"),
+                "pre_hits": prior.get("pre_hits"),
+                "pre_clusters": prior.get("pre_clusters"),
+                "verdict": (
+                    "EVENT PATH BROKEN (proof established %.1f days ago and still "
+                    "standing): %s co-fired with this camera in %.1f%% of its "
+                    "motion clusters (%s/%s; 95%% CI lower bound %.1f%%) and P(the "
+                    "silence since | still working) was %.1g. This camera has "
+                    "produced no event at any point since, so the finding is "
+                    "unchanged - it is LATCHED because the 30-day fit window has "
+                    "slid past the camera's last working period and can no longer "
+                    "re-derive it. It clears automatically on the camera's next "
+                    "event. Current re-derivation says: %s"
+                    % (age_d, prior.get("partner"), 100 * float(prior.get("rate") or 0),
+                       prior.get("pre_hits"), prior.get("pre_clusters"),
+                       100 * float(prior.get("rate_lb") or 0), prior.get("p_value"),
+                       v.get("verdict", "n/a"))),
+            }
+            new_latches[cam] = prior
+    try:
+        json.dump({"proofs": new_latches}, open(MOTION_STATE, "w"))
+    except Exception:  # noqa: BLE001 - losing the latch must not fail the sensor
+        pass
 
     # The card used to print the DEFAULT window even when a per-camera override
     # was the one actually applied, which made the excursion look far worse than

@@ -231,6 +231,39 @@ before deploying (grep for `<` to find them).
   need masking, mask it where it is measurable - as a gap in the data - not as a
   constant no test can see.
 
+  A proof is also LATCHED once established. The fit window is bounded relative
+  to *now* while a stale camera's cut is fixed at its last event, so the
+  historical half of the evidence shrinks by a day per day and a proof
+  eventually starves itself — measured here, a camera proven broken on 44
+  co-fires was down to 11 and about three days from falling under
+  `CORROBORATE_MIN_HITS` while being just as broken. Losing a true positive to
+  calendar arithmetic is worse than the false positive that floor exists to
+  prevent. Widening the window is the obvious fix and the wrong one: anchoring
+  it at `[cut-30d, cut]` fits the partner rate *worse* (mean absolute error
+  0.450 vs 0.269 against the actual post-period rate, over the cameras alive
+  across the cut), and since p = (1-rate_lb)^post, overstating the rate makes a
+  proof cheaper — on one camera the zero-hit clusters needed to reach p<1e-3
+  fell from 61 to 9. Latching costs nothing statistically: a verdict that
+  already passed every gate is a fact about a moment, not a claim to re-derive
+  hourly. The latch is keyed to the camera's cut timestamp, so the instant it
+  produces any event its cut moves and the latch stops matching — it clears
+  itself, with no reset path to get wrong, and it can only ever preserve a
+  verdict, never create one.
+
+  One structural blind spot is reported rather than papered over. Cameras that
+  share a path co-fire at 85–95% with *each other* and only a few percent with
+  anything else, so when a whole group goes dark together, every member's only
+  high-power partners are the other silent members — and the `MIN_POST` filter
+  removes exactly the cameras that could adjudicate, leaving some 3%-correlated
+  survivor that cannot. The verdict says so explicitly ("this camera's
+  co-firing partners are SILENT TOO") instead of the misleading "no partner
+  shares enough of this view", because a group going dark together is a
+  *stronger* signal than one quiet camera, not a weaker one. That claim is
+  gated on partners having produced literally nothing over at least
+  `CLIQUE_MIN_SPAN_S`: treating "fewer than MIN_POST clusters" as silence would
+  print a group-outage verdict for a healthy fleet whenever the post window is
+  merely short.
+
   Second, and weaker:
   `cam_vision.py`
   compares each camera's snapshots over time (block-based frame differencing,
