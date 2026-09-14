@@ -22,6 +22,8 @@ import time
 DB = "/config/home-assistant_v2.db"
 VISION_STATE = "/config/.cam_vision_state.json"  # written by cam_vision.py
 MOTION_STATE = "/config/.cam_motion_state.json"  # written by THIS script
+DOOR_STATE = "/config/.cam_flap_door_state.json"  # written by cam_flap.py
+DOOR_STATE_MAX_AGE_MIN = 45.0  # cam_flap runs every 10 min; older means it is not reporting
 # ---------------------------------------------------------------------------
 # PROOF LATCH. The corroboration fit window is bounded by the SQL fetch at
 # `ev_cut` below, which slides with now() while a stale camera's cut_ts is
@@ -205,14 +207,19 @@ def corroborate(events, target, cut_ts, quiet_partners=None):
     # How long the fleet has been observed since this camera went quiet.
     post_span_s = (max(e[0] for e in ev) - cut_ts) if ev else 0.0
     best = None
+    gated_pre, gated_post = [], []
     if quiet_partners is None:
         quiet_partners = []
     for partner in {c for _, c in ev} - {target}:
         n_pre = [cl for cl in pre if partner in cl]
         n_post = [cl for cl in post if partner in cl]
         if len(n_pre) < CORROBORATE_MIN_PRE:
+            if n_pre and sum(1 for cl in n_pre if target in cl) >= CORROBORATE_MIN_RATE * len(n_pre):
+                gated_pre.append(partner)
             continue
         if len(n_post) < CORROBORATE_MIN_POST:
+            if sum(1 for cl in n_pre if target in cl) >= CORROBORATE_MIN_RATE * len(n_pre):
+                gated_post.append(partner)
             # This partner has the history to judge but has itself gone quiet
             # since the cut. Remember it: when a whole co-firing GROUP fails
             # together, every member's only high-power partners are the other
@@ -261,10 +268,25 @@ def corroborate(events, target, cut_ts, quiet_partners=None):
             }
         return {"testable": False, "best_rate": best["rate"] if best else None,
                 "partner": best["partner"] if best else None,
-                "verdict": ("cannot be tested by co-firing - no partner camera "
-                            "shares enough of this view (best historical "
-                            "co-fire rate %s)" %
-                            ("%.1f%%" % (100 * best["rate"]) if best else "none"))}
+                "verdict": ("cannot be tested by co-firing - no partner with at least %d "
+                            "clusters before this camera went quiet and %d since reaches "
+                            "the %.0f%% co-fire rate this test needs (best eligible: %s; "
+                            "fitted on the %.1f days of history before its last event)%s. "
+                            "That can mean the view is not shared, that the camera was "
+                            "already firing only intermittently before its last event, or "
+                            "that the fetch window has slid past its working period - it "
+                            "is not evidence either way" % (
+                                CORROBORATE_MIN_PRE, CORROBORATE_MIN_POST,
+                                100 * CORROBORATE_MIN_RATE,
+                                ("%s %.1f%%" % (best["partner"], 100 * best["rate"]))
+                                if best else "none",
+                                max(0.0, (cut_ts - min(e[0] for e in ev)) / 86400.0) if ev else 0.0,
+                                "".join(x for x in (
+                                    ("; %s co-fired at that rate but on too little history"
+                                     % ", ".join(sorted(gated_pre))) if gated_pre else "",
+                                    ("; %s co-fired at that rate but has produced too few "
+                                     "clusters since" % ", ".join(sorted(gated_post)))
+                                    if gated_post else ""))))}
     # P(observing zero co-fires | the camera still works at its historical rate).
     # This doubles as the test's POWER: if it is not small even at zero hits,
     # the test could not have detected a break, and no reassuring conclusion may
@@ -315,6 +337,63 @@ def corroborate(events, target, cut_ts, quiet_partners=None):
     return best
 
 
+def door_evidence_for(stale, now, path=None):
+    """Per-camera door-contact evidence from cam_flap's rolling door record.
+
+    Returns ({camera: sentence}, [failing cameras]) for every camera cam_flap
+    reports as FAILING its door, and for any stale camera that has door trips at
+    all. It is the strongest per-camera evidence in the stack - a door opened and
+    the camera covering it did not fire - and it has to reach this sensor's
+    SUMMARY, because the phone push for a stale camera carries the summary and
+    nothing else: evidence printed only on the card never reaches the owner.
+
+    A missing, stale or unreadable record returns (None, []) - "not reporting" -
+    never a measured-looking {}, which would read as "looked, nothing wrong".
+    One garbled camera entry is skipped on its own and never hides another
+    camera's evidence. An annotation only: nothing here raises, and nothing here
+    marks a camera broken.
+    """
+    path = path or DOOR_STATE
+    try:
+        if (now - os.path.getmtime(path)) / 60.0 > DOOR_STATE_MAX_AGE_MIN:
+            return None, []
+        with open(path) as fh:
+            ds = json.load(fh)
+        rolling = ds.get("rolling") if isinstance(ds, dict) else None
+        if not isinstance(rolling, dict):
+            return None, []
+        failing = sorted(c for c in (ds.get("failing") or [])
+                         if isinstance(c, str) and c in rolling)
+    except Exception:  # noqa: BLE001 - door evidence is an annotation, never a failure
+        return None, []
+    stale_set = set(stale or [])
+    out = {}
+    for cam, r in sorted(rolling.items()):
+        try:  # one garbled camera record never hides another camera's evidence
+            if not isinstance(r, dict):
+                continue
+            trips = int(r.get("trips") or 0)
+            if not (cam in failing or (cam in stale_set and trips)):
+                continue
+            last_saw = r.get("last_saw")
+            out[cam] = "%ssaw %d of %d door trips in %.1f days (%d corroborated misses, %d nobody saw); last saw its door %s" % (
+                "FAILING - " if cam in failing else "", int(r.get("saw") or 0), trips,
+                float(r.get("days") or ds.get("rolling_days") or 0),
+                int(r.get("missed") or 0), int(r.get("unseen") or 0),
+                ("%sZ" % last_saw) if last_saw else "not in that period")
+        except Exception:  # noqa: BLE001
+            continue
+    return out, failing
+
+
+def door_summary_suffix(evidence, failing):
+    """The text appended to the summary - and therefore to the push."""
+    evidence = evidence or {}
+    parts = ["%s %s" % (c, evidence[c].replace("FAILING - ", "", 1))
+             for c in failing if c in evidence]
+    return (" | DOOR COVERAGE FAILING: " + "; ".join(parts)) if parts else ""
+
+
 def emit(payload):
     base = {
         "stale": [],
@@ -325,6 +404,7 @@ def emit(payload):
         "visual_localized_count": None,
         "applied_window": None,
         "verdicts": None,
+        "door_evidence": None,
         "corroboration": None,
         "vision_blind": None,
         "oldest_cam": None,
@@ -597,6 +677,8 @@ def main():
     except Exception:  # noqa: BLE001 - losing the latch must not fail the sensor
         pass
 
+    door_evidence, door_failing = door_evidence_for(stale, now)
+
     # The card used to print the DEFAULT window even when a per-camera override
     # was the one actually applied, which made the excursion look far worse than
     # it was (e.g. "151h vs 72h" when the applied window was 120h).
@@ -619,6 +701,7 @@ def main():
         summary = ("HOST WAS DOWN %.0f min in the last %.0fh | " %
                    (host_gap_min, HOST_GAP_LOOKBACK_H)) + summary
 
+    summary += door_summary_suffix(door_evidence, door_failing)
     emit({
         "stale": stale,
         "stale_count": len(stale),
@@ -632,6 +715,7 @@ def main():
         "visual_localized_count": localized_count,
         "applied_window": applied_window,
         "verdicts": verdicts,
+        "door_evidence": door_evidence,
         "corroboration": corroboration,
         "vision_blind": vision_blind,
         "summary": summary,

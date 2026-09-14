@@ -20,6 +20,7 @@ This is the field reference from building and running the setup: a stage‑by‑
 | **Motion + doorbell in HA** | Scrypted's MQTT bridge publishes motion / doorbell‑press as HA `binary_sensor`s via MQTT discovery |
 | **Doorbell announcements** | HA automation on the doorbell sensor → TTS / multi‑room announcement |
 | **Self‑probing health watchdog** | Active snapshot probe catches down / frozen / slow cameras a cached proxy would miss |
+| **Door‑coverage check** | Ring door contacts are cross-checked against the camera covering each door; a camera that keeps missing people at its own door pages, even while it still fires often enough never to look stale |
 
 ---
 
@@ -63,7 +64,7 @@ The one idea worth keeping in your head: **Scrypted owns the Ring session; every
 Read in order:
 
 1. **[`docs/migration-runbook.md`](docs/migration-runbook.md)** — the cutover from a stock‑Ring setup to the single‑Scrypted engine, with **zero camera downtime** and a rollback checkpoint at every stage.
-2. **[`docs/operations.md`](docs/operations.md)** — everything that runs afterward: instant live view, motion/doorbell into HA, the health watchdog, doorbell announcements, snapshot freshness, diagnosing stream flapping, and backups.
+2. **[`docs/operations.md`](docs/operations.md)** — everything that runs afterward: instant live view, motion/doorbell into HA, the health watchdog, doorbell announcements, snapshot freshness, diagnosing stream flapping, backups, and (§9) what the monitoring stack itself costs in probe load, runtime, memory, and recorder and disk writes.
 3. **[`ha/`](ha/)** — the deployable artifacts themselves: the watchdog script, package YAML, and every automation as sanitized, placeholder-ready files. Rebuilding on fresh hardware starts here.
 
 ---

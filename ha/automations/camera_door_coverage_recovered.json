@@ -1,0 +1,24 @@
+{
+  "alias": "Cameras - door coverage recovered",
+  "description": "Dismisses the door-coverage card once no camera has failed its door for 60 minutes. Dismiss-only, no recovery notification.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.camera_door_coverage_problem",
+      "to": "off",
+      "for": {
+        "minutes": 60
+      }
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "action": "persistent_notification.dismiss",
+      "data": {
+        "notification_id": "camera_door_coverage"
+      }
+    }
+  ],
+  "mode": "single"
+}

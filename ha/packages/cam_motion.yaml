@@ -31,6 +31,7 @@ command_line:
         - visual_localized_hours
         - visual_localized_count
         - updated_at
+        - door_evidence
 
 template:
   - binary_sensor:

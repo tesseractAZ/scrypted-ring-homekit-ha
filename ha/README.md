@@ -63,6 +63,11 @@ before deploying (grep for `<` to find them).
    that an automation's config moved backwards. After any restore, diff the
    live automations against these files and re-apply the delta — which is the
    practical reason to keep this directory in sync with the running system.
+   CI cannot check that for you. Its allowlist-parity step compares the repo's
+   script with the repo's package, so a detector deployed live but never synced
+   passes CI while this directory silently lacks it — and a later rebuild from
+   here deletes it. Diff your sanitized deployed files against this directory
+   before calling a change done.
 3. **Copy** the script and package file to `/config/` (SSH add-on or Samba).
    Ensure `configuration.yaml` includes the `packages:` directive above.
 4. **Restart HA fully.** The `command_line` integration only loads on a full
@@ -190,18 +195,64 @@ the history the feature exists to accumulate. Note also that summing
 reports over a rolling multi-hour window at a much shorter cadence, so one event
 appears in dozens of consecutive samples. Deduplicate via `door_orphan_times`.
 
-Two deliberate limits. It does **not** adjudicate individual cameras: fitting a
-per-camera expectation needs history that does not exist, since the add-on log
-retains only ~2.3 days, and on this fleet the one plausible camera/door pairing
-is already explained by that camera's ~13% historical co-fire rate with its own
-neighbours — zero hits in ten openings is the *expected* outcome there, not a
-fault. And it ships **without an alert threshold**: the orphan rate needs no
-baseline in principle (its expected value is ~0, measured 1 of 26 openings over
-2.3 days) but 26 openings is far too thin to fit a bar, and inventing one from
-noise is a mistake this project has made before. The value now is that the
-recorder starts accumulating durable door history — which is what makes both a
-future threshold and a future door-based corroboration partner possible, and
-which the 2.3-day log rotation otherwise made impossible.
+**Per-camera door coverage.** The first release deliberately did not adjudicate
+individual cameras: the add-on log retains only ~2.3 days, far too little to fit a
+per-camera expectation. Two later additions made a per-camera test possible without
+fitting any rate. `DOOR_CAMERA` in `cam_flap.py` maps each door contact to the camera
+that covers it. That is owner knowledge — it ships empty, as a commented template, and a wrong
+pair manufactures accusations against a healthy camera — and it
+turns "did this door's own camera fire?" into a direct question. Repeat openings of
+one door within `DOOR_TRIP_S` count as one **trip**. A trip is **saw** if the
+covering camera fired within `DOOR_MOTION_WINDOW_S`, a **corroborated miss** if it
+did not while some other camera did, and **unseen** if no camera fired at all.
+An unseen trip is not a miss, but it is still a trip the covering camera did not
+see, so it counts toward the trip minimum and the seen fraction; at the working
+covering cameras on the reference fleet, none of 19 trips went unseen. `door_missed_by_cam`,
+`door_miss_times` and `door_cover_stats` report the current window.
+
+**Judge only what the slice can see.** The log slice is bounded by the 60,000-line
+fetch far more often than by time, and the log arrives in probe-sized bursts, so an
+opening near either edge can have its evidence outside the slice. Unguarded, that
+manufactured verdicts at both ends: of the first ten distinct misses the detector
+recorded, three were single-sample artifacts. Twice the covering camera had fired
+seconds *before* the door (46 s and 8 s) and that line had already scrolled out; once
+the door was judged 11 s after it opened, before the camera's line 72 s later
+existed. The same gap produced false orphans. An opening is now judged only when its
+whole ±`DOOR_MOTION_WINDOW_S` window lies inside the slice, and a trip only when
+`DOOR_TRIP_S` of look-back does too, because whether an opening *starts* a trip
+depends on the opening before it. Everything else is counted in `door_deferred`.
+Deferral loses nothing: overlapping samples judge each event later with full context.
+Replaying 2.2 days of engine log through sliding windows at ten sampling phases gave
+zero wrong verdicts and zero dropped trips with the guard, against 71 wrong verdicts
+and 11 false orphans (summed over the ten phases) without it.
+
+**A rolling record, and its own alert.** A 6-hour slice can never show a pattern, so
+every judged trip is kept in `/config/.cam_flap_door_state.json` for 7 days and
+published per camera as `door_rolling`: `trips`, `saw`, `missed`, `unseen`, and
+`days` — how much history the record really spans, never a flat 7 that a fresh
+record has not earned. A camera is listed in `door_coverage_failing` when it has at
+least 4 judged trips, saw no more than 20 % of them, and at least 2 were corroborated
+misses. Over the same replayed log, the covering cameras that work saw 8 of 9, 9 of 9
+and 1 of 1 of their trips; the failing one saw 0 of 4.
+
+This needs its own trigger because **motion staleness cannot carry it**. A camera
+that still fires every day or two never goes stale — each stray event resets its
+clock — so it can miss every person at its own door and never page.
+`binary_sensor.camera_door_coverage_problem` and `camera_door_coverage_alert` watch
+the failing set directly. The push is gated on freshness rather than on trigger type:
+`cam_flap.py` stamps `failing_since_ts` at the poll where a camera enters the set,
+and the alert pushes only while that stamp is under 15 minutes old **and** newer than
+the alert's own previous run (`this.attributes.last_triggered`, which Home Assistant
+restores across restarts). The script only runs while HA runs, so an onset during a
+restart is stamped by the first poll after it and still pages, whichever of the boot
+or attribute trigger sees it first. A failure that was already paged re-posts or
+updates its card on a restart, a set change or the 6-hourly re-assert without
+re-notifying. `cam_motion.py` also appends failing cameras to its own `summary`, because
+that summary is the only text the staleness push carries.
+
+The fleet-level orphan rate still ships **without an alert threshold**: its expected
+value is ~0 (measured 1 of 26 openings over 2.3 days), but 26 openings is far too thin
+to fit a bar, and inventing one from noise is a mistake this project has made before.
 
 `stream_errors` is collected and published but deliberately **not wired to an
 alert**, and that is a measured decision rather than an oversight. Across 4,520
@@ -230,6 +281,11 @@ shows up here first.
   camera-source plugin on this signal alone — confirm a real motion-delivery gap
   first. The rate is also confounded by push volume, which tracks motion, so
   normalise before calling a trend.
+- `camera_door_coverage_alert` / `_recovered` — per-camera door coverage (see the
+  door-contact section above): pages when a camera keeps failing to report motion
+  at its own door while other cameras see the activity. The push is gated on the
+  `failing_since_ts` freshness stamp, so a restart neither drops nor repeats the
+  page; the card is dismissed once the failing set has been empty for 60 minutes.
 - `camera_monitor_stalled` / `_recovered` — **freshness** dead-man for all four
   monitors, and the one that closes the largest hole in this design. Every other
   dead-man here triggers on `unavailable`/`unknown`/`-1`, and none of them looks
@@ -291,7 +347,11 @@ shows up here first.
   different partner's share of the same clusters rose to 100% — so the scene was
   demonstrably *more* active, not quiet). Crucially it also reports its own
   power: a camera with no high-rate partner (a spatially isolated view, an
-  interior room) returns "cannot be tested", and a partner too sparse to reach
+  interior room) returns "cannot be tested" — worded as no evidence either way,
+  because the same result appears when a camera that fired only intermittently
+  before its last event has diluted every partner's rate, or when the 30-day fetch
+  has slid past its working period (the verdict states how many days the fit really
+  used, and names partners excluded only for too little history) — and a partner too sparse to reach
   significance returns "inconclusive" with the p-value it could have reached.
   It never converts weak evidence into an all-clear.
 

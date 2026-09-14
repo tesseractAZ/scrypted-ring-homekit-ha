@@ -18,7 +18,7 @@
     },
     {
       "platform": "time_pattern",
-      "minutes": "<device_id_2>",
+      "minutes": "29",
       "id": "reassert"
     }
   ],

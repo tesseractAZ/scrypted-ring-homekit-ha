@@ -41,6 +41,12 @@ command_line:
         - summary
         - error
         - updated_at
+        - door_missed_by_cam
+        - door_miss_times
+        - door_cover_stats
+        - door_deferred
+        - door_rolling
+        - door_coverage_failing
 
 template:
   - binary_sensor:
@@ -51,3 +57,17 @@ template:
           {{ (state_attr('sensor.camera_flap_rate', 'flapping') or []) | length > 0 }}
         availability: >-
           {{ states('sensor.camera_flap_rate') | float(-1) >= 0 }}
+      # A camera that repeatedly fails to report a person at its own door, judged
+      # over cam_flap's rolling door record. Deliberately independent of motion
+      # staleness: a camera that still fires now and then never goes stale, so a
+      # staleness alert can never catch one that misses its own door every time.
+      - name: Camera door coverage problem
+        unique_id: camera_door_coverage_problem
+        device_class: problem
+        state: >-
+          {{ (state_attr('sensor.camera_flap_rate', 'door_coverage_failing') or []) | length > 0 }}
+        availability: >-
+          {{ states('sensor.camera_flap_rate') not in ['unknown', 'unavailable']
+             and state_attr('sensor.camera_flap_rate', 'error') is none }}
+        attributes:
+          failing: "{{ state_attr('sensor.camera_flap_rate', 'door_coverage_failing') }}"

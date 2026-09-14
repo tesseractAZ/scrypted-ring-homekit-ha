@@ -1,0 +1,61 @@
+{
+  "alias": "Cameras - door coverage failing",
+  "description": "Pages when a camera repeatedly fails to report a person at its OWN door: over cam_flap's rolling door record (up to 7 days) it has at least 4 judged trips, saw no more than 20 % of them, and at least 2 were corroborated misses - a door contact opened and other cameras saw activity, but the covering camera did not fire. Openings nobody saw are not misses but still count as trips the camera did not see. Added 2026-09-14 because motion staleness cannot carry this: a camera that still fires every day or two never goes stale, and each stray event resets its clock, so it can miss every door opening and never page. PUSH GATE: pushes only for a failing camera whose failing_since stamp (written by cam_flap at the poll where the camera entered the failing set) is under 15 min old AND newer than this automation's previous run (this.attributes.last_triggered, a snapshot taken before the run). cam_flap only runs while HA runs, so an onset during a restart is stamped by the first poll after it and pages from whichever of boot or setchange sees it first; a failure that was already paged re-posts the card on boot and on the 6-hourly re-assert without re-notifying, and a set that shrinks or reorders updates the card silently.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "sensor.camera_flap_rate",
+      "attribute": "door_coverage_failing",
+      "id": "setchange"
+    },
+    {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
+    },
+    {
+      "platform": "time_pattern",
+      "hours": "/6",
+      "minutes": "47",
+      "id": "reassert"
+    }
+  ],
+  "conditions": [
+    {
+      "condition": "template",
+      "value_template": "{{ (state_attr('sensor.camera_flap_rate','door_coverage_failing') or []) | length > 0 }}"
+    }
+  ],
+  "actions": [
+    {
+      "action": "persistent_notification.create",
+      "data": {
+        "notification_id": "camera_door_coverage",
+        "title": "🚪 Door coverage failing: {{ (state_attr('sensor.camera_flap_rate','door_coverage_failing') or []) | join(', ') }}",
+        "message": "{% set r = (state_attr('sensor.camera_flap_rate','door_rolling') or {}) %}A door contact opened and the camera that covers that door did not report motion - repeatedly - including openings where other cameras did see activity.\n\n{% for c in (state_attr('sensor.camera_flap_rate','door_coverage_failing') or []) %}{% set x = r.get(c) or {} %}- {{ c }}: saw {{ x.get('saw', 0) }} of {{ x.get('trips', 0) }} door trips in the last {{ x.get('days', 0) }} days ({{ x.get('missed', 0) }} corroborated misses, {{ x.get('unseen', 0) }} nobody saw); last saw its door {{ (x.get('last_saw') ~ 'Z') if x.get('last_saw') else 'not in that period' }}\n{% endfor %}\nRule: at least 4 judged trips, no more than 20 % seen, at least 2 corroborated misses (openings where another camera did fire). Openings nobody saw are not misses, but they still count as trips the camera did not see. This does not depend on motion staleness: a camera that still fires now and then never goes stale. Check the camera's motion detection, zones, schedule, snooze and Modes in the Ring app, then walk-test the door. A miss is evidence, not proof - someone can leave by a door and walk out of view - so the count, not one event, is the signal. {{ now().strftime('%b %-d %-I:%M %p') }}."
+      }
+    },
+    {
+      "choose": [
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{% set r = (state_attr('sensor.camera_flap_rate','door_rolling') or {}) %}{% set lt = as_timestamp(this.attributes.last_triggered, 0) if this else 0 %}{% set ns = namespace(fresh=false) %}{% for c in (state_attr('sensor.camera_flap_rate','door_coverage_failing') or []) %}{% set s = ((r.get(c) or {}).get('failing_since_ts') or 0) | int(0) %}{% if s >= as_timestamp(now()) - 900 and s > lt %}{% set ns.fresh = true %}{% endif %}{% endfor %}{{ trigger.id != 'reassert' and ns.fresh }}"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "notify.<your_mobile_app_target>",
+              "data": {
+                "title": "🚪 Door coverage failing: {{ (state_attr('sensor.camera_flap_rate','door_coverage_failing') or []) | join(', ') }}",
+                "message": "{% set r = (state_attr('sensor.camera_flap_rate','door_rolling') or {}) %}{% for c in (state_attr('sensor.camera_flap_rate','door_coverage_failing') or []) %}{% set x = r.get(c) or {} %}{{ c }} saw {{ x.get('saw', 0) }} of {{ x.get('trips', 0) }} door trips in {{ x.get('days', 0) }} days ({{ x.get('missed', 0) }} corroborated misses, {{ x.get('unseen', 0) }} nobody saw). {% endfor %}Check its motion settings in the Ring app, then walk-test the door."
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "mode": "single"
+}
