@@ -87,4 +87,6 @@ jobs:
           PY
 
       - name: Public-repo hygiene sweep
+        env:
+          HYGIENE_PATTERNS: ${{ secrets.HYGIENE_PATTERNS }}
         run: bash .github/hygiene-sweep.sh
