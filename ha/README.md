@@ -308,7 +308,16 @@ shows up here first.
   camera that was quiet, the reassuring direction. `cam_vision.py` now stamps a
   per-camera `probe_ts` on successful samples only, publishes `probe_age_min`
   and `blind`, and `cam_motion.py` refuses a verdict for any camera it could not
-  see. Do not rely on the stream-fault monitor to notice the visual monitor
+  see. A frame can also be *reachable but not new*: when a camera does not answer
+  a snapshot request in time, the webhook returns HTTP 200 with its last cached
+  image. A real sensor never produces two byte-identical JPEGs, so
+  `cam_vision.py` treats an identical body as the same old picture: it is not
+  analysed, does not refresh the baselines, and does not move `fresh_ts`, the
+  time of the last genuinely new frame. `probe_ts` still moves, so a
+  camera-side stall does not page as a dead vision monitor, and `cam_motion.py`
+  withholds its visual verdict once a camera has sent no new frame for 15 min.
+  Before this, a camera serving a cached image for days read as "no visual
+  change - consistent with a quiet area". Do not rely on the stream-fault monitor to notice the visual monitor
   dying: both scripts probe the same endpoints, so `PROBERS` must be set to 2 or
   cam_vision stopping merely halves the probe count to a level still above the
   shortfall bar.

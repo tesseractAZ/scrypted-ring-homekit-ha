@@ -545,6 +545,20 @@ def main():
         c for c in CAMS
         if vision_ok and (cam_probe_age[c] is None or cam_probe_age[c] > VISION_BLIND_MIN)
     )
+    # CACHED SNAPSHOTS (see cam_vision.py). A camera that answers the webhook
+    # with the same cached image is reachable but NOT seen: its "no visual
+    # change" is the same old picture, not a quiet scene. fresh_ts is the last
+    # genuinely new frame; a state file written before fresh_ts existed has none,
+    # and that camera is judged as before rather than guessed at.
+    cam_fresh_age = {}
+    for cam in CAMS:
+        fts = (vs.get(cam) or {}).get("fresh_ts") if vision_ok else None
+        cam_fresh_age[cam] = round((now - float(fts)) / 60.0, 1) if fts else None
+    vision_cached = sorted(
+        c for c in CAMS
+        if vision_ok and c not in vision_blind
+        and cam_fresh_age[c] is not None and cam_fresh_age[c] > VISION_BLIND_MIN
+    )
     raw_log = {cam: sorted((vs.get(cam) or {}).get("log") or []) for cam in CAMS}
     visual_hours, localized_hours, localized_count = {}, {}, {}
     for cam in CAMS:
@@ -577,6 +591,13 @@ def main():
                         else "%.0f min ago" % cam_probe_age[cam])
             verdicts[cam] = ("visual monitor could not SEE this camera (last "
                              "successful frame %s) - no verdict" % seen_ago)
+        elif cam in vision_cached:
+            # Same false all-clear as above, by another route: the frames were
+            # "successful" but every one was the webhook's cached image.
+            verdicts[cam] = ("visual monitor cannot judge - this camera's snapshots "
+                             "have been the same CACHED image for %.1fh (it is not "
+                             "answering snapshot requests) - no verdict"
+                             % (cam_fresh_age[cam] / 60.0))
         elif loc_n >= MIN_VISUAL_EVENTS and loc_h is not None:
             verdicts[cam] = ("%d localized scene changes in the last %.0fh (most "
                              "recent %.1fh ago) with no motion event - "
@@ -717,7 +738,7 @@ def main():
         "verdicts": verdicts,
         "door_evidence": door_evidence,
         "corroboration": corroboration,
-        "vision_blind": vision_blind,
+        "vision_blind": sorted(set(vision_blind) | set(vision_cached)),
         "summary": summary,
         "updated_at": int(time.time() // HEARTBEAT_BUCKET_S) * HEARTBEAT_BUCKET_S,
     })

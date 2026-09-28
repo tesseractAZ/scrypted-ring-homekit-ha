@@ -30,6 +30,7 @@ Emits ONE JSON object on stdout, always, exit 0 (command_line contract).
 State: /config/.cam_vision_state.json (per-cam baseline frame + change log).
 """
 import base64
+import hashlib
 import io
 import json
 import os
@@ -123,6 +124,21 @@ HEARTBEAT_BUCKET_S = 600
 PROBE_BLIND_MIN = 15.0   # a camera not successfully probed in this long is
                          # reported as BLIND rather than quiet. cam_motion.py
                          # reads the same per-camera stamp to refuse a verdict.
+# CACHED SNAPSHOTS. When a camera does not answer a snapshot request in time,
+# the Scrypted webhook still returns HTTP 200 - with the LAST image it cached.
+# A real sensor never produces two byte-identical JPEGs (noise alone differs),
+# so an identical body is not a picture of a still scene: it is the same old
+# picture. Treating it as a sample made a camera that had stopped answering read
+# as "no visual change - consistent with a quiet area" for days (measured
+# 2026-09-28: a camera proven broken by corroboration, cached for ~3 days, got
+# exactly that reassuring line). A cached body is now not analysed, does not
+# refresh the per-mode baselines, and does not move `fresh_ts` - the time of the
+# last genuinely NEW frame. `probe_ts` still moves, because the fetch did work:
+# it measures reachability, which drives the monitor's own `blind` dead-man, and
+# a camera-side stall must not page as "vision monitor down" (the snapshot
+# monitor already pages it as a stale snapshot). cam_motion.py reads fresh_ts
+# and withholds its visual verdict for a camera with no new frame in
+# PROBE_BLIND_MIN.
 
 
 def emit(payload):
@@ -205,6 +221,20 @@ def main():
         # looked and the scene was quiet" from "we could not look at all".
         if prev.get("probe_ts") is not None:
             entry["probe_ts"] = prev["probe_ts"]
+        for k in ("fresh_ts", "body_hash"):
+            if prev.get(k) is not None:
+                entry[k] = prev[k]
+        body_hash = hashlib.sha1(body).hexdigest() if body else None
+        if body and body_hash == prev.get("body_hash"):
+            # Byte-identical to the previous sample: the webhook's cached image.
+            # Reachable, so probe_ts moves; nothing else does (see CACHED SNAPSHOTS).
+            entry.update({k: prev[k] for k in ("frame", "frames", "ir", "settle") if k in prev})
+            entry["probe_ts"] = now
+            entry["cached_n"] = int(prev.get("cached_n", 0)) + 1
+            body = None
+            cached_sample = True
+        else:
+            cached_sample = False
         if body:
             try:
                 luma, sat, lum = analyze(body)
@@ -270,12 +300,15 @@ def main():
                 entry["frames"] = frames
                 entry["frame"] = frames[mode][0]   # back-compat for readers
                 entry["probe_ts"] = now            # this camera WAS seen
+                entry["fresh_ts"] = now            # ...and sent a NEW frame
+                entry["body_hash"] = body_hash
+                entry["cached_n"] = 0
                 entry["ir"] = is_ir
                 entry["settle"] = settle
                 entry["noise"] = noise
             else:
                 entry.update({k: prev[k] for k in ("frame", "frames", "ir", "settle") if k in prev})
-        else:
+        elif not cached_sample:
             # A failed FETCH must carry the per-mode baselines forward exactly as
             # the failed-ANALYZE branch above does. Dropping "frames" here silently
             # reverted the camera to the legacy single-baseline path, which then
@@ -300,8 +333,13 @@ def main():
     except Exception:
         pass
 
+    cached = sorted(
+        n for n in [c[0] for c in CAMS]
+        if st.get(n, {}).get("fresh_ts") is not None
+        and (now - float(st[n]["fresh_ts"])) / 60.0 > PROBE_BLIND_MIN)
     active = sum(1 for v in hours.values() if v is not None and v < 24)
-    quiet = sorted(n for n, v in hours.items() if v is None or v >= 24)
+    # A camera serving cached frames is not "quiet" - it cannot be seen at all.
+    quiet = sorted(n for n, v in hours.items() if (v is None or v >= 24) and n not in cached)
     summary = "%d/%d cams visually active <24h (day %d / ir %d%s events)" % (
         active, len(CAMS), day_events, ir_events,
         " / dark %d" % dark_events if dark_events else "")
@@ -315,6 +353,10 @@ def main():
                    if v is None or v > PROBE_BLIND_MIN)
     if blind:
         summary += "; NOT SEEN >%.0fm: %s" % (PROBE_BLIND_MIN, ",".join(blind))
+    cached = [n for n in cached if n not in blind]
+    if cached:
+        summary += "; SNAPSHOTS CACHED (no new frame >%.0fm): %s" % (
+            PROBE_BLIND_MIN, ",".join(cached))
     emit({
         "hours_since_visual": hours, "changes_24h": changes, "ir_mode": irs,
         "max_norm_diff": maxdiff, "active_count": active,
