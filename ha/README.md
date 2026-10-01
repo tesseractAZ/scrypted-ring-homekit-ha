@@ -235,6 +235,26 @@ least 4 judged trips, saw no more than 20 % of them, and at least 2 were corrobo
 misses. Over the same replayed log, the covering cameras that work saw 8 of 9, 9 of 9
 and 1 of 1 of their trips; the failing one saw 0 of 4.
 
+**Two refinements (2026-09-30).** The fraction rule cannot see an outage while
+healthy days remain in the 7-day window: a camera that had seen 15 trips and then
+went dark sat at 15/29 (52 %) through 11 corroborated misses over 3.5 days and never
+failed. A camera therefore also fails after **4 corroborated misses in a row since
+it last saw its door** (`door_rolling.run`). Replaying 2026-09-14..30, the longest
+run at a working camera was 2 and the two real outages ran 6 and 11; the rule would
+have flagged that 3.5-day outage about a day in, two days before the staleness
+alert. Second, a miss is only as good as its corroboration: a camera that fires in
+half of all evening minutes corroborates nothing. `cam_motion.py` publishes each
+camera's chance of firing inside a ±180 s window for every hour of the day (last 7
+days, counting only days the camera fired at all), and a miss counts only if at
+least one corroborating camera's chance at that hour is at most 20 % to extend that
+run. Otherwise it is recorded as **weak** (`door_rolling.weak`): it neither extends
+nor breaks a run, but it still counts in the fraction rule exactly as before, so the
+new rules can only add detections. Each miss is classified once, when fresh rates
+first exist, and the class is stored with the trip so the record cannot flap. Measured: the three door-side cameras peak at 7–10 %, the
+doorbell at 20 %, the busiest camera at 54 %. If the rates are missing or more than
+3 hours old, every miss counts as before — the rule can only remove evidence, so it
+is never applied blind.
+
 This needs its own trigger because **motion staleness cannot carry it**. A camera
 that still fires every day or two never goes stale — each stray event resets its
 clock — so it can miss every person at its own door and never page.
@@ -432,7 +452,20 @@ shows up here first.
   "is the vision log non-empty" is not a discriminator at all: an outdoor scene
   guarantees entries via sun, shadow and IR transitions, so every stale outdoor
   camera reads "suspect" regardless of its true state - no human walk test required, which matters
-  when nobody is at the property for weeks. The fleet-wide
+  when nobody is at the property for weeks.
+  How much of a view's activity frame differencing can see differs by an order of
+  magnitude between cameras. Measured over 14 days as the share of each camera's
+  own motion clusters matched by a vision change within ±6 minutes: 79 %, 53 % and
+  33 % on three quiet door-side views, but 8 %, 6 %, 4 % and 3 % on the four busiest
+  outdoor views — one of which, while broken, was described as "consistent with a
+  quiet area". `cam_motion.py` therefore records this **vision recall** per camera
+  (the last 40 settled motion clusters, persisted so a camera that has gone silent
+  is judged by what the detector saw while it worked). "Consistent with a quiet
+  area" is printed only when recall is at least 25 % of at least 10 clusters, with
+  the figures; below that, or with fewer than 10 clusters measured, the verdict is
+  withheld. Motion from a period when the visual monitor could not see the camera
+  is never scored against it. The visual monitor's own summary says "no visual change
+  detected", not "quiet", for the same reason. The fleet-wide
   dead-man above only fires when *every* camera goes quiet, so a single dead
   camera is invisible to it. Reads the recorder rather than entity
   `last_changed`, which resets on restart and would otherwise mask staleness.
@@ -447,6 +480,14 @@ shows up here first.
   latched (the edge can never re-fire), and a second camera crossing its
   threshold while latched would otherwise never page; recreating the same
   notification_id is idempotent, so the re-assert adds no churn.
+  Pushes go out only on genuinely new information: a camera ADDED to the stale
+  set, a new proof, or a restart while a proof stands. The 1-hour onset trigger
+  no longer pushes - every transition that turns the binary on is also a
+  stale-set change that `setchange` already pushed, so the first camera to go
+  stale used to page twice an hour apart - and a camera LEAVING the set updates
+  the card without re-paging the cameras still on it. Fit each per-camera
+  override to the longest silence that camera shows when nothing is wrong (here,
+  an unused interior room reached 211 h), not to a round number.
 
 Every fault alert writes a `persistent_notification` (the HA notification
 centre) **and** sends a push via `notify.<your_mobile_app_target>`. Both matter:

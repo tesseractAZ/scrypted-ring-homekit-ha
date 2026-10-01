@@ -172,6 +172,34 @@ DOOR_ROLLING_D = 7.0          # the per-camera door record covers this many days
 DOOR_FAIL_MIN_TRIPS = 4
 DOOR_FAIL_MAX_SAW_FRAC = 0.2
 DOOR_FAIL_MIN_MISSED = 2
+# RUN RULE. The fraction rule above cannot see an outage while healthy days are
+# still in the 7-day window: a camera that saw 15 trips and then went dark sat at
+# 15/29 (52 %) through 11 corroborated misses over 3.5 days and never failed. A
+# camera therefore also FAILS when its last DOOR_RUN_MIN_MISSED judged trips that
+# were not "unseen" or "weak" were all corroborated misses, i.e. that many in a
+# row since it last saw its door. Replayed 2026-09-14..30 with the edge guard: the
+# longest run at a working camera was 2; the two real outages ran 6 and 11.
+DOOR_RUN_MIN_MISSED = 4
+# WEAK CORROBORATION. A miss is "corroborated" when another camera fired within
+# DOOR_MOTION_WINDOW_S of the opening - but a camera that fires in half of all
+# evening minutes corroborates nothing. cam_motion.py publishes each camera's
+# chance of firing in such a window, per UTC hour of day, in MOTION_STATE. A miss
+# is strong only if at least one corroborating camera's chance at that hour is at
+# most CORR_MAX_CHANCE; otherwise it is recorded as "weak". Weak misses do NOT
+# extend the run rule above, but they still count in the fraction rule exactly as
+# before, so the new rules can only ADD detections to the old one, never delay
+# one. The class is decided ONCE per trip, the first time fresh rates exist, and
+# stored with the trip: re-deciding it every poll from rates that drift across
+# the bar let a failing camera drop out of the set and re-enter it, dismissing
+# and re-paging its card. Measured 7 days to 2026-09-30, active days
+# only: the three south cameras peak at 7-10 %, the doorbell at 20 %, the busiest
+# camera reaches 54 %. If the rates are missing or older than
+# BACKGROUND_MAX_AGE_S, a miss not yet classified counts as strong and stays
+# unclassified until fresh rates exist (a class already decided is kept) - the
+# rule can only remove evidence, so it is never applied blind.
+MOTION_STATE = "/config/.cam_motion_state.json"   # written by cam_motion.py
+BACKGROUND_MAX_AGE_S = 3 * 3600.0
+CORR_MAX_CHANCE = 0.20
 
 # ---------------------------------------------------------------------------
 # CORROBORATED MISS - the strongest per-camera evidence available here, and the
@@ -303,6 +331,43 @@ def _finite(x):
             and x == x and abs(x) != float("inf"))
 
 
+def load_background(now):
+    """{camera: [24 chance-of-firing values by UTC hour]} from cam_motion, or None."""
+    try:
+        with open(MOTION_STATE) as fh:
+            bg = (json.load(fh) or {}).get("background") or {}
+        if not _finite(bg.get("computed_at")) or now - float(bg["computed_at"]) > BACKGROUND_MAX_AGE_S:
+            return None
+        if bg.get("hour_basis") != "utc" or not isinstance(bg.get("p"), dict):
+            return None
+        if float(bg.get("window_s", -1)) != DOOR_MOTION_WINDOW_S:
+            return None   # rates for a different window would mean something else
+        return bg["p"]
+    except Exception:  # noqa: BLE001 - no rates = old behaviour, never a failure
+        return None
+
+
+def corroboration_is_strong(near, te, background):
+    """True if at least one corroborating camera rarely fires by chance at that hour.
+
+    A camera without a rate for that hour counts as strong: unknown chance must not
+    discard evidence."""
+    if background is None or not isinstance(near, list):
+        return True
+    hour = int(te // 3600) % 24
+    for c in near:
+        if not isinstance(c, str):
+            return True
+        rates = background.get(c)
+        try:
+            p = rates[hour] if isinstance(rates, list) and len(rates) == 24 else None
+        except Exception:  # noqa: BLE001
+            p = None
+        if p is None or not _finite(p) or p <= CORR_MAX_CHANCE:
+            return True
+    return False
+
+
 def update_rolling(trips, now, covered_from=None):
     """Merge newly judged trips into DOOR_STATE; return (rolling, failing, note).
 
@@ -377,24 +442,39 @@ def update_rolling(trips, now, covered_from=None):
             except Exception:  # noqa: BLE001
                 pass
         days = round(max(0.0, now - max(since if since is not None else now, horizon)) / 86400.0, 1)
-        rolling = {c: {"trips": 0, "saw": 0, "missed": 0, "unseen": 0, "days": days,
-                       "last_saw": None, "last_trip": None, "failing_since_ts": None}
+        rolling = {c: {"trips": 0, "saw": 0, "missed": 0, "weak": 0, "unseen": 0, "run": 0,
+                       "days": days, "last_saw": None, "last_trip": None,
+                       "failing_since_ts": None}
                    for c in sorted(set(DOOR_CAMERA.values()))}
+        background = load_background(now)
+        # Keys start with the trip time, so sorted() is chronological - which the
+        # run rule depends on. Weak/strong is decided once per trip (see WEAK
+        # CORROBORATION) and persisted in the trip entry, so the record is stable.
         for k in sorted(kept):
             v = kept[k]
             r = rolling.get(v["cam"])
             if r is None:
                 continue
             t = k.split("|", 1)[0]
+            verdict = v["v"]
+            if verdict == "missed":
+                if not isinstance(v.get("weak"), bool) and background is not None:
+                    v["weak"] = not corroboration_is_strong(v.get("near"), _utc(t), background)
+                if v.get("weak") is True:
+                    verdict = "weak"
             r["trips"] += 1
-            r[v["v"]] += 1
+            r[verdict] += 1
             r["last_trip"] = t
-            if v["v"] == "saw":
+            if verdict == "saw":
                 r["last_saw"] = t
+                r["run"] = 0
+            elif verdict == "missed":
+                r["run"] += 1
         failing = sorted(c for c, r in rolling.items()
-                         if r["trips"] >= DOOR_FAIL_MIN_TRIPS
-                         and r["saw"] <= int(DOOR_FAIL_MAX_SAW_FRAC * r["trips"])
-                         and r["missed"] >= DOOR_FAIL_MIN_MISSED)
+                         if (r["trips"] >= DOOR_FAIL_MIN_TRIPS
+                             and r["saw"] <= int(DOOR_FAIL_MAX_SAW_FRAC * r["trips"])
+                             and r["missed"] + r["weak"] >= DOOR_FAIL_MIN_MISSED)
+                         or r["run"] >= DOOR_RUN_MIN_MISSED)
         failing_since = {}
         for c in failing:
             ts = prev_since.get(c)
@@ -609,9 +689,11 @@ def main():
         summary += "; " + door_note
     if door_failing:
         summary += "; DOOR COVERAGE FAILING: " + ", ".join(
-            "%s saw %d of %d door trips in %.1f days (%d corroborated misses, %d nobody saw)" % (
+            "%s saw %d of %d door trips in %.1f days (%d strong + %d weak corroborated misses, %d nobody "
+            "saw; %d strong misses in a row since it last saw its door)" % (
                 c, door_rolling[c]["saw"], door_rolling[c]["trips"], door_rolling[c]["days"],
-                door_rolling[c]["missed"], door_rolling[c]["unseen"]) for c in door_failing)
+                door_rolling[c]["missed"], door_rolling[c].get("weak", 0), door_rolling[c]["unseen"],
+                door_rolling[c].get("run", 0)) for c in door_failing)
     elif missed_by_cam:
         summary += "; door misses this window: " + ",".join(
             "%s %d/%d" % (c, cover_stats.get(c, [0, 0])[0], cover_stats.get(c, [0, 0])[1])

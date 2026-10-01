@@ -22,6 +22,33 @@ import time
 DB = "/config/home-assistant_v2.db"
 VISION_STATE = "/config/.cam_vision_state.json"  # written by cam_vision.py
 MOTION_STATE = "/config/.cam_motion_state.json"  # written by THIS script
+# BACKGROUND FIRING RATES, published in MOTION_STATE for cam_flap.py. For each
+# camera and each UTC hour of day: the probability that the camera fires inside
+# a random +-BACKGROUND_WINDOW_S window, i.e. by chance. cam_flap uses it to tell
+# a door miss "corroborated" by a camera that fires all evening anyway (weak) from
+# one corroborated by a camera that fires almost only when someone is there
+# (strong). Measured over the last BACKGROUND_LOOKBACK_D days, counting only days
+# on which that camera fired at all: a 30-day average diluted by a dead fortnight
+# put one camera's evening rate at 0.22 when its live rate was 0.52.
+BACKGROUND_LOOKBACK_D = 7.0
+BACKGROUND_WINDOW_S = 180.0      # = cam_flap.py DOOR_MOTION_WINDOW_S
+BACKGROUND_MIN_OBS_S = 3 * 3600.0  # an hour of day needs this much active-day time
+# VISION RECALL. "No visual change in 48 h" only means a quiet area if frame
+# differencing would have SEEN activity there. Measured 2026-09-16..30 (own
+# motion clusters with any vision change within +-6 min): 79 %, 53 % and 33 % on
+# the three south cameras, but 8 %, 6 %, 4 % and 3 % on the four busiest - one
+# of which, while broken, was described as "consistent with a quiet area". Each
+# poll records, per camera, whether each settled motion cluster inside the vision
+# window was matched by a change in that camera's own vision log. The outcomes
+# persist in MOTION_STATE, so a camera that has since gone silent is judged by
+# what the detector could see while it was working.
+RECALL_LINK_S = 300.0            # motion events this close form one cluster
+RECALL_MARGIN_S = 360.0          # a vision change this close to a cluster counts
+RECALL_SETTLE_S = 600.0          # only clusters that ended this long ago
+RECALL_KEEP = 40                 # outcomes kept per camera (most recent)
+RECALL_MIN_CLUSTERS = 10         # fewer than this = not yet measured
+RECALL_FLOOR = 0.25              # below this the detector cannot call a view quiet
+RECALL_MAX_AGE_D = 30.0          # outcomes older than this are dropped
 DOOR_STATE = "/config/.cam_flap_door_state.json"  # written by cam_flap.py
 DOOR_STATE_MAX_AGE_MIN = 45.0  # cam_flap runs every 10 min; older means it is not reporting
 # ---------------------------------------------------------------------------
@@ -376,10 +403,11 @@ def door_evidence_for(stale, now, path=None):
             if not (cam in failing or (cam in stale_set and trips)):
                 continue
             last_saw = r.get("last_saw")
-            out[cam] = "%ssaw %d of %d door trips in %.1f days (%d corroborated misses, %d nobody saw); last saw its door %s" % (
+            out[cam] = "%ssaw %d of %d door trips in %.1f days (%d strong + %d weak corroborated misses, %d nobody saw; %d strong misses in a row since it last saw its door); last saw its door %s" % (
                 "FAILING - " if cam in failing else "", int(r.get("saw") or 0), trips,
                 float(r.get("days") or ds.get("rolling_days") or 0),
-                int(r.get("missed") or 0), int(r.get("unseen") or 0),
+                int(r.get("missed") or 0), int(r.get("weak") or 0), int(r.get("unseen") or 0),
+                int(r.get("run") or 0),
                 ("%sZ" % last_saw) if last_saw else "not in that period")
         except Exception:  # noqa: BLE001
             continue
@@ -392,6 +420,102 @@ def door_summary_suffix(evidence, failing):
     parts = ["%s %s" % (c, evidence[c].replace("FAILING - ", "", 1))
              for c in failing if c in evidence]
     return (" | DOOR COVERAGE FAILING: " + "; ".join(parts)) if parts else ""
+
+
+def background_rates(events, now):
+    """{camera: [p(fires within +-BACKGROUND_WINDOW_S) for UTC hour 0..23]}.
+
+    Only days on which the camera fired at least once count, so a camera that was
+    dead for part of the window keeps the rate it shows while working. An hour of day with less than BACKGROUND_MIN_OBS_S of active-day observation
+    is None (unknown), never 0 - a rate from a few minutes of data would swing
+    across cam_flap's bar from poll to poll."""
+    start = now - BACKGROUND_LOOKBACK_D * 86400
+    w = BACKGROUND_WINDOW_S
+    out = {}
+    for cam in CAMS:
+        ts = sorted(t for t, c in events if c == cam and start - w <= t <= now)
+        days = {int(t // 86400) for t in ts if t >= start}
+        tot = [0.0] * 24
+        for h in range(int(start // 3600), int(now // 3600) + 1):
+            if (h * 3600) // 86400 not in days:
+                continue
+            a, b = max(start, h * 3600.0), min(now, (h + 1) * 3600.0)
+            if b > a:
+                tot[h % 24] += b - a
+        cov = [0.0] * 24
+        merged = []
+        for t in ts:
+            a, b = max(start, t - w), min(now, t + w)
+            if b <= a:
+                continue
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        for a, b in merged:
+            t = a
+            while t < b:
+                nb = min(b, (t // 3600 + 1) * 3600.0)
+                if int(t // 86400) in days:
+                    cov[int(t // 3600) % 24] += nb - t
+                t = nb
+        out[cam] = [round(cov[i] / tot[i], 3) if tot[i] >= BACKGROUND_MIN_OBS_S else None
+                    for i in range(24)]
+    return out
+
+
+def motion_clusters(ts, link=None):
+    """Group sorted timestamps into [first, last] clusters linked by <= link s."""
+    link = RECALL_LINK_S if link is None else link
+    out = []
+    for t in sorted(ts):
+        if out and t - out[-1][1] <= link:
+            out[-1][1] = t
+        else:
+            out.append([t, t])
+    return out
+
+
+def update_recall(prev, events, vision_logs, now, window_start, unusable,
+                  usable_since=None, last_event=None):
+    """Merge newly settled motion clusters into the per-camera recall record.
+
+    prev: {cam: [[cluster_start, hit], ...]} from MOTION_STATE. A cluster is
+    judged once, only when it has settled, its start lies inside the vision window and after
+    the camera was last unusable, and
+    never for a camera the vision monitor cannot currently see (blind or cached).
+    usable_since: {cam: ts} - clusters starting before the camera last became
+    visible again are skipped, so motion from a period the vision monitor could not
+    see is never scored as a detector miss after it recovers. Outcomes age out
+    relative to the camera's own last motion event (last_event), not to now: a
+    camera silent for weeks keeps the record of what the detector saw while it
+    worked. Returns the new record; malformed entries are dropped one at a time."""
+    out = {}
+    for cam in CAMS:
+        known = {}
+        stored = (prev or {}).get(cam) if isinstance(prev, dict) else None
+        ref = (last_event or {}).get(cam) or now
+        for e in stored if isinstance(stored, list) else []:
+            try:
+                s, h = float(e[0]), int(e[1])
+                if s == s and ref - s <= RECALL_MAX_AGE_D * 86400 and h in (0, 1):
+                    known[int(round(s))] = h
+            except Exception:  # noqa: BLE001
+                continue
+        since = (usable_since or {}).get(cam)
+        floor = max(window_start, float(since)) if isinstance(since, (int, float)) and since == since else window_start
+        log = vision_logs.get(cam)
+        if log is not None and cam not in unusable:
+            for a, b in motion_clusters([t for t, c in events if c == cam]):
+                if a - RECALL_MARGIN_S < floor or b > now - RECALL_SETTLE_S:
+                    continue
+                key = int(round(a))
+                if key in known:
+                    continue
+                known[key] = 1 if any(a - RECALL_MARGIN_S <= v <= b + RECALL_MARGIN_S
+                                      for v in log) else 0
+        out[cam] = [[s, known[s]] for s in sorted(known)][-RECALL_KEEP:]
+    return out
 
 
 def emit(payload):
@@ -576,6 +700,32 @@ def main():
         localized_count[cam] = len(local)
         localized_hours[cam] = round((now - max(local)) / 3600.0, 1) if local else None
 
+    try:
+        mstate = json.load(open(MOTION_STATE))
+        if not isinstance(mstate, dict):
+            mstate = {}
+    except Exception:  # noqa: BLE001 - recall/background are annotations
+        mstate = {}
+    unusable_now = set(vision_blind) | set(vision_cached) | (set() if vision_ok else set(CAMS))
+    usable_since = mstate.get("vision_usable_since") if isinstance(mstate.get("vision_usable_since"), dict) else {}
+    usable_since = {c: v for c, v in usable_since.items() if c in CAMS and isinstance(v, (int, float))}
+    for cam in unusable_now:
+        usable_since[cam] = now        # bumped every poll while it cannot be seen
+    try:
+        recall_state = update_recall(
+            mstate.get("vision_recall") if isinstance(mstate.get("vision_recall"), dict) else {},
+            motion_events, raw_log if vision_ok else {}, now,
+            now - VISION_KEEP_H * 3600, unusable_now, usable_since, last)
+    except Exception:  # noqa: BLE001
+        recall_state = {}
+
+    def recall_of(cam):
+        try:
+            ent = recall_state.get(cam) or []
+            return (sum(int(h) for _, h in ent), len(ent)) if ent else (0, 0)
+        except Exception:  # noqa: BLE001
+            return (0, 0)
+
     verdicts = {}
     for cam in stale:
         loc_h, loc_n = localized_hours.get(cam), localized_count.get(cam) or 0
@@ -609,9 +759,29 @@ def main():
                              "camera); too little localized evidence to judge"
                              % (loc_n + shared, VISION_KEEP_H, shared))
         else:
-            verdicts[cam] = ("no visual change in the last %.0fh (vision window; "
-                             "shorter than the stale span) - consistent with a "
-                             "quiet area" % VISION_KEEP_H)
+            hits, n = recall_of(cam)
+            if n >= RECALL_MIN_CLUSTERS and hits < RECALL_FLOOR * n:
+                # The detector would not have seen activity here even when the
+                # camera was working, so its silence says nothing about the scene.
+                verdicts[cam] = ("no visual change in the last %.0fh, but that is NOT "
+                                 "evidence of a quiet area: when this camera was firing, "
+                                 "frame differencing caught only %d of its last %d motion "
+                                 "clusters (%.0f%%) - it cannot see activity in this view "
+                                 "reliably - no verdict"
+                                 % (VISION_KEEP_H, hits, n, 100.0 * hits / n))
+            elif n >= RECALL_MIN_CLUSTERS:
+                verdicts[cam] = ("no visual change in the last %.0fh (vision window; "
+                                 "shorter than the stale span) - consistent with a "
+                                 "quiet area (frame differencing caught %d of this "
+                                 "camera's last %d motion clusters)"
+                                 % (VISION_KEEP_H, hits, n))
+            else:
+                # Below RECALL_MIN_CLUSTERS the detector's reach is unknown, so its
+                # silence supports no reading of the scene either way.
+                verdicts[cam] = ("no visual change in the last %.0fh, but how much of this "
+                                 "view's activity frame differencing can see is not yet "
+                                 "measured (%d of %d motion clusters needed) - no verdict"
+                                 % (VISION_KEEP_H, n, RECALL_MIN_CLUSTERS))
 
     # CORROBORATION. Run for every stale camera. This is stronger evidence than
     # frame-differencing and is reported first by the alert, but it is only
@@ -694,9 +864,25 @@ def main():
             }
             new_latches[cam] = prior
     try:
-        json.dump({"proofs": new_latches}, open(MOTION_STATE, "w"))
+        background = {"computed_at": int(now), "lookback_d": BACKGROUND_LOOKBACK_D,
+                      "window_s": BACKGROUND_WINDOW_S, "hour_basis": "utc",
+                      "p": background_rates(motion_events, now)}
+    except Exception:  # noqa: BLE001 - cam_flap falls back to counting every miss
+        background = None
+    # Written atomically: cam_flap.py reads this file too, and a torn write would
+    # read as "no background" (safe) but also cost the proof latches (not safe).
+    tmp = "%s.tmp.%d" % (MOTION_STATE, os.getpid())
+    try:
+        with open(tmp, "w") as fh:
+            json.dump({"proofs": new_latches, "background": background,
+                       "vision_recall": recall_state,
+                       "vision_usable_since": usable_since}, fh)
+        os.replace(tmp, MOTION_STATE)
     except Exception:  # noqa: BLE001 - losing the latch must not fail the sensor
-        pass
+        try:
+            os.remove(tmp)
+        except Exception:  # noqa: BLE001
+            pass
 
     door_evidence, door_failing = door_evidence_for(stale, now)
 

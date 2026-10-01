@@ -344,7 +344,10 @@ def main():
         active, len(CAMS), day_events, ir_events,
         " / dark %d" % dark_events if dark_events else "")
     if quiet:
-        summary += "; visually quiet: " + ",".join(quiet)
+        # "No visual change DETECTED", not "quiet": on the busiest outdoor views
+        # frame differencing catches only a few percent of real activity
+        # (cam_motion.py measures this per camera as vision recall).
+        summary += "; no visual change detected: " + ",".join(quiet)
     probe_age_min = {}
     for name in [c[0] for c in CAMS]:
         pts = st.get(name, {}).get("probe_ts")
