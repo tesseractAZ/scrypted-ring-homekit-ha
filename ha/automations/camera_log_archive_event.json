@@ -1,0 +1,53 @@
+{
+  "id": "camera_log_archive_event",
+  "alias": "Cameras - engine log archive lost, repeated or withheld lines",
+  "description": "Raised by binary_sensor.camera_log_archive_events, which stays on while a gap, resync or withheld event is younger than 35 days and newer than the last press of input_button.camera_log_archive_acknowledge. Triggers: the sensor turning on, a new last_event_at while it is already on (a second event updates the card), plus a boot trigger and a 6-hourly re-assert, because persistent notifications do not survive a restart and a restored binary never transitions at startup. The card is written only from a payload that carries the counters, so a timeout (attributes {}) or a reload never rewrites it as 'None'. Never auto-dismissed by a good run: an overnight permanent loss must still be on screen in the morning.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.camera_log_archive_events",
+      "to": "on",
+      "id": "raised"
+    },
+    {
+      "platform": "state",
+      "entity_id": "sensor.camera_engine_log_archive",
+      "attribute": "last_event_at",
+      "id": "new_event"
+    },
+    {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
+    },
+    {
+      "platform": "time_pattern",
+      "hours": "/6",
+      "minutes": "43",
+      "id": "reassert"
+    }
+  ],
+  "conditions": [
+    {
+      "condition": "state",
+      "entity_id": "binary_sensor.camera_log_archive_events",
+      "state": "on"
+    },
+    {
+      "condition": "template",
+      "value_template": "{{ state_attr('sensor.camera_engine_log_archive', 'events_35d') is number }}"
+    }
+  ],
+  "actions": [
+    {
+      "action": "persistent_notification.create",
+      "data": {
+        "notification_id": "camera_log_archive_event",
+        "title": "🗄 Camera engine-log archive: {{ (state_attr('sensor.camera_engine_log_archive', 'last_event') or 'event').split(' ')[0] }}",
+        "message": "Latest: {{ state_attr('sensor.camera_engine_log_archive', 'last_event') }}.\nLast 35 days: {{ state_attr('sensor.camera_engine_log_archive', 'gap_count_35d') }} gap(s), {{ state_attr('sensor.camera_engine_log_archive', 'gap_min_35d') }} min not archived; {{ state_attr('sensor.camera_engine_log_archive', 'resync_count_35d') }} resync(s); {{ state_attr('sensor.camera_engine_log_archive', 'withheld_35d') }} withheld line(s).\nA GAP is a span the journal no longer held when the archive ran - those minutes exist nowhere (a '#~camlog~ GAP' line marks it in the archive). A RESYNC re-archived a window after the journal cursor could not be verified - lines may repeat, none are missing. A WITHHELD line still looked like an identifier after redaction and was written as <WITHHELD> - the redaction rules need a new pattern.\nPress \"Acknowledge camera log archive events\" to clear this card; a later event raises it again. {{ now().strftime('%b %-d %-I:%M %p') }}."
+      }
+    }
+  ],
+  "mode": "queued",
+  "max_exceeded": "silent"
+}

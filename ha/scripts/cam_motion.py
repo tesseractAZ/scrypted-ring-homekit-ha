@@ -12,12 +12,27 @@ whole window after any restart. The recorder survives restarts.
 
 Emits ONE JSON object on stdout, always, exit 0 (command_line sensor contract).
 """
+import bisect
+import datetime
 import json
 import math
 import os
 import sqlite3
 import sys
 import time
+
+# PARTIAL LOSS (partial_loss.py beside this script). Imported defensively: a
+# missing or broken module costs only the partial_* attributes - published as
+# partial_loss=None and partial_detail={"error": ...}, never as an empty list
+# that would read as "looked, nothing lost" - and never the staleness sensor.
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import partial_loss as _pl
+except Exception as _pl_exc:  # noqa: BLE001
+    _pl = None
+    _PL_IMPORT_ERROR = "%s: %s" % (type(_pl_exc).__name__, _pl_exc)
+else:
+    _PL_IMPORT_ERROR = None
 
 DB = "/config/home-assistant_v2.db"
 VISION_STATE = "/config/.cam_vision_state.json"  # written by cam_vision.py
@@ -49,6 +64,38 @@ RECALL_KEEP = 40                 # outcomes kept per camera (most recent)
 RECALL_MIN_CLUSTERS = 10         # fewer than this = not yet measured
 RECALL_FLOOR = 0.25              # below this the detector cannot call a view quiet
 RECALL_MAX_AGE_D = 30.0          # outcomes older than this are dropped
+# RECALL RECENCY. The 25% floor over the last 40 outcomes answers "could the
+# detector see this view?" with hits from up to 40 clusters ago, so a detector
+# that has just gone deaf keeps clearing it on old hits. Measured 2026-10-02:
+# one camera's vision bar ratcheted to its cap and it missed its last 8 clusters
+# in a row, yet its record read 4/12 (31/40 had the record run since August),
+# so a stale page would have called its silence "consistent with a quiet area".
+# A trailing run of misses is judged against the camera's OWN rate before the
+# run, the way corroboration judges a silent camera: P = (1 - p_lb)**run, p_lb
+# the 95% lower bound of that rate. The record before a run always ENDS on the
+# hit that stopped it, so that hit is left out - (k-1)/(n-1) - or it inflates
+# the rate: 4/4 before a run of 7 gives P = 0.0068, 3/3 gives 0.018. Two
+# conditions withhold the quiet verdict, with different wording:
+#   RUN TEST: run >= RECALL_RUN_MIN and P < RECALL_RUN_ALPHA - the text may
+#     state P, and says only that the silence cannot be read as a quiet area;
+#   CAP: run >= RECALL_RUN_CAP regardless of P - for a rate too low or too
+#     thinly measured to reach alpha; no P and no causal claim, because a run
+#     can also be the camera firing on things frame differencing rightly
+#     ignores (insects at the IR lamp) - in i.i.d. simulation of healthy
+#     cameras at 25/30/35% recall the cap alone withholds 4.2/3.3/2.1% of the
+#     polls the floor allows.
+# Replayed on records rebuilt from the recorder (2026-08-12..10-02, hourly
+# polls): on its record as if kept since August the deaf camera above is
+# withheld from its 4th miss, ~20 h after the first (on the 4/12 record it
+# actually had, at the 8th), where the floor alone needed ~30 misses (median
+# 188 h over synthetic onsets); synthetic deafness is withheld after a median 4 / 8 / 7 clusters
+# (24 / 38 / 29 h) on the three south cameras. On healthy history it withheld
+# 0 of 962 and 0 of 1017 polls the floor allowed on two cameras, and 15 of 428
+# (3.5%) on the one whose recall sits AT the floor (25%). The (k-1)/(n-1)
+# correction changes none of these counts.
+RECALL_RUN_MIN = 4
+RECALL_RUN_ALPHA = 0.01
+RECALL_RUN_CAP = 8
 DOOR_STATE = "/config/.cam_flap_door_state.json"  # written by cam_flap.py
 DOOR_STATE_MAX_AGE_MIN = 45.0  # cam_flap runs every 10 min; older means it is not reporting
 # ---------------------------------------------------------------------------
@@ -111,6 +158,34 @@ HEARTBEAT_BUCKET_S = 600
 # visible once the host returns. (A 2026-08-26 mains cut took the whole fleet
 # dark for 56.9 min and raised nothing.) Measured cost ~0.1 s.
 HOST_GAP_LOOKBACK_H = 24.0
+# PARTIAL LOSS - see partial_loss.py. The detector reuses this file's co-firing
+# constants (partial_shared()) rather than restating them.
+#
+# ACKNOWLEDGE. A flag clears only on evidence of recovery, never by time, so a
+# camera whose co-firing stays low (a deliberately narrowed motion zone, a
+# partner re-aimed for good) stays flagged. To silence ONE flag, add the camera
+# with the `since` its partial_detail entry shows: {"<camera>": <since>} or
+# {"<camera>": {"since": <since>, "note": "why"}}. The ack is keyed to that
+# flag, the way a proof latch is keyed to cut_ts: a later, separate flag on the
+# same camera gets a new `since` and pages again. An ack that matches no current
+# flag is listed in partial_detail.ack_unmatched, so a stale entry is visible.
+PARTIAL_LOSS_ACK = {}
+PARTIAL_CLEARED_KEEP_S = 24 * 3600   # a cleared flag's reason stays visible this long
+PARTIAL_SCOPE = (
+    "flags a camera that drops out of most of the motion its usual partners still "
+    "record, typically 40-50 h after onset. Replayed on this fleet it caught 18 of 24 "
+    "total losses (staleness pages the rest at 72 h), 17 of 24 at 90%, 14 of 24 at 80%, "
+    "6 of 24 at 67%, 4 of 24 at 50%, 8 of 24 day-only and 1 of 24 night-only losses; "
+    "slow declines are not detected. No flag is not an all-clear: min_loss is the "
+    "smallest loss each camera's best partner would convict now, and cameras listed in "
+    "cannot_convict could not have been convicted this poll even by a total loss")
+# RECORDER HOLES for the partial-loss test: every all-entity gap longer than
+# this over its ~62-day lookback is unobserved time, not silence. Listing them
+# with the LAG scan above over the whole lookback costs 5.1 s on the Pi
+# (4.0 M rows, measured 2026-10-02) against 0.09 s for 24 h, so the list is
+# cached in MOTION_STATE and each poll scans only the rows written since the
+# previous scan; a missing or unusable cache costs one full scan.
+PARTIAL_GAP_MIN_S = 300.0
 
 # ---------------------------------------------------------------------------
 # CROSS-CAMERA CORROBORATION.
@@ -518,10 +593,301 @@ def update_recall(prev, events, vision_logs, now, window_start, unusable,
     return out
 
 
+def recall_recency(ent):
+    """(run, hits_before, n_before, p) for a recall record [[start, hit], ...].
+
+    run = misses at the END of the record (oldest-first order); hits_before /
+    n_before = the record before the run; p = probability of a run that long if
+    the detector still saw this view at the 95% lower bound of its rate before
+    the run, with the hit that ENDS the run left out ((k-1)/(n-1)). p is 1.0
+    when there is no run. Malformed entries count as neither hit nor miss."""
+    clean = []
+    for e in ent or []:
+        try:
+            h = int(e[1])
+        except Exception:  # noqa: BLE001
+            continue
+        if h in (0, 1):
+            clean.append(h)
+    run = 0
+    for h in reversed(clean):
+        if h:
+            break
+        run += 1
+    before = clean[:len(clean) - run]
+    k, n = sum(before), len(before)
+    if run == 0:
+        return 0, k, n, 1.0
+    kk, nn = (k - 1, n - 1) if n else (0, 0)
+    p = (1.0 - (_wilson_lower(kk, nn) if nn > 0 else 0.0)) ** run
+    return run, k, n, p
+
+
+def recall_deaf(ent):
+    """'run' when the record ENDS in a miss run its own history makes improbable
+    (P < RECALL_RUN_ALPHA, at least RECALL_RUN_MIN long), 'cap' when the run is
+    RECALL_RUN_CAP or longer but P does not reach alpha, else None."""
+    run, _, _, p = recall_recency(ent)
+    if run < RECALL_RUN_MIN:
+        return None
+    if p < RECALL_RUN_ALPHA:
+        return "run"
+    return "cap" if run >= RECALL_RUN_CAP else None
+
+
+def partial_shared():
+    """The co-firing constants partial_loss.py reuses - passed, never restated."""
+    return {"LINK_S": CORROBORATE_LINK_S, "MIN_PRE": CORROBORATE_MIN_PRE,
+            "MIN_HITS": CORROBORATE_MIN_HITS, "MIN_RATE": CORROBORATE_MIN_RATE,
+            "STALE_HOURS": {c: STALE_HOURS_OVERRIDES.get(c, STALE_HOURS) for c in CAMS},
+            "wilson": _wilson_lower}
+
+
+def scan_host_gaps(conn, cache, now, horizon):
+    """All-entity recorder holes > PARTIAL_GAP_MIN_S since `horizon`.
+
+    cache: MOTION_STATE["host_gaps"] = {"from", "to", "gaps"} from the previous
+    poll. Scans only rows from the last row the previous scan saw ("to"), with
+    the row before the scan's start seeded as the first LAG partner so a hole
+    straddling it is not lost; without a cache that reaches back to the horizon
+    it scans the whole lookback once. Returns the new cache (gaps merged and
+    pruned to the horizon). Raises on a query failure; the caller keeps the
+    previous cache."""
+    gaps, frm, to = [], None, None
+    if isinstance(cache, dict):
+        try:
+            frm, to = float(cache["from"]), float(cache["to"])
+            gaps = [[float(a), float(b)] for a, b in cache.get("gaps") or []]
+        except Exception:  # noqa: BLE001 - an unusable cache costs one full scan
+            frm, to, gaps = None, None, []
+    if frm is None or to is None or frm > horizon + 3600.0 or to > now or to < horizon:
+        frm, start, gaps = horizon, horizon, []
+    else:
+        start = to
+    seed = conn.execute("SELECT MAX(last_updated_ts) FROM states WHERE last_updated_ts < ?",
+                        (start,)).fetchone()[0]
+    rows = conn.execute(
+        "SELECT prev, ts FROM (SELECT last_updated_ts AS ts, COALESCE(LAG(last_updated_ts) "
+        "OVER (ORDER BY last_updated_ts), ?) AS prev FROM states WHERE last_updated_ts >= ?) "
+        "WHERE ts - prev > ?", (seed, start, PARTIAL_GAP_MIN_S)).fetchall()
+    last = conn.execute("SELECT MAX(last_updated_ts) FROM states").fetchone()[0]
+    merged = []
+    for a, b in sorted(gaps + [[float(a), float(b)] for a, b in rows if a is not None]):
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return {"from": frm, "to": float(last) if last is not None else start,
+            "gaps": [[round(a, 1), round(b, 1)] for a, b in merged if b > horizon]}
+
+
+def partial_ack(flag_since):
+    """PARTIAL_LOSS_ACK against the current flags {cam: since}.
+    Returns ({cam: note-or-True} acknowledged, {cam: reason} unmatched)."""
+    acked, unmatched = {}, {}
+    for cam, v in sorted((PARTIAL_LOSS_ACK or {}).items()):
+        try:
+            since = float(v.get("since") if isinstance(v, dict) else v)
+            if isinstance(v, bool) or since != since:
+                raise ValueError(v)
+        except Exception:  # noqa: BLE001 - one malformed ack never hides another
+            unmatched[cam] = "malformed (need the flag's since)"
+            continue
+        if cam in flag_since and abs(float(flag_since[cam]) - since) < 1.0:
+            acked[cam] = (v.get("note") if isinstance(v, dict) else None) or True
+        else:
+            unmatched[cam] = "no current flag since %d" % since
+    return acked, unmatched
+
+
+# ---------------------------------------------------------------------------
+# ROOM SWITCH NOTES. For a camera with a room light switch, a stale verdict
+# lists the physical presses of that switch since the camera's last motion
+# event - an annotation only. A Z-Wave Central Scene event is sent only for a
+# paddle pressed by hand (remote HomeKit/Siri toggles produced none), so the
+# scene event entities are a clean record of someone at the switch; but the
+# switch box is OUTSIDE the camera's view, so a press does not put anyone in
+# the room. Measured 2026-07-18..10-02: 8 presses of this switch on 5 visits;
+# 3 visits outside the 461.3 h silence were seen (camera fired 106 s before to
+# 39 s after a press), the 2 inside it were not - and neither of those shows a
+# person entering the room (one left through the patio within 2 min). A press
+# of the other light's switch in the same box drew no motion at 08-20 18:52Z
+# 23.7 min after a run of 14 motion events from this camera, with the camera
+# working. 3 seen visits bound P(seen | press, working camera) only above 0.44
+# (Wilson), so 2 misses in a row could still be chance at P ~0.3: not a proof,
+# not a tier. Each visit's outcome is logged passively in
+# MOTION_STATE["witness_log"] to build that calibration (8 visits is the bar
+# CORROBORATE_MIN_HITS sets). A double-tap of either paddle (KeyPressed2x,
+# listed in each entity's event_types) is a deliberate walk test, run by the
+# camera_room_walk_test automation: one followed by no motion from the
+# camera is named in the note.
+WITNESS = {
+    # "<rarely_visited_interior_cam>": {
+    #     "on": ("event.<witness_switch_scene_1>",),   # top paddle: light on
+    #     "off": ("event.<witness_switch_scene_2>",),  # bottom paddle: light off
+    #     "companions": ("<cam_a>", "<cam_b>"),       # cameras that see the way in
+    # },
+}
+WITNESS_LOOKBACK_D = 90.0
+WITNESS_MAX_LAG_S = 120.0    # a NEW press is recorded within this of its own stamp
+WITNESS_LINK_S = 1800.0      # presses closer than this are one visit
+WITNESS_COMPANION_S = 120.0  # a companion camera this close to a press saw the person
+WITNESS_WINDOW_S = 600.0     # the camera firing this close to a visit saw it (log)
+WITNESS_BRACKET_S = 86400.0  # log a visit once this has passed after it
+WITNESS_LOG_KEEP = 50        # visits kept per camera in MOTION_STATE["witness_log"]
+WITNESS_NOTE_MAX = 8         # newest presses listed in a note
+WITNESS_WALK_S = 300.0       # = camera_room_walk_test's wait (either paddle)
+
+
+def _iso_ts(s):
+    """An event entity's state (the ISO time of its last event) -> epoch, or None."""
+    if not isinstance(s, str) or s[:2] != "20":
+        return None
+    try:
+        d = datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return d.timestamp() if d.tzinfo is not None else None
+
+
+def _z(t):
+    return time.strftime("%m-%d %H:%MZ", time.gmtime(t))
+
+
+def witness_presses(rows, kinds):
+    """[(entity_id, state, last_updated_ts, event_type)] -> sorted
+    [(press_ts, kind, event_type)].
+
+    A physical press writes a NEW state equal to its own timestamp, recorded
+    within 0.001 s of it (8 of 8). A restart or node re-interview re-writes the
+    entity with the OLD timestamp 85 s to weeks later, and an unavailable/unknown
+    row has no timestamp: rows outside -5..+WITNESS_MAX_LAG_S of their own
+    timestamp are dropped and a timestamp seen on several rows is one press."""
+    out = {}
+    for row in rows:
+        eid, st, lu = row[0], row[1], row[2]
+        et = row[3] if len(row) > 3 else None
+        kind, t = kinds.get(eid), _iso_ts(st)
+        if kind is None or t is None or lu is None:
+            continue
+        if -5.0 <= float(lu) - t <= WITNESS_MAX_LAG_S:
+            out.setdefault((eid, round(t, 3)), (t, kind, et if isinstance(et, str) else None))
+    return sorted(out.values())
+
+
+def witness_visits(presses):
+    """[(ts, kind, event_type)] sorted -> [{first, last, n, on, tap2, ts}] for
+    presses chained <= WITNESS_LINK_S apart."""
+    out = []
+    for t, kind, et in presses:
+        if out and t - out[-1]["last"] <= WITNESS_LINK_S:
+            v = out[-1]
+            v["last"], v["n"] = t, v["n"] + 1
+        else:
+            v = {"first": t, "last": t, "n": 1, "on": False, "tap2": False, "ts": []}
+            out.append(v)
+        v["on"] = v["on"] or kind == "on"
+        v["tap2"] = v["tap2"] or et == "KeyPressed2x"
+        v["ts"].append(t)
+    return out
+
+
+def _near(ts_sorted, t, w):
+    """Timestamps in ts_sorted within +-w of t."""
+    i = bisect.bisect_left(ts_sorted, t - w)
+    j = bisect.bisect_right(ts_sorted, t + w)
+    return ts_sorted[i:j]
+
+
+def witness_note(cam, cfg, rows, presses, last_event, on_by_cam, data_from, now):
+    """The note appended to a stale camera's verdict. Never raises on its inputs."""
+    test = ("To test it: double-tap either paddle of the room switch, then walk into "
+            "the room - the walk-test automation pushes PASS or FAIL within 5 minutes; if "
+            "the camera fires, it leaves the stale list at the next poll.")
+    caveat = ("The switch box is outside this camera's view, so a press with no motion "
+              "here is NOT proof of a fault - a companion camera firing shows someone "
+              "in the garage, not in the room.")
+    if not rows:
+        return ("ROOM SWITCH: no recorder rows at all for %s in %.0f days - renamed "
+                "or removed? Presses cannot be listed. %s"
+                % (", ".join(cfg["on"] + cfg["off"]), WITNESS_LOOKBACK_D, test))
+    mine = [x for x in presses if last_event is None or x[0] > last_event]
+    if not mine:
+        last = presses[-1][0] if presses else None
+        return ("ROOM SWITCH: no physical press since this camera's last motion "
+                "event (last press %s). %s"
+                % (_z(last) if last else "none in %.0f days" % WITNESS_LOOKBACK_D, test))
+    parts = []
+    for t, kind, et in mine[-WITNESS_NOTE_MAX:]:
+        what = "light ON (top paddle)" if kind == "on" else "light OFF (bottom paddle)"
+        if et == "KeyPressed2x":
+            what += (" DOUBLE-TAP = WALK TEST, in progress" if now - t < WITNESS_WALK_S
+                     else " DOUBLE-TAP = WALK TEST: no motion from this camera since")
+        if t < data_from:
+            comp = "companion cameras not checked (before the motion lookback)"
+        else:
+            hits = []
+            for c in cfg["companions"]:
+                near = _near(on_by_cam.get(c, []), t, WITNESS_COMPANION_S)
+                if near:
+                    d = min(near, key=lambda x: abs(x - t)) - t
+                    hits.append("%s %+.0f s" % (c, d))
+            comp = ("companion fired: " + ", ".join(hits)) if hits else \
+                "no companion camera within %.0f min" % (WITNESS_COMPANION_S / 60.0)
+        lead = ""
+        if last_event is not None and t - last_event <= WITNESS_WINDOW_S:
+            lead = "; this camera's last event came %.0f s before it" % (t - last_event)
+        parts.append("%s %s - %s%s" % (_z(t), what, comp, lead))
+    older = len(mine) - len(parts)
+    return ("ROOM SWITCH: %d physical press(es) since this camera's last motion "
+            "event%s: %s. %s %s"
+            % (len(mine), (" (newest %d listed)" % len(parts)) if older else "",
+               "; ".join(parts), caveat, test))
+
+
+def update_witness_log(prev, visits, own_on, on_by_cam, cfg, gaps, data_from, now):
+    """Passive calibration record: one immutable entry per visit to the switch,
+    written once WITNESS_BRACKET_S has passed after it (so whether the camera
+    fired in the day either side - 'bracketed', i.e. demonstrably working - is
+    known). Visits whose bracket reaches before the motion lookback are skipped.
+    Returns the newest WITNESS_LOG_KEEP entries; malformed stored entries are
+    dropped one at a time."""
+    log = {}
+    for e in prev if isinstance(prev, list) else []:
+        try:
+            log[int(e["t"])] = e
+        except Exception:  # noqa: BLE001
+            continue
+    for v in visits:
+        key = int(v["first"])
+        if key in log or now < v["last"] + WITNESS_WINDOW_S + WITNESS_BRACKET_S:
+            continue
+        if v["first"] - WITNESS_BRACKET_S < data_from:
+            continue
+        a, b = v["first"] - WITNESS_WINDOW_S, v["last"] + WITNESS_WINDOW_S
+        inside = [t for t in own_on if a <= t <= b]
+        near = min((0.0 if v["first"] <= t <= v["last"] else
+                    min(abs(t - v["first"]), abs(t - v["last"])) for t in inside),
+                   default=None)
+        comp = sorted({c for c in cfg["companions"] for t in v["ts"]
+                       if _near(on_by_cam.get(c, []), t, WITNESS_COMPANION_S)})
+        log[key] = {
+            "t": key, "n": v["n"], "on": v["on"], "tap2": v["tap2"],
+            "seen": bool(inside), "near_s": round(near, 1) if near is not None else None,
+            "comp": comp,
+            "before": any(v["first"] - WITNESS_BRACKET_S <= t < a for t in own_on),
+            "after": any(b < t <= v["last"] + WITNESS_BRACKET_S for t in own_on),
+            "hole": any(x < b and y > a for x, y in gaps),
+        }
+    return [log[k] for k in sorted(log)][-WITNESS_LOG_KEEP:]
+
+
 def emit(payload):
     base = {
         "stale": [],
         "stale_count": 0,
+        "partial_loss": None,
+        "partial_detail": None,
         "host_gap_min": None,
         "visual_hours": None,
         "visual_localized_hours": None,
@@ -578,19 +944,62 @@ def main():
     )
     host_gap_min = None
     motion_events = []
+    motion_events_all = []   # the partial-loss lookback (~62 d, longer than 30 d)
+    try:
+        with open(MOTION_STATE) as fh:
+            prev_state = json.load(fh)
+        if not isinstance(prev_state, dict):
+            prev_state = {}
+    except Exception:  # noqa: BLE001 - every consumer below has its own fallback
+        prev_state = {}
+    gap_cache, gap_error = prev_state.get("host_gaps"), None
+    witness_rows, witness_error = {}, {}
     try:
         conn = sqlite3.connect("file:%s?mode=ro" % DB, uri=True, timeout=QUERY_TIMEOUT_S)
         try:
             rows = conn.execute(sql, list(entities.keys())).fetchall()
             ev_cut = time.time() - CORROBORATE_LOOKBACK_D * 86400
-            motion_events = [
+            # One fetch serves both: every pre-existing consumer gets EXACTLY the
+            # rows it got before (the same `> ev_cut` predicate, applied here).
+            pl_cut = ev_cut
+            if _pl is not None:
+                pl_cut = min(ev_cut, time.time() - _pl.lookback_s())
+            motion_events_all = [
                 (float(t), entities[e]) for t, e in
-                conn.execute(ev_sql, list(entities.keys()) + [ev_cut]).fetchall()
+                conn.execute(ev_sql, list(entities.keys()) + [pl_cut]).fetchall()
             ]
+            motion_events = [x for x in motion_events_all if x[0] > ev_cut]
             cutoff = time.time() - HOST_GAP_LOOKBACK_H * 3600
             g = conn.execute(gap_sql, (cutoff, cutoff)).fetchone()
             if g and g[0] is not None:
                 host_gap_min = round(float(g[0]) / 60.0, 1)
+            if _pl is not None:
+                try:  # an annotation's input: a failure is published, never fatal
+                    gap_cache = scan_host_gaps(conn, gap_cache, time.time(),
+                                               time.time() - _pl.lookback_s())
+                except Exception as exc:  # noqa: BLE001
+                    gap_error = "recorder gap scan failed: %s" % exc
+            for wcam, cfg in WITNESS.items():
+                kinds = list(cfg["on"]) + list(cfg["off"])
+                args = kinds + [time.time() - WITNESS_LOOKBACK_D * 86400]
+                where = ("FROM states s JOIN states_meta m ON s.metadata_id = m.metadata_id "
+                         "%s WHERE m.entity_id IN (" + ",".join("?" * len(kinds)) +
+                         ") AND s.last_updated_ts > ? ORDER BY s.last_updated_ts")
+                try:   # event_type (a double-tap is the walk test) lives in the attributes
+                    witness_rows[wcam] = conn.execute(
+                        "SELECT m.entity_id, s.state, s.last_updated_ts, "
+                        "json_extract(a.shared_attrs, '$.event_type') " + where % (
+                            "LEFT JOIN state_attributes a ON s.attributes_id = a.attributes_id"),
+                        args).fetchall()
+                except Exception as exc:  # noqa: BLE001 - presses still list without it
+                    witness_error[wcam] = "event types unreadable (%s)" % exc
+                    try:
+                        witness_rows[wcam] = conn.execute(
+                            "SELECT m.entity_id, s.state, s.last_updated_ts " + where % "",
+                            args).fetchall()
+                    except Exception as exc2:  # noqa: BLE001
+                        witness_rows.pop(wcam, None)
+                        witness_error[wcam] = "switch rows unreadable (%s)" % exc2
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 - any DB problem becomes sensor state
@@ -726,6 +1135,13 @@ def main():
         except Exception:  # noqa: BLE001
             return (0, 0)
 
+    def recall_deaf_safe(cam):
+        # An annotation: a malformed record withholds nothing and raises nothing.
+        try:
+            return recall_deaf(recall_state.get(cam) or [])
+        except Exception:  # noqa: BLE001
+            return None
+
     verdicts = {}
     for cam in stale:
         loc_h, loc_n = localized_hours.get(cam), localized_count.get(cam) or 0
@@ -769,6 +1185,22 @@ def main():
                                  "clusters (%.0f%%) - it cannot see activity in this view "
                                  "reliably - no verdict"
                                  % (VISION_KEEP_H, hits, n, 100.0 * hits / n))
+            elif n >= RECALL_MIN_CLUSTERS and recall_deaf_safe(cam):
+                # The record clears the floor only on hits from BEFORE a run of
+                # misses (see RECALL RECENCY): its silence says nothing about the
+                # scene. Two wordings - only the run test has a P to state.
+                run, kb, nb, p_run = recall_recency(recall_state.get(cam) or [])
+                if recall_deaf_safe(cam) == "run":
+                    verdicts[cam] = ("no visual change in the last %.0fh, but frame differencing "
+                                     "missed this camera's last %d motion clusters in a row (it "
+                                     "caught %d of the %d before them; P <= %.2g if it still saw "
+                                     "this view) - its silence cannot be read as a quiet area - "
+                                     "no verdict" % (VISION_KEEP_H, run, kb, nb, p_run))
+                else:
+                    verdicts[cam] = ("no visual change in the last %.0fh, but frame differencing "
+                                     "missed this camera's last %d motion clusters in a row - too "
+                                     "many to read its silence as a quiet area - no verdict"
+                                     % (VISION_KEEP_H, run))
             elif n >= RECALL_MIN_CLUSTERS:
                 verdicts[cam] = ("no visual change in the last %.0fh (vision window; "
                                  "shorter than the stale span) - consistent with a "
@@ -863,6 +1295,101 @@ def main():
                        v.get("verdict", "n/a"))),
             }
             new_latches[cam] = prior
+
+    # PARTIAL LOSS. Every non-stale camera, every poll. partial_loss is None
+    # (never []) and partial_detail carries the error whenever the test did not
+    # run, so "nothing flagged" is never published by a failure.
+    partial_loss, partial_detail = None, None
+    prev_partial = mstate.get("partial") if isinstance(mstate.get("partial"), dict) else {}
+    partial_state = prev_partial
+    partial_cleared = {}
+    try:
+        stored = mstate.get("partial_cleared")
+        for c, v in (stored.items() if isinstance(stored, dict) else []):
+            try:
+                if (c in CAMS and isinstance(v, dict)
+                        and now - float(v["at"]) <= PARTIAL_CLEARED_KEEP_S):
+                    partial_cleared[c] = v
+            except Exception:  # noqa: BLE001 - one bad record never costs another
+                continue
+        if _pl is None:
+            raise RuntimeError("partial_loss module not loaded (%s)" % _PL_IMPORT_ERROR)
+        host_gaps = (gap_cache or {}).get("gaps") if isinstance(gap_cache, dict) else None
+        pres, partial_state = _pl.evaluate(
+            motion_events_all, now, prev_partial, cams=CAMS, stale_now=set(stale),
+            gaps=host_gaps or [], shared=partial_shared())
+        for e in pres["events"]:
+            if e["kind"] == "exit":
+                partial_cleared[e["cam"]] = dict(
+                    {k: v for k, v in e.items() if k not in ("cam", "kind")}, at=int(now))
+            elif e["kind"] == "enter":
+                partial_cleared.pop(e["cam"], None)
+        flag_since = {c: (pres["detail"].get(c) or {}).get("since") for c in pres["flagged"]}
+        for c, d in pres["detail"].items():   # a dormant flag keeps its ack
+            if c not in flag_since and (d or {}).get("dormant_since") is not None:
+                flag_since[c] = d["dormant_since"]
+        acked, ack_unmatched = partial_ack(flag_since)
+        cams_detail = {}
+        for c in CAMS:
+            d = {k: v for k, v in (pres["detail"].get(c) or {}).items() if not k.startswith("_")}
+            if c in partial_cleared:
+                d["cleared"] = partial_cleared[c]
+            if c in acked:
+                d["ack"] = acked[c]
+            cams_detail[c] = d
+        partial_loss = sorted(set(pres["flagged"]) - set(stale) - set(acked))
+        partial_detail = {
+            "error": None,
+            "cannot_convict": sorted(c for c, d in cams_detail.items()
+                                     if d.get("status") in ("underpowered", "untestable")),
+            "acknowledged": sorted(acked),
+            "cams": cams_detail,
+            "scope": PARTIAL_SCOPE,
+            "gaps": len(host_gaps or []),
+        }
+        if ack_unmatched:
+            partial_detail["ack_unmatched"] = ack_unmatched
+        if gap_error or host_gaps is None:
+            # The test still runs - a recorder hole is then counted as observed
+            # time, which understates a camera's own rate - but it says so.
+            partial_detail["gap_error"] = gap_error or "no recorder gap list"
+    except Exception as exc:  # noqa: BLE001 - an annotation must never fail the sensor
+        partial_loss, partial_state = None, prev_partial
+        partial_detail = {"error": "partial loss failed: %s" % exc}
+
+    # ROOM SWITCH NOTES (annotation) and the passive visit log (calibration).
+    witness_log = mstate.get("witness_log") if isinstance(mstate.get("witness_log"), dict) else {}
+    witness_failed = []
+    on_by_cam = {}
+    for t, c in motion_events_all:
+        on_by_cam.setdefault(c, []).append(t)
+    data_from = (now - _pl.lookback_s()) if _pl is not None else ev_cut
+    for wcam, cfg in WITNESS.items():
+        try:
+            kinds = {e: "on" for e in cfg["on"]}
+            kinds.update({e: "off" for e in cfg["off"]})
+            wrows = witness_rows.get(wcam)
+            if wrows is None:
+                raise RuntimeError(witness_error.get(wcam) or "switch rows not read")
+            presses = witness_presses(wrows, kinds)
+            visits = witness_visits(presses)
+            witness_log[wcam] = update_witness_log(
+                witness_log.get(wcam), visits, on_by_cam.get(wcam, []), on_by_cam, cfg,
+                (gap_cache or {}).get("gaps") or [] if isinstance(gap_cache, dict) else [],
+                data_from, now)
+            if wcam in stale and wcam in corroboration:
+                note = witness_note(wcam, cfg, wrows, presses, last.get(wcam), on_by_cam,
+                                    data_from, now)
+                if witness_error.get(wcam):
+                    note += " (%s)" % witness_error[wcam]
+                corroboration[wcam]["verdict"] = "%s | %s" % (
+                    corroboration[wcam].get("verdict"), note)
+        except Exception as exc:  # noqa: BLE001 - an annotation must never fail the sensor
+            witness_failed.append("%s: %s" % (wcam, exc))
+            if wcam in stale and wcam in corroboration:
+                corroboration[wcam]["verdict"] = (
+                    "%s | ROOM SWITCH: presses could not be read (%s)"
+                    % (corroboration[wcam].get("verdict"), exc))
     try:
         background = {"computed_at": int(now), "lookback_d": BACKGROUND_LOOKBACK_D,
                       "window_s": BACKGROUND_WINDOW_S, "hour_basis": "utc",
@@ -876,7 +1403,11 @@ def main():
         with open(tmp, "w") as fh:
             json.dump({"proofs": new_latches, "background": background,
                        "vision_recall": recall_state,
-                       "vision_usable_since": usable_since}, fh)
+                       "vision_usable_since": usable_since,
+                       "partial": partial_state,
+                       "partial_cleared": partial_cleared,
+                       "host_gaps": gap_cache if isinstance(gap_cache, dict) else None,
+                       "witness_log": witness_log}, fh)
         os.replace(tmp, MOTION_STATE)
     except Exception:  # noqa: BLE001 - losing the latch must not fail the sensor
         try:
@@ -909,6 +1440,8 @@ def main():
                    (host_gap_min, HOST_GAP_LOOKBACK_H)) + summary
 
     summary += door_summary_suffix(door_evidence, door_failing)
+    if witness_failed:
+        summary += " | WITNESS LOG FAILED: " + "; ".join(witness_failed)
     emit({
         "stale": stale,
         "stale_count": len(stale),
@@ -926,6 +1459,8 @@ def main():
         "corroboration": corroboration,
         "vision_blind": sorted(set(vision_blind) | set(vision_cached)),
         "summary": summary,
+        "partial_loss": partial_loss,
+        "partial_detail": partial_detail,
         "updated_at": int(time.time() // HEARTBEAT_BUCKET_S) * HEARTBEAT_BUCKET_S,
     })
 

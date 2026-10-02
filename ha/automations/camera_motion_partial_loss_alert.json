@@ -1,0 +1,62 @@
+{
+  "id": "camera_motion_partial_loss_alert",
+  "alias": "Cameras - partial motion loss",
+  "description": "Pages when a camera that still fires has dropped out of most of the motion its usual partner cameras keep recording. Staleness cannot see this: every stray event resets a camera's clock. cam_motion.py (partial_loss.py) tests every non-stale camera each poll: 48 h co-fire count against the 95% lower bound of a 27-day reference rate, binomial tail x partners < 1e-6, recent rate <= 1/3 of the bound, own event rate <= 2/3 of normal, no other partner whose co-fires contradict the loss (likelihood veto), hits lasting 30 min. It clears ONLY on evidence (partner back to >= half the frozen reference, improbable under the loss, for 6 h) - never with time; a deliberate change is silenced per flag with PARTIAL_LOSS_ACK in cam_motion.py. PUSH GATE (as camera_door_coverage_alert): on setchange or boot, only when a flagged camera's since stamp is under an hour old AND newer than this automation's last run, so a flag is normally paged once - including one entered by the startup poll (a re-assert landing in the seconds between a poll and its publish can swallow that push; the card still shows the flag) - and a restart, reload, timeout or monitor error that re-adds an already-flagged camera re-posts the card without re-paging; the 6-hourly re-assert only restores the card.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "sensor.camera_motion_stale",
+      "attribute": "partial_loss",
+      "id": "setchange"
+    },
+    {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
+    },
+    {
+      "platform": "time_pattern",
+      "hours": "/6",
+      "minutes": "53",
+      "id": "reassert"
+    }
+  ],
+  "conditions": [
+    {
+      "condition": "template",
+      "value_template": "{{ (state_attr('sensor.camera_motion_stale','partial_loss') or []) | length > 0 }}"
+    }
+  ],
+  "actions": [
+    {
+      "action": "persistent_notification.create",
+      "data": {
+        "notification_id": "camera_partial_loss",
+        "title": "Partial motion loss: {{ (state_attr('sensor.camera_motion_stale','partial_loss') or []) | join(', ') }}",
+        "message": "{% set pl = state_attr('sensor.camera_motion_stale','partial_loss') or [] %}{% set pd = state_attr('sensor.camera_motion_stale','partial_detail') or {} %}{% set det = pd.get('cams') or {} %}These cameras still fire, so they never go stale - but they have dropped out of motion their usual partner cameras keep recording.\n\n{% for c in pl %}{% set d = det.get(c) or {} %}{% set e = d.get('entry') or {} %}- {{ c }}: {% if d.get('recent') %}in the last 48 h it appeared in {{ d.recent }} of {{ d.get('partner', '?') }}'s motion clusters, against {{ d.get('baseline', '?') }} in its reference period (95% lower bound {{ ((d.get('lb') or 0) * 100) | round(0) | int }}%); P(that | still working) = {{ d.get('p') }}.{% else %}not re-tested against its reference this poll; the entry evidence below still stands.{% endif %}{% if d.get('own_ratio') is not none %} Its own event rate is {{ (d.own_ratio * 100) | round(0) | int }}% of normal.{% endif %} Flagged {{ (d.get('since') or 0) | timestamp_custom('%b %-d %-I:%M %p') }} (ack stamp {{ d.get('since') }}){% if e %} on {{ e.get('partner') }} {{ (e.get('recent') or [0, 0]) | join('/') }} vs {{ (e.get('base') or [0, 0]) | join('/') }}{% endif %}.{% if d.get('held_since') %} No partner can re-test it right now (since {{ d.held_since | timestamp_custom('%b %-d %-I:%M %p') }}) - the flag holds.{% endif %}{% if d.get('recovering_since') %} Recovering since {{ d.recovering_since | timestamp_custom('%b %-d %-I:%M %p') }} ({{ (d.get('exit_test') or {}).get('partner') }} {{ (d.get('exit_test') or {}).get('recent') }}) - it clears after 6 h of that.{% endif %}\n{% endfor %}{% set cc = pd.get('cannot_convict') or [] %}{% if cc %}\nCould NOT have been convicted this poll, even by a total loss: {{ cc | join(', ') }} - an absent flag says nothing about them.{% endif %}{% set ack = pd.get('acknowledged') or [] %}{% if ack %}\nAcknowledged (flagged, not paged): {{ ack | join(', ') }}.{% endif %}{% if pd.get('ack_unmatched') %}\nAcknowledgements matching no current flag (remove them from PARTIAL_LOSS_ACK): {{ pd.ack_unmatched.keys() | join(', ') }}.{% endif %}{% set gone = namespace(t=[]) %}{% for c, d in det.items() %}{% if d is mapping and d.get('cleared') and c not in pl %}{% set gone.t = gone.t + [c ~ ' (' ~ d.cleared.reason ~ ')'] %}{% endif %}{% endfor %}{% if gone.t %}\nCleared in the last 24 h: {{ gone.t | join(', ') }} - \"recovered\" means a partner sees it again at >= half its reference rate, on enough clusters that the loss could not explain it, for 6 h; \"stale\" means it went completely silent (see the motion-dead card).{% endif %}{% if pd.get('gap_error') %}\nRecorder-gap list unavailable ({{ pd.gap_error }}): holes count as observed time, which understates a camera's own rate.{% endif %}\n\nScope: {{ pd.get('scope') }}.\n\nHow to read it: two cameras co-fire when both report motion within 5 minutes of each other. The partner is demonstrably active, so this is not a quiet scene. A camera that has lost part of its detection - motion zones, sensitivity, Smart Alerts, Modes, a schedule, a night setting - shows exactly this signature while still firing on what it does see. Check its motion settings in the Ring app, then walk through its view. This card is rewritten when the flagged set changes, at startup and every 6 h, so recovery progress shown here can be up to 6 h old. The test declines to convict when another partner's co-fires contradict the loss, when the partner fires at more than 2x its usual rate, when the partner has just come back from its own outage, or when the camera's own event rate has not fallen. The flag does NOT clear with time: if the change is deliberate, acknowledge it in cam_motion.py with PARTIAL_LOSS_ACK = {\"<camera>\": <ack stamp>} (the ack stamp printed above). {{ now().strftime('%b %-d %-I:%M %p') }}."
+      }
+    },
+    {
+      "choose": [
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{% set det = (state_attr('sensor.camera_motion_stale','partial_detail') or {}).get('cams') or {} %}{% set lt = as_timestamp(this.attributes.last_triggered, 0) if this else 0 %}{% set ns = namespace(fresh=false) %}{% for c in (state_attr('sensor.camera_motion_stale','partial_loss') or []) %}{% set s = ((det.get(c) or {}).get('since') or 0) | int(0) %}{% if s >= as_timestamp(now()) - 3600 and s > lt %}{% set ns.fresh = true %}{% endif %}{% endfor %}{{ trigger.id in ['setchange', 'boot'] and ns.fresh }}"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "notify.<your_mobile_app_target>",
+              "data": {
+                "title": "Partial motion loss: {{ (state_attr('sensor.camera_motion_stale','partial_loss') or []) | join(', ') }}",
+                "message": "{% set det = (state_attr('sensor.camera_motion_stale','partial_detail') or {}).get('cams') or {} %}{% for c in (state_attr('sensor.camera_motion_stale','partial_loss') or []) %}{% set d = det.get(c) or {} %}{% set e = d.get('entry') or {} %}{{ c }} still fires but has dropped out of {{ d.get('partner', '?') }}'s motion: {% if d.get('recent') %}{{ d.recent }} co-fires in 48 h vs {{ d.get('baseline', '?') }} before (P={{ d.get('p') }}){% else %}not re-tested this poll; at entry {{ (e.get('recent') or ['?', '?']) | join('/') }} vs {{ (e.get('base') or ['?', '?']) | join('/') }} (P={{ e.get('p') }}){% endif %}. {% endfor %}Check its motion settings in the Ring app, then walk-test its view."
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "mode": "single"
+}

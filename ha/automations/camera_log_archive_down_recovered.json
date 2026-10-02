@@ -1,0 +1,21 @@
+{
+  "id": "camera_log_archive_down_recovered",
+  "alias": "Cameras - engine log archive archiving again",
+  "description": "Dismisses the not-archiving card on the first run that archived (ok, catchup, gap, resync or withheld all mean the run fetched and wrote). deferred is not evidence - it fetched nothing - so it does not clear the card.",
+  "triggers": [
+    {
+      "platform": "template",
+      "value_template": "{{ states('sensor.camera_engine_log_archive') in ['ok', 'catchup', 'gap', 'resync', 'withheld'] }}"
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "action": "persistent_notification.dismiss",
+      "data": {
+        "notification_id": "camera_log_archive_down"
+      }
+    }
+  ],
+  "mode": "single"
+}

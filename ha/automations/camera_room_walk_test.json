@@ -1,0 +1,86 @@
+{
+  "id": "camera_room_walk_test",
+  "alias": "Cameras - room walk test",
+  "description": "A deliberate walk test for the room camera, which no other signal can verify: no camera shares its view and its light-switch box is outside it, so a press alone proves nothing. Double-tap either paddle of the room switch, then walk into the room. The camera must report motion within 5 minutes; the result is pushed either way. Only a fresh KeyPressed2x counts: a restored state after a restart (from unavailable/unknown) or an event older than 2 minutes is ignored. Motion already being reported within 30 s before the tap counts as a pass. A restart during the 5 minutes aborts the test without a result - repeat it. Added 2026-10-02.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": [
+        "event.<witness_switch_scene_1>",
+        "event.<witness_switch_scene_2>"
+      ],
+      "id": "double_tap"
+    }
+  ],
+  "conditions": [
+    {
+      "condition": "template",
+      "value_template": "{{ trigger.to_state is not none and trigger.from_state is not none and trigger.from_state.state not in ['unavailable', 'unknown'] and trigger.to_state.attributes.get('event_type') == 'KeyPressed2x' and (as_timestamp(now()) - as_timestamp(trigger.to_state.state, 0)) | abs < 120 }}"
+    }
+  ],
+  "actions": [
+    {
+      "action": "persistent_notification.create",
+      "data": {
+        "notification_id": "camera_room_walk_test",
+        "title": "🚶 Room walk test running",
+        "message": "Double-tap received {{ now().strftime('%-I:%M:%S %p') }}. Walk into the room now; the camera has 5 minutes to report motion."
+      }
+    },
+    {
+      "wait_template": "{{ is_state('binary_sensor.<cam_7>_motion','on') and states.binary_sensor.<cam_7>_motion.last_changed >= trigger.to_state.last_changed - timedelta(seconds=30) }}",
+      "timeout": {
+        "minutes": 5
+      },
+      "continue_on_timeout": true
+    },
+    {
+      "choose": [
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{{ wait.completed }}"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "persistent_notification.create",
+              "data": {
+                "notification_id": "camera_room_walk_test",
+                "title": "✅ Room walk test passed",
+                "message": "{% set dly = (as_timestamp(states.binary_sensor.<cam_7>_motion.last_changed) - as_timestamp(trigger.to_state.last_changed)) | round(0) | int %}<cam_7> {% if dly > 0 %}reported motion {{ dly }} s after the double-tap{% else %}was already reporting motion at the double-tap{% endif %} ({{ now().strftime('%b %-d %-I:%M %p') }}). The camera and its event path work."
+              }
+            },
+            {
+              "action": "notify.<your_mobile_app_target>",
+              "data": {
+                "title": "✅ Room walk test passed",
+                "message": "{% set dly = (as_timestamp(states.binary_sensor.<cam_7>_motion.last_changed) - as_timestamp(trigger.to_state.last_changed)) | round(0) | int %}<cam_7> {% if dly > 0 %}reported motion {{ dly }} s after the double-tap{% else %}was already reporting motion at the double-tap{% endif %}."
+              }
+            }
+          ]
+        }
+      ],
+      "default": [
+        {
+          "action": "persistent_notification.create",
+          "data": {
+            "notification_id": "camera_room_walk_test",
+            "title": "❌ Room walk test FAILED",
+            "message": "<cam_7> reported NO motion within 5 minutes of the double-tap at {{ as_local(trigger.to_state.last_changed).strftime('%-I:%M %p') }}. If you walked into the room, this is direct evidence the camera or its event path is broken: check the camera is online in the Ring app, that motion detection is on, that its zones cover the room, and that no schedule, snooze or Mode is suppressing it."
+          }
+        },
+        {
+          "action": "notify.<your_mobile_app_target>",
+          "data": {
+            "title": "❌ Room walk test FAILED",
+            "message": "<cam_7> reported no motion within 5 minutes of the double-tap. If you walked in, the camera or its event path is broken."
+          }
+        }
+      ]
+    }
+  ],
+  "mode": "single",
+  "max_exceeded": "silent"
+}

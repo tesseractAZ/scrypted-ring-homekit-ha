@@ -27,12 +27,14 @@ meaningful on interior/controlled views; the motion monitor applies it as an
 annotation, not a pager, until per-camera baselines are tuned.
 
 Emits ONE JSON object on stdout, always, exit 0 (command_line contract).
-State: /config/.cam_vision_state.json (per-cam baseline frame + change log).
+State: /config/.cam_vision_state.json (per-cam baseline frames, noise EMAs and
+their last-comparison stamps, recent body hashes, change log).
 """
 import base64
 import hashlib
 import io
 import json
+import math
 import os
 import sys
 import time
@@ -90,6 +92,64 @@ BASELINE_MAX_AGE_S = 900.0     # PER-MODE BASELINE FRAMES. Previously one baseli
                                # against the last frame in the SAME mode. A
                                # baseline older than this is discarded rather than
                                # compared, since the scene has moved on.
+# NOISE RELAXATION ACROSS ABSENCE. The noise EMA learns only from non-event
+# samples, which assumes most samples of a regime are of an EMPTY scene. That
+# holds for a regime seen around the clock and fails for one seen only when
+# someone is there: a garage whose lights are on only during a visit is in
+# "day" exposure almost exclusively while occupied. Its non-event samples are
+# then a person who lit fewer than MIN_BLOCKS blocks, each one grows the EMA (up
+# to the 15% cap), and the bar climbs past what a person produces - after which
+# EVERY occupied frame is a non-event and the climb feeds itself. Measured on
+# <cam_8>/day: the bar sat at the 12.0 floor through 2026-09-26 03:19Z, then
+# climbed visit by visit while visits still drew visual changes (15.6 on 09-26
+# 22:49Z, 21.7 on 09-27, 25.6 on 09-29 13:59Z). 09-29 23:25Z was the first visit
+# with NO visual change (a 24.1 peak against 23.2, one block), and 4 visits
+# later, 10-01 03:29Z, the bar sat at the 60 cap. Its 9 motion clusters from
+# 09-29 23:00Z drew 1 visual change. The same climb reached 36.0 on 09-20 and
+# came back only because the light was once left on with nobody in view for
+# ~30 min (09-21 01:01-01:28Z). The rule had no way back: only a QUIET frame in
+# that regime lowers the EMA, and such a regime almost never shows one. A
+# cached-snapshot outage pinned <cam_6>/dark at 60 the same way (two cached
+# JPEGs alternating - see CACHED SNAPSHOTS), and it then stayed at 60 with no
+# data at all.
+# A noise estimate is only as current as the frames it came from. After more
+# than NOISE_RELAX_GRACE_S without a comparison in a regime (the same horizon as
+# its baseline frame, so a regime compared every poll never relaxes and, below
+# NOISE_MAX, its output is byte-identical to the rule without relaxation), the
+# EMA relaxes toward NOISE_PRIOR - the level at which THRESH_FLOOR binds - with
+# time constant NOISE_RELAX_TAU_S, and only downward. From the cap, the first
+# comparison after an absence of 0.5 / 1 / 2 / 4 / 8.5 h sees a bar of
+# 54.4 / 45.0 / 32.0 / 19.4 / 12.8 (<cam_8>/day visits are a median 8.5 h
+# apart). The relaxed value is persisted BEFORE the event decision (below).
+# Replayed over 2026-08-28..10-02 (35 days, 9 cameras, every regime, with
+# NOISE_MAX and the body-hash ring): <cam_8>/day stays within 12.0-13.8
+# through the episode above, its 9 clusters go from 1 visual change to ~8
+# expected, and the camera's replayed recall from 0.67 to 0.94. Everywhere else
+# the change adds ~22 expected visual changes in 35 days (+1.2% of the fleet's
+# ~1,890): ~8 with motion on the SAME camera within 6 min, and ~14 with none
+# (~0.4/day) - about two thirds of those in the first 30 min after a regime
+# re-entry and half within an hour of sunrise, i.e. day and IR slots that now
+# start each morning near the floor instead of at the value frozen at dusk.
+# (Counting only events with no motion on ANY camera within 15 min calls ~5 of
+# them unexplained; the fleet nearly always has motion somewhere, so that
+# filter undercounts - the own-camera figure is the one to quote.)
+# Residuals, by construction: a regime compared every poll can still ratchet
+# WITHIN one long occupied stretch (about a dozen consecutive one-block
+# non-events take the floor to the cap), a revisit 0.5-2 h after a ratcheted
+# visit starts at 54-32, and nothing here notices a view that goes deaf just as
+# its motion stops.
+NOISE_PRIOR = THRESH_FLOOR / NOISE_K   # 2.4
+NOISE_RELAX_GRACE_S = BASELINE_MAX_AGE_S
+NOISE_RELAX_TAU_S = 7200.0
+# Above THRESH_CAP/NOISE_K the threshold is pinned at the cap, so a larger EMA
+# changes nothing except how long the way back takes: the ratcheted slots above
+# were stored at 16.89 and 18.26, not 12. Clamping costs +0.5 expected changes
+# in the same 35-day replay. EVERY stored mode is clamped when the state loads,
+# not only the mode being compared: a slot not seen since it ratcheted
+# (<cam_6>/dark, last compared 09-28) would otherwise keep its over-cap
+# value in the state file until its regime happens to return.
+NOISE_MAX = THRESH_CAP / NOISE_K       # 12.0
+NOISE_DEFAULT = 4.0            # a regime's EMA before its first non-event sample
 MIN_BLOCKS = 2                 # localized change needs at least this many hot blocks
 MAX_FRACTION = 0.7             # more than this fraction hot = global change, ignore
 # EXPOSURE-REGIME classification. Neither saturation nor luma alone is right:
@@ -139,6 +199,20 @@ PROBE_BLIND_MIN = 15.0   # a camera not successfully probed in this long is
 # monitor already pages it as a stale snapshot). cam_motion.py reads fresh_ts
 # and withholds its visual verdict for a camera with no new frame in
 # PROBE_BLIND_MIN.
+# The cache can hold MORE THAN ONE image. In <cam_6>'s 2026-09-26..09-28
+# outage it served two JPEGs that ALTERNATED: all 36 comparisons in 49 h read
+# d=18.7, luma 35.4 / 36.4 by turns. Checked against the PREVIOUS body alone,
+# each switch passes as a new frame: fresh_ts moves (so the downstream CACHED
+# guard lapses for 15 min after every switch) and the pair is compared as if it
+# were scene change. Under the old noise rule those comparisons silently grew
+# the regime's EMA to the cap; with noise relaxation they would have become ~7
+# visual changes that never happened. A body is therefore cached when it
+# matches ANY of the last BODY_RING_N DISTINCT bodies this camera sent. Order is
+# most-recently-seen last, and a cached hit moves its hash to the end, so an
+# image the cache keeps serving is never aged out by real frames in between. A
+# real sensor never repeats a JPEG and a cached outage serves the same few
+# images, so the ring does not churn; it costs ~0.4 KB of state per camera.
+BODY_RING_N = 8
 
 
 def emit(payload):
@@ -193,6 +267,99 @@ def block_diffs(a, b):
     return out
 
 
+def relaxed_noise(ema, last_ts, now):
+    """The noise EMA as of `now` for a regime last compared at `last_ts`.
+
+    Unchanged within NOISE_RELAX_GRACE_S of the last comparison, and never raised:
+    an EMA already at or below NOISE_PRIOR is returned as is. A missing stamp
+    means "unknown age" and also returns the EMA unchanged (main() seeds stamps
+    for state written before they existed)."""
+    if last_ts is None or ema <= NOISE_PRIOR:
+        return ema
+    gap = now - float(last_ts) - NOISE_RELAX_GRACE_S
+    if gap <= 0:
+        return ema
+    return NOISE_PRIOR + (ema - NOISE_PRIOR) * math.exp(-gap / NOISE_RELAX_TAU_S)
+
+
+def _finite(v):
+    """float(v) if it is a finite number, else None (bad JSON is data, not a crash)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def load_noise(raw):
+    """Stored per-regime EMAs, EVERY one clamped to NOISE_MAX. Returns
+    (noise, dropped). A value that is not a finite, non-negative number is
+    dropped and named: before, it reached float() at the regime's next
+    comparison and failed the whole sensor, every poll, for every camera."""
+    if raw is None:
+        return {}, []
+    if not isinstance(raw, dict):
+        return {}, ["noise"]
+    noise, dropped = {}, []
+    for m, v in raw.items():
+        f = _finite(v)
+        if f is None or f < 0:
+            dropped.append("noise[%s]" % m)
+            continue
+        noise[m] = min(f, NOISE_MAX)
+    return noise, dropped
+
+
+def load_noise_ts(raw, noise, frames, now):
+    """{mode: time of the last comparison in that regime}, and the names of any
+    malformed entries dropped. State written before the stamp existed is seeded
+    from the regime's baseline-frame stamp, else as absent for the frame-pruning
+    horizon (a regime with no surviving frame has not been compared for at
+    least that long). Non-finite stamps are dropped: an infinite one would
+    otherwise make its regime's gap -inf, i.e. never relax."""
+    noise_ts, dropped = {}, []
+    if raw is not None and not isinstance(raw, dict):
+        dropped.append("noise_ts")
+        raw = None
+    for m, v in (raw or {}).items():
+        f = _finite(v)
+        if f is None:
+            dropped.append("noise_ts[%s]" % m)
+            continue
+        noise_ts[m] = f
+    frames = frames if isinstance(frames, dict) else {}
+    for m in noise:
+        if m not in noise_ts:
+            try:
+                f = _finite(frames[m][1])
+            except Exception:  # noqa: BLE001 - no usable frame stamp
+                f = None
+            noise_ts[m] = f if f is not None else now - BASELINE_MAX_AGE_S * 4
+    return noise_ts, dropped
+
+
+def load_ring(prev):
+    """The last BODY_RING_N distinct body hashes, most recently seen last, and
+    the names of any malformed entries dropped. State written by the
+    single-previous-hash schema has only `body_hash`, which seeds the ring."""
+    raw = prev.get("body_hashes")
+    ring, dropped = [], []
+    if isinstance(raw, list):
+        for h in raw:
+            if isinstance(h, str) and h:
+                if h in ring:
+                    ring.remove(h)
+                ring.append(h)
+            else:
+                dropped.append("body_hashes[]")
+    elif raw is not None:
+        dropped.append("body_hashes")
+    last = prev.get("body_hash")
+    if isinstance(last, str) and last and last not in ring:
+        ring.append(last)
+    return ring[-BODY_RING_N:], dropped
+
+
 def main():
     if not PIL_OK:
         fail("PIL unavailable in this python environment")
@@ -207,13 +374,38 @@ def main():
 
     hours, changes, irs, maxdiff = {}, {}, {}, {}
     day_events = ir_events = dark_events = 0
+    # The noise relaxation, the EMA clamp and the body-hash ring are refinements
+    # of a working monitor, so none of them may take the sensor down: each runs
+    # under its own try, falls back to the rule it replaced, and says so in the
+    # summary. Malformed state values they drop are named there too (once - the
+    # repaired state is written back).
+    repaired, faults = [], []
     for name, body in results:
         prev = st.get(name, {})
         log = [t for t in prev.get("log", []) if now - t < KEEP_HOURS * 3600]
         events = [e for e in prev.get("events", []) if now - e[0] < KEEP_HOURS * 3600]
-        noise = dict(prev.get("noise", {}))
+        try:
+            noise, dropped = load_noise(prev.get("noise"))
+            noise_ts, dropped_ts = load_noise_ts(prev.get("noise_ts"), noise, prev.get("frames"), now)
+            dropped += dropped_ts
+        except Exception as exc:  # noqa: BLE001 - see above
+            try:
+                noise = dict(prev.get("noise") or {})   # as loaded before the clamp
+            except Exception:  # noqa: BLE001
+                noise = {}
+            noise_ts, dropped = {}, []                  # no stamps = no relaxation
+            faults.append("%s state load %s" % (name, type(exc).__name__))
+        try:
+            ring, dropped_ring = load_ring(prev)
+            dropped += dropped_ring
+        except Exception as exc:  # noqa: BLE001 - back to the single-previous-hash check
+            ring = [prev["body_hash"]] if isinstance(prev.get("body_hash"), str) else []
+            faults.append("%s hash ring %s" % (name, type(exc).__name__))
+        if dropped:
+            repaired.append("%s %s" % (name, "/".join(dropped)))
         settle = int(prev.get("settle", 0))
-        entry = {"log": log, "events": events, "noise": noise}
+        entry = {"log": log, "events": events, "noise": noise, "noise_ts": noise_ts,
+                 "body_hashes": ring}
         # Carry the previous successful-probe stamp forward by default; it is
         # refreshed ONLY on a sample this camera was actually seen in. The state
         # file's mtime says the MONITOR ran, not that this camera was reachable,
@@ -225,12 +417,15 @@ def main():
             if prev.get(k) is not None:
                 entry[k] = prev[k]
         body_hash = hashlib.sha1(body).hexdigest() if body else None
-        if body and body_hash == prev.get("body_hash"):
-            # Byte-identical to the previous sample: the webhook's cached image.
-            # Reachable, so probe_ts moves; nothing else does (see CACHED SNAPSHOTS).
+        if body and body_hash in ring:
+            # Byte-identical to one of the last BODY_RING_N distinct samples: the
+            # webhook's cached image. Reachable, so probe_ts moves; nothing else
+            # does (see CACHED SNAPSHOTS) - only the hash moves to most-recent.
             entry.update({k: prev[k] for k in ("frame", "frames", "ir", "settle") if k in prev})
             entry["probe_ts"] = now
             entry["cached_n"] = int(prev.get("cached_n", 0)) + 1
+            ring.remove(body_hash)
+            ring.append(body_hash)
             body = None
             cached_sample = True
         else:
@@ -276,7 +471,17 @@ def main():
                         med = sorted(bd)[len(bd) // 2]
                         norm = [d - med for d in bd]
                         peak = max(norm)
-                        ema = float(noise.get(mode, 4.0))
+                        ema = min(float(noise.get(mode, NOISE_DEFAULT)), NOISE_MAX)
+                        try:
+                            ema = relaxed_noise(ema, noise_ts.get(mode), now)
+                            # Persist the relaxed value BEFORE the event decision:
+                            # the stamp moves to now on every comparison, so an
+                            # event sample that left the stored EMA un-relaxed
+                            # would restore the old bar on the very next poll.
+                            noise[mode] = round(ema, 2)
+                        except Exception as exc:  # noqa: BLE001 - un-relaxed bar
+                            faults.append("%s relax %s" % (name, type(exc).__name__))
+                        noise_ts[mode] = now
                         thr = min(THRESH_CAP, max(THRESH_FLOOR, NOISE_K * ema))
                         hot = sum(1 for d in norm if d > thr)
                         maxdiff[name] = {"d": round(peak, 1), "thr": round(thr, 1), "m": mode,
@@ -292,7 +497,7 @@ def main():
                             # the detector training itself to ignore exactly the
                             # excursions it exists to catch. Decay stays uncapped.
                             ema_new = 0.9 * ema + 0.1 * max(peak, 0.0)
-                            noise[mode] = round(min(ema_new, max(ema * 1.15, 0.5)), 2)
+                            noise[mode] = round(min(ema_new, max(ema * 1.15, 0.5), NOISE_MAX), 2)
                 frames[mode] = [base64.b64encode(luma).decode(), now]
                 # drop any mode baseline that has aged out, so state cannot grow
                 frames = {m: v for m, v in frames.items()
@@ -301,11 +506,14 @@ def main():
                 entry["frame"] = frames[mode][0]   # back-compat for readers
                 entry["probe_ts"] = now            # this camera WAS seen
                 entry["fresh_ts"] = now            # ...and sent a NEW frame
-                entry["body_hash"] = body_hash
+                entry["body_hash"] = body_hash     # newest fresh body (back-compat)
+                ring.append(body_hash)             # not in the ring: it was not cached
+                del ring[:-BODY_RING_N]
                 entry["cached_n"] = 0
                 entry["ir"] = is_ir
                 entry["settle"] = settle
                 entry["noise"] = noise
+                entry["noise_ts"] = noise_ts
             else:
                 entry.update({k: prev[k] for k in ("frame", "frames", "ir", "settle") if k in prev})
         elif not cached_sample:
@@ -328,10 +536,16 @@ def main():
         changes[name] = len([t for t in log if now - t < 24 * 3600])
         irs[name] = entry.get("ir")
 
+    tmp = "%s.tmp.%d" % (STATE, os.getpid())
     try:
-        json.dump(st, open(STATE, "w"))
-    except Exception:
-        pass
+        with open(tmp, "w") as fh:
+            json.dump(st, fh)
+        os.replace(tmp, STATE)
+    except Exception:  # noqa: BLE001 - losing state must not fail the sensor
+        try:
+            os.remove(tmp)
+        except Exception:  # noqa: BLE001
+            pass
 
     cached = sorted(
         n for n in [c[0] for c in CAMS]
@@ -360,6 +574,11 @@ def main():
     if cached:
         summary += "; SNAPSHOTS CACHED (no new frame >%.0fm): %s" % (
             PROBE_BLIND_MIN, ",".join(cached))
+    for label, items in (("state repaired, malformed values dropped", repaired),
+                         ("FAULT, fell back to the previous rule", faults)):
+        if items:
+            summary += "; %s: %s%s" % (label, ", ".join(items[:6]),
+                                       " (+%d more)" % (len(items) - 6) if len(items) > 6 else "")
     emit({
         "hours_since_visual": hours, "changes_24h": changes, "ir_mode": irs,
         "max_norm_diff": maxdiff, "active_count": active,

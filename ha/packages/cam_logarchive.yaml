@@ -1,0 +1,178 @@
+# Scrypted engine-log ARCHIVE (redacted, one gzip per UTC day, 35 days).
+#
+# The engine log is the only record of door trips, per-camera recording errors
+# and session teardown, and the journal keeps only ~37-38 h of it (measured
+# 2026-10-02: 591,537 lines over 38.1 h), shrinking in whole-file steps. A
+# review run more than ~37 h after the previous one silently lost the gap. This
+# sensor copies every new engine line to /config/cam_engine.log.d/ hourly,
+# REDACTED BEFORE IT IS WRITTEN (Ring session JWTs, IPv4/IPv6 incl. ::ffff:, ICE
+# credentials, DTLS fingerprints, Ring device ids, RTSP session ids, 16+ hex,
+# 7+ digit numbers, ...), with each takePicture request dump collapsed to its
+# url line. /config/*.log.* is excluded from Home Assistant backups by the
+# Supervisor ('*.log.*'), so the archive (35 days, ~50 MB at the measured
+# ~1.4 MiB/day; ~74 MB without the dump collapse) never enters a backup; a core RESTORE
+# empties /config and deletes it. See cam_logarchive.py for every rule and its
+# measurement.
+#
+# Resume is the systemd journal CURSOR stored in the archive itself, verified
+# against the journal on every run. State = status:
+#   ok        - archived everything new.
+#   catchup   - stopped at the 60 s work budget; the next run continues.
+#   deferred  - Home Assistant started < 5 min ago; nothing fetched this poll.
+#   busy      - a previous run still holds the lock.
+#   gap       - the journal no longer held lines between the last archived line
+#               and its oldest line; recorded in-band ('#~camlog~ GAP') and as a
+#               persisted event (gap_count_35d, last_gap).
+#   resync    - the cursor could not be verified (lost journal tail, new
+#               journal, interrupted write, foreign lines); the whole fetched
+#               window was archived again after a '#~camlog~ RESYNC' line:
+#               duplicates, never loss. Persisted (resync_count_35d).
+#   withheld  - a line still looked like an identifier after redaction and was
+#               written as '<WITHHELD residual=...>'. Persisted (withheld_35d).
+#   clock     - the wall clock is > 2 days past the newest archived line;
+#               retention deleted nothing.
+#   error     - the run failed; nothing was written.
+#   unknown   - HA's command_timeout passed: HA 2026.9.4 logs 'Timeout for
+#               command', publishes unknown with attributes {} and does NOT kill
+#               the process, which finishes on its own (the lock makes an
+#               overlapping run report busy). Counted as a failed run.
+#
+# Deploy without a restart: command_line.reload, then template.reload,
+# input_button.reload and automation.reload. Check every camera binary_sensor is
+# off just before template.reload: it re-adds them, and an 'on' one re-fires its
+# onset automation. The first update of a reloaded command_line entity runs
+# inside the reload call; the script's 60 s work budget bounds it (the first
+# run backfills ~37 h of journal in 2-3 runs). Then confirm the state reads ok
+# or catchup.
+command_line:
+  - sensor:
+      name: Camera engine log archive
+      unique_id: camera_engine_log_archive
+      command: "python3 /config/scripts/cam_logarchive.py"
+      scan_interval: 3600
+      # A run is bounded by its own 60 s work budget plus a handful of requests
+      # (cursor fetch, one cursor lookup, journal head; 60 s socket timeout
+      # each). Measured in the core container 2026-10-02: an hourly increment
+      # (15,000 entries) takes ~2-4 s. 600 s leaves ~3x headroom over a capped
+      # run that also waits out two slow sockets (60 + 2 x 60 s).
+      command_timeout: 600
+      value_template: "{{ value_json.status }}"
+      json_attributes:
+        - status
+        - archived_through
+        - lag_min
+        - lines_run
+        - entries_run
+        - withheld_run
+        - collapsed_run
+        - bytes_run
+        - redaction_run
+        - residual_run
+        - fetch_lines
+        - fetch_passes
+        - run_s
+        - resume
+        - anchor
+        - capped
+        - ts_backsteps
+        - max_silence_s
+        - silences_gt300
+        - long_silences
+        - journal_oldest
+        - journal_reach_h
+        - gap_count_35d
+        - gap_min_35d
+        - last_gap
+        - withheld_35d
+        - resync_count_35d
+        - events_35d
+        - last_event
+        - last_event_at
+        - today
+        - files
+        - total_mb
+        - oldest_day
+        - retention_days
+        - deleted_days
+        - ha_age_s
+        - rss_mb
+        - warnings
+        - dry_run
+        - note
+        - error
+        - summary
+        - updated_at
+
+# Pressing this acknowledges every gap / resync / withheld event recorded so far;
+# a later event raises the events sensor again. Events also clear on their own
+# 35 days after they happened.
+input_button:
+  camera_log_archive_acknowledge:
+    name: Acknowledge camera log archive events
+    icon: mdi:check-circle-outline
+
+template:
+  - binary_sensor:
+      # CURRENT-RUN health. 'unknown' is a failed run (a timeout: HA keeps no
+      # attributes and does not kill the process), so it is ON here rather than
+      # making this sensor unavailable; only a missing/unloaded entity
+      # ('unavailable') is not judged. 'busy' and 'deferred' are not problems by
+      # themselves - two consecutive FAILED runs (error, unknown, busy, clock)
+      # page through binary_sensor.camera_log_archive_down; deferred never does.
+      - name: Camera log archive problem
+        unique_id: camera_log_archive_problem
+        device_class: problem
+        state: >-
+          {{ states('sensor.camera_engine_log_archive') in
+             ['error', 'withheld', 'gap', 'resync', 'clock', 'unknown'] }}
+        availability: >-
+          {{ states('sensor.camera_engine_log_archive') != 'unavailable' }}
+        attributes:
+          status: "{{ states('sensor.camera_engine_log_archive') }}"
+          summary: "{{ state_attr('sensor.camera_engine_log_archive', 'summary') }}"
+          warnings: "{{ state_attr('sensor.camera_engine_log_archive', 'warnings') }}"
+          long_silences: "{{ state_attr('sensor.camera_engine_log_archive', 'long_silences') }}"
+          max_silence_s: "{{ state_attr('sensor.camera_engine_log_archive', 'max_silence_s') }}"
+          journal_reach_h: "{{ state_attr('sensor.camera_engine_log_archive', 'journal_reach_h') }}"
+          lag_min: "{{ state_attr('sensor.camera_engine_log_archive', 'lag_min') }}"
+      # NOT ARCHIVING: a failed run (error, unknown = timeout, busy, clock = no
+      # engine line for 48 h+) held 75 min, i.e. confirmed by the next run. The
+      # hold lives here, not in a template trigger: this binary restores its state
+      # across a restart and starts its delay from its first render, so a failure
+      # already present when camera_log_archive_down attaches still pages, and
+      # error -> unknown does not restart the delay.
+      - name: Camera log archive down
+        unique_id: camera_log_archive_down
+        device_class: problem
+        delay_on:
+          minutes: 75
+        # A 'deferred' run (HA started < 5 min ago) fetched nothing, and
+        # 'unavailable' (a reload) is no reading at all: neither is evidence, so
+        # both HOLD the current verdict - otherwise every restart or reload during
+        # a failure streak would make a new off->on edge and a second push.
+        state: >-
+          {% set s = states('sensor.camera_engine_log_archive') %}
+          {{ s in ['error', 'unknown', 'busy', 'clock'] or (s in ['deferred', 'unavailable'] and this.state == 'on') }}
+      # PERSISTED events: a gap (lines lost), a resync (lines may repeat) or a
+      # withheld line stays ON until acknowledged or 35 days old - an overnight
+      # event must not vanish with the one run that saw it. When a timeout wipes
+      # the attributes the previous verdict is kept (this.state), never flipped.
+      - name: Camera log archive events
+        unique_id: camera_log_archive_events
+        device_class: problem
+        state: >-
+          {% set n = state_attr('sensor.camera_engine_log_archive', 'events_35d') %}
+          {% set at = state_attr('sensor.camera_engine_log_archive', 'last_event_at') %}
+          {% if n is number %}
+            {{ n > 0 and at is number
+               and at > as_timestamp(states('input_button.camera_log_archive_acknowledge'), 0) }}
+          {% else %}
+            {{ this.state == 'on' }}
+          {% endif %}
+        attributes:
+          last_event: "{{ state_attr('sensor.camera_engine_log_archive', 'last_event') }}"
+          gap_count_35d: "{{ state_attr('sensor.camera_engine_log_archive', 'gap_count_35d') }}"
+          gap_min_35d: "{{ state_attr('sensor.camera_engine_log_archive', 'gap_min_35d') }}"
+          last_gap: "{{ state_attr('sensor.camera_engine_log_archive', 'last_gap') }}"
+          withheld_35d: "{{ state_attr('sensor.camera_engine_log_archive', 'withheld_35d') }}"
+          resync_count_35d: "{{ state_attr('sensor.camera_engine_log_archive', 'resync_count_35d') }}"

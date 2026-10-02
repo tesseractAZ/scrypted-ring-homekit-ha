@@ -64,7 +64,9 @@ template:
 # is why a naive age bar would false-fire and why each script now publishes a
 # bucketed `updated_at` instead: with the heartbeat, last_updated advances at
 # least once per bucket whenever the loop is actually running.
-# Bars are per sensor because the poll intervals differ by 15x (120s .. 1800s).
+# Bars are per sensor because the poll intervals differ by 30x (120s .. 3600s).
+# The engine-log archive polls hourly and every run publishes an hourly-bucketed
+# updated_at, so last_updated advances once per run; 3 h = two missed runs plus slack.
   - binary_sensor:
       - name: Camera monitor stalled
         unique_id: camera_monitor_stalled
@@ -75,7 +77,8 @@ template:
           {% for e, bar in [('sensor.camera_health', 2700),
                             ('sensor.camera_visual_activity', 2700),
                             ('sensor.camera_flap_rate', 2700),
-                            ('sensor.camera_motion_stale', 5400)] %}
+                            ('sensor.camera_motion_stale', 5400),
+                            ('sensor.camera_engine_log_archive', 10800)] %}
             {% set st = states[e] %}
             {% if st is not none and (now_ts - as_timestamp(st.last_updated)) > bar %}
               {% set age.v = dict(age.v, **{e: ((now_ts - as_timestamp(st.last_updated)) / 60) | round(0)}) %}
@@ -89,7 +92,8 @@ template:
             {% for e, bar in [('sensor.camera_health', 2700),
                               ('sensor.camera_visual_activity', 2700),
                               ('sensor.camera_flap_rate', 2700),
-                              ('sensor.camera_motion_stale', 5400)] %}
+                              ('sensor.camera_motion_stale', 5400),
+                              ('sensor.camera_engine_log_archive', 10800)] %}
               {% set st = states[e] %}
               {% if st is not none and (now_ts - as_timestamp(st.last_updated)) > bar %}
                 {% set ns.v = ns.v + ['%s %dm' % (e.split('.')[1], ((now_ts - as_timestamp(st.last_updated)) / 60) | round(0))] %}
@@ -100,7 +104,8 @@ template:
             {% set now_ts = as_timestamp(now()) %}
             {% set ns = namespace(v=[]) %}
             {% for e in ['sensor.camera_health', 'sensor.camera_visual_activity',
-                         'sensor.camera_flap_rate', 'sensor.camera_motion_stale'] %}
+                         'sensor.camera_flap_rate', 'sensor.camera_motion_stale',
+                         'sensor.camera_engine_log_archive'] %}
               {% set st = states[e] %}
               {% set ns.v = ns.v + ['%s=%d' % (e.split('.')[1], ((now_ts - as_timestamp(st.last_updated)) / 60) | round(0) if st is not none else -1)] %}
             {% endfor %}

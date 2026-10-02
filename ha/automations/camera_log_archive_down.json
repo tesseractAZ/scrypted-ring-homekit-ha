@@ -1,0 +1,65 @@
+{
+  "id": "camera_log_archive_down",
+  "alias": "Cameras - engine log archive not archiving",
+  "description": "Two consecutive failed runs of the hourly engine-log archive (sensor.camera_engine_log_archive): error (nothing written), unknown (HA's command_timeout passed - HA 2026.9.4 publishes unknown with attributes {} and does NOT kill the process), busy (the previous run still holds the lock) or clock (no new engine line for 48 h+: the engine is stopped or hung, its log no longer reaches the journal, or the clock jumped; retention is suspended). Run k sets its state at most 3600 + 600 s after run k-1, so a failure held 75 min has been confirmed by the next run. The hold lives in binary_sensor.camera_log_archive_down (delay_on 75 min), which restores across a restart and starts from its first render, so a failure already present when this automation attaches still pages, and error -> unknown does not restart it. One push on the off->on edge (the journal holds ~37 h, the deadline for a fix; a card alone can sit unseen past it); boot and the hourly :43 re-assert restore the card only.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.camera_log_archive_down",
+      "to": "on",
+      "not_from": [
+        "unavailable"
+      ],
+      "id": "down"
+    },
+    {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
+    },
+    {
+      "platform": "time_pattern",
+      "minutes": "43",
+      "id": "reassert"
+    }
+  ],
+  "conditions": [
+    {
+      "condition": "state",
+      "entity_id": "binary_sensor.camera_log_archive_down",
+      "state": "on"
+    }
+  ],
+  "actions": [
+    {
+      "action": "persistent_notification.create",
+      "data": {
+        "notification_id": "camera_log_archive_down",
+        "title": "🗄 {% if is_state('sensor.camera_engine_log_archive','clock') %}No Scrypted engine log for 48 h+{% else %}Camera engine-log archive not archiving{% endif %}",
+        "message": "{% if is_state('sensor.camera_engine_log_archive','clock') %}No Scrypted engine log line for {{ ((state_attr('sensor.camera_engine_log_archive','lag_min') or 0) / 60) | round(1) }} h: the engine is stopped or hung, its log no longer reaches the journal, or the clock jumped. Nothing is waiting to be archived and retention is paused; the archive itself is current. The camera monitors' own cards say whether the cameras are affected. {{ now().strftime('%b %-d %-I:%M %p') }}.{% else %}The engine-log archive has failed two runs in a row (state: {{ states('sensor.camera_engine_log_archive') }}).\n{{ state_attr('sensor.camera_engine_log_archive', 'error') or state_attr('sensor.camera_engine_log_archive', 'summary') or 'attributes wiped: the run outlived command_timeout' }}\nArchived through {{ state_attr('sensor.camera_engine_log_archive', 'archived_through') or '?' }}; the journal reaches back {{ state_attr('sensor.camera_engine_log_archive', 'journal_reach_h') or '~37' }} h, which is how long a fix has before lines are lost. Run `python3 /config/scripts/cam_logarchive.py --dry-run` from a shell to see the failure. {{ now().strftime('%b %-d %-I:%M %p') }}.{% endif %}"
+      }
+    },
+    {
+      "choose": [
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{{ trigger.id == 'down' }}"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "notify.<your_mobile_app_target>",
+              "data": {
+                "title": "🗄 {% if is_state('sensor.camera_engine_log_archive','clock') %}No Scrypted engine log for 48 h+{% else %}Camera engine-log archive not archiving{% endif %}",
+                "message": "{% if is_state('sensor.camera_engine_log_archive','clock') %}No Scrypted engine log line for {{ ((state_attr('sensor.camera_engine_log_archive','lag_min') or 0) / 60) | round(1) }} h: the engine is stopped or hung, or its log no longer reaches the journal.{% else %}Two archive runs in a row failed ({{ states('sensor.camera_engine_log_archive') }}). The journal holds ~{{ state_attr('sensor.camera_engine_log_archive', 'journal_reach_h') or 37 }} h of engine log; lines older than that are lost if this is not fixed.{% endif %}"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "mode": "single"
+}

@@ -63,7 +63,7 @@ jobs:
           python - <<'PY'
           import re, yaml, sys
           fail = False
-          for name in ('cam_health', 'cam_motion', 'cam_vision', 'cam_flap'):
+          for name in ('cam_health', 'cam_motion', 'cam_vision', 'cam_flap', 'cam_logarchive'):
               src = open(f'ha/scripts/{name}.py').read()
               keys = set()
               if 'def emit(' in src:

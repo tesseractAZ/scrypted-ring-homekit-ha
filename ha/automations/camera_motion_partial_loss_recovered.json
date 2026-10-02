@@ -1,0 +1,25 @@
+{
+  "id": "camera_motion_partial_loss_recovered",
+  "alias": "Cameras - partial motion loss cleared",
+  "description": "Dismisses the partial-loss card once no camera has been flagged for 30 minutes. No recovery push (same churn-avoidance as the other recovery automations). A flag now clears only on evidence of recovery or by the camera going stale (which the motion-dead alert pages), so there is no \"cleared without a recovery\" card; an acknowledged flag also turns the sensor off.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.camera_motion_partial_loss",
+      "to": "off",
+      "for": {
+        "minutes": 30
+      }
+    }
+  ],
+  "conditions": [],
+  "actions": [
+    {
+      "action": "persistent_notification.dismiss",
+      "data": {
+        "notification_id": "camera_partial_loss"
+      }
+    }
+  ],
+  "mode": "single"
+}

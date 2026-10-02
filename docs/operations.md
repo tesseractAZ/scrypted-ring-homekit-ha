@@ -269,7 +269,7 @@ Consequences:
 
 All timeouts below come from the shipped scripts and packages. Host figures were measured on the reference host on 2026-09-14 (SSH add-on container, Python 3.14.7, SQLite 3.53.4). Neither `cam_flap.py` nor `cam_motion.py` was run on the host, because both write state files; their parts were measured separately. Laptop figures are from an Apple M5 with Python 3.14.5.
 
-**None of the four scripts has a wall-clock ceiling of its own.**
+**None of the four camera monitors has a wall-clock ceiling of its own.** (The engine-log archive, `cam_logarchive.py`, does: a 60 s work budget checked between journal entries, with `command_timeout` 600 s; see its section in `ha/README.md`.)
 - Three of them rely on `urllib` socket timeouts. Python applies those to each blocking socket operation (the connect, each read), not to the whole request. A peer that never answers is cut off at the timeout. A peer that answers slowly but steadily is not.
 - The fourth, `cam_motion.py`'s `QUERY_TIMEOUT_S`, is a SQLite lock wait and does not limit how long a statement runs.
 
@@ -453,17 +453,17 @@ The recorder writes a new `states` row for an entity only when its state **or a 
 
 Three writers matter:
 
-- **The heartbeat adds about 150 rows/day across the four sensors.** Each script sets `HEARTBEAT_BUCKET_S = 600` and publishes `updated_at` as the poll time rounded down to that bucket. A running monitor therefore writes at least one row per 10-minute bucket. The ceiling is 144 extra rows/day per sensor; in practice the extra is the number of buckets in which nothing else changed. Measured on the reference fleet, 2026-09-14:
+- **The heartbeat adds about 150 rows/day across the four camera monitors.** (The engine-log archive, the fifth monitor, polls hourly with an hourly bucket: about 24 rows/day.) Each camera monitor sets `HEARTBEAT_BUCKET_S = 600` and publishes `updated_at` as the poll time rounded down to that bucket. A running monitor therefore writes at least one row per 10-minute bucket. The ceiling is 144 extra rows/day per sensor; in practice the extra is the number of buckets in which nothing else changed. Measured on the reference fleet, 2026-09-14:
   - **`camera_health`: 123 heartbeat-only rows.** Its payload otherwise stays unchanged for long stretches. That is roughly one extra row per bucket, not the "stays ~144" the script headers state.
   - **`camera_flap_rate`: 30.** Its poll interval equals the bucket, so every poll now writes a row: 144/day, up from 101–120/day before the heartbeat.
   - **`camera_visual_activity` and `camera_motion_stale`: none.** Their payloads change on every poll anyway.
 
 - **`ages_min` writes most of the rows (known open issue in the shipped template, `ha/packages/cam_health.yaml`).**
-  - **What it is.** The attribute publishes four whole-minute ages computed from `now()`.
-  - **Why it writes so often.** The rendered string changes whenever one of the four sensors updates: 1,148 of its rows land within 1.5 s of a row from one of them, one per row those sensors write. It changes again at minute boundaries, which accounts for the other ~720 rows.
+  - **What it is.** The attribute publishes five whole-minute ages computed from `now()`.
+  - **Why it writes so often.** The rendered string changes whenever one of the monitored sensors updates: 1,148 of its rows land within 1.5 s of a row from one of them, one per row those sensors write. It changes again at minute boundaries, which accounts for the other ~720 rows.
   - **Where the cost falls.** Attribute rows are deduplicated and the same age strings recur, so 1,869 rows reference only 121 distinct attribute rows (21 KB). The cost is `states` rows and their index entries: 59 % of the stack's rows, about 1.4 % of its attribute bytes (measured on the reference fleet, 2026-09-14).
   - **Current status.** The entity is not excluded from the recorder in the shipped configuration or on the reference fleet. Nothing reads its history: the alert automation uses a live state trigger with a `for:` hold, and the notification reads the current attribute.
-  - **Fix on your box.** Exclude the entity from the recorder. This loses history for this one entity only; automations and notification text are unaffected, and the four sensors' own rows still record their `last_updated`. Recorder configuration takes effect after a restart:
+  - **Fix on your box.** Exclude the entity from the recorder. This loses history for this one entity only; automations and notification text are unaffected, and the monitored sensors' own rows still record their `last_updated`. Recorder configuration takes effect after a restart:
 
   ```yaml
   recorder:
@@ -490,11 +490,13 @@ Three writers matter:
 | `.cam_motion_state.json` | `cam_motion.py` | 14 B (measured on the reference fleet, 2026-09-14) | 48 | negligible |
 | `.cam_vision_state.json` | `cam_vision.py` | 43,965 B (measured on the reference fleet, 2026-09-14) | 720 | ~32 MB (derived) |
 
-In total that is about 33–34 MB/day written to `/config` (derived). This is worth knowing on SD-card storage.
+| `cam_engine.log.d/` | `cam_logarchive.py` | one gzip file per UTC day, ~1.4 MiB/day after the request-dump collapse; 35 days kept (~50 MB), plus a small `state.json` | 24 appends + 24 `state.json` renames | ~1.4 MiB (measured on the reference fleet's journal, 2026-10-02) |
+
+In total that is about 35 MB/day written to `/config` (derived). This is worth knowing on SD-card storage.
 
 ### 9.7 Freshness bars vs poll intervals
 
-`binary_sensor.camera_monitor_stalled` turns on when a sensor's `last_updated` is older than that sensor's bar. A bar must sit above the longest time a *running* monitor can go without writing a row. With the heartbeat, that time depends on the poll interval P and the bucket B (`HEARTBEAT_BUCKET_S`, 600 s in all four scripts) (derived):
+`binary_sensor.camera_monitor_stalled` turns on when a sensor's `last_updated` is older than that sensor's bar. A bar must sit above the longest time a *running* monitor can go without writing a row. With the heartbeat, that time depends on the poll interval P and the bucket B (`HEARTBEAT_BUCKET_S`: 600 s in the four camera monitors, deliberately 3600 s in the engine-log archive) (derived):
 
 - **P ≥ B:** every poll lands in a new bucket, so the longest interval is P.
 - **P < B:** only the first poll in each bucket is forced to write. The interval is B in steady running, and less than B + P when the poll phase shifts against the bucket boundaries, which are aligned to the Unix epoch.
@@ -505,6 +507,7 @@ In total that is about 33–34 MB/day written to `/config` (derived). This is wo
 | `camera_health` | 120 s | < 720 s | 601 s | 2700 s | 3.75× |
 | `camera_motion_stale` | 1800 s | 1800 s | 1801 s | 5400 s | 3.0× |
 | `camera_visual_activity` | 120 s | < 720 s. The payload changes every poll, so ~120 s in practice | 220 s | 2700 s | 3.75× |
+| `camera_engine_log_archive` | 3600 s | ~3600 s: every run lands in a new hourly bucket, plus up to ~60 s of run time | not yet measured (new) | 10800 s | 3.0× |
 
 **Why a bare age bar could not work without the heartbeat.** The reference fleet's recorder covers 11 days before the heartbeat existed (2026-08-31 → 2026-09-11). Over that period:
 - `camera_health` went up to 7 h 04 m without a new row.
@@ -516,13 +519,13 @@ In total that is about 33–34 MB/day written to `/config` (derived). This is wo
 - The template re-evaluates at least once a minute because it reads `now()`.
 - The alert automation then requires the entity to stay `on` for 15 minutes.
 
-That is about 61 min for the three monitors with a 45-minute bar and about 106 min for the motion monitor. The recovery automation likewise waits for 15 minutes of `off`.
+That is about 61 min for the three monitors with a 45-minute bar, about 106 min for the motion monitor and about 196 min for the engine-log archive. The recovery automation likewise waits for 15 minutes of `off`.
 
-**Reading `ages_min`.** It renders as `camera_health=<n> camera_visual_activity=<n> camera_flap_rate=<n> camera_motion_stale=<n>`, in whole minutes. A healthy fast monitor reads up to 10, or about 12 in the worst phase case. The motion monitor legitimately reads up to 30. The alert body's "can never exceed ~10 min" holds for the three fast monitors only.
+**Reading `ages_min`.** It renders as `camera_health=<n> camera_visual_activity=<n> camera_flap_rate=<n> camera_motion_stale=<n> camera_engine_log_archive=<n>`, in whole minutes. A healthy fast monitor reads up to 10, or about 12 in the worst phase case. The motion monitor legitimately reads up to 30 and the archive up to about 61.
 
 **If you change `scan_interval` or `HEARTBEAT_BUCKET_S`:**
-- `HEARTBEAT_BUCKET_S` is defined separately in each of the four scripts. Change all four together.
-- The four bars are literals that appear twice in the template: once in the state and once in the `stalled` attribute. Change both.
+- `HEARTBEAT_BUCKET_S` is defined separately in each of the five scripts: 600 s in the four camera monitors (change those together) and 3600 s in the engine-log archive, matching its hourly poll.
+- The five bars are literals that appear twice in the template: once in the state and once in the `stalled` attribute. Change both.
 - Re-derive the table above. A bucket or poll interval raised close to a bar makes the dead-man fire on a healthy monitor, starting with the one whose payload can otherwise sit unchanged for hours (`camera_health`).
 - Raising a bar never hides a dead monitor. It only delays the page by the amount the bar was raised.
 

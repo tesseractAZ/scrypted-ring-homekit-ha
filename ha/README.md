@@ -13,12 +13,15 @@ before deploying (grep for `<` to find them).
 | `scripts/cam_flap.py` | `/config/scripts/cam_flap.py` | the stream-fault command_line sensor |
 | `scripts/cam_motion.py` | `/config/scripts/cam_motion.py` | the per-camera motion-staleness sensor |
 | `scripts/cam_vision.py` | `/config/scripts/cam_vision.py` | the frame-differencing visual-activity sensor |
-| `packages/cam_health.yaml`, `packages/cam_flap.yaml`, `packages/cam_motion.yaml`, `packages/cam_vision.yaml` | `/config/packages/` | `homeassistant: packages: !include_dir_named packages` |
+| `scripts/partial_loss.py` | `/config/scripts/partial_loss.py` (beside `cam_motion.py`) | imported by `cam_motion.py` (the partial-loss test) |
+| `scripts/cam_logarchive.py` | `/config/scripts/cam_logarchive.py` | the hourly engine-log archive sensor |
+| `packages/cam_health.yaml`, `packages/cam_flap.yaml`, `packages/cam_motion.yaml`, `packages/cam_vision.yaml`, `packages/cam_logarchive.yaml` | `/config/packages/` | `homeassistant: packages: !include_dir_named packages` |
 | `automations/*.json` | HA **storage** automations (not files) | `POST /api/config/automation/config/<id>` |
 
 ## Deploy order
 
-1. **Fill placeholders.** ALL FOUR scripts carry them — grep each for `<`.
+1. **Fill placeholders.** Five of the six scripts carry them (`partial_loss.py`
+   has none) — grep each for `<`.
    `scripts/cam_health.py` and `scripts/cam_vision.py` each need the HA host IP
    plus every camera's Scrypted device id and webhook token (how to obtain them:
    [`docs/migration-runbook.md`](../docs/migration-runbook.md)); they probe the
@@ -27,6 +30,13 @@ before deploying (grep for `<` to find them).
    `binary_sensor.<stem>_motion`) and, optionally, per-camera staleness
    overrides. (There is deliberately no recorder-outage exclusion knob — see
    the corroboration section for why one can only ever delete real data.)
+   Its `WITNESS` map (optional, ships empty) names the light-switch scene
+   entities of a room whose camera has no co-firing partner, and
+   `PARTIAL_LOSS_ACK` (ships empty) acknowledges a deliberate partial loss.
+   `scripts/cam_logarchive.py` needs only `<scrypted_addon_slug>`.
+   `automations/camera_room_walk_test.json` needs the same switch scene
+   entities as `WITNESS` (`event.<witness_switch_scene_1>`/`_2`) and that
+   room camera's `binary_sensor.<stem>_motion`; skip it when `WITNESS` is empty.
    `scripts/cam_flap.py` needs: `<scrypted_addon_slug>` (visible in the add-on's
    URL in the HA UI, e.g. `xxxxxxxx_scrypted`); its `CAMS` dict keys must
    byte-match the camera names Scrypted prints in log brackets (e.g. `[Kitchen Cam]`);
@@ -41,7 +51,8 @@ before deploying (grep for `<` to find them).
    needs your speaker and TTS entity ids.
    `automations/go2rtc_reload_on_start.json` needs the go2rtc config-entry id —
    find it with `GET /api/config/config_entries/entry` (filter `domain: go2rtc`).
-   Every fault alert also carries a `notify.<your_mobile_app_target>` action —
+   Every fault alert (except the card-only `camera_log_archive_event`) also
+   carries a `notify.<your_mobile_app_target>` action —
    replace it with your own push target, or delete those steps if you only want
    the in-UI cards. Leaving them unreplaced makes the automation error at run
    time. Note the push steps are deliberately gated so that a re-assert (which
@@ -71,7 +82,12 @@ before deploying (grep for `<` to find them).
 3. **Copy** the script and package file to `/config/` (SSH add-on or Samba).
    Ensure `configuration.yaml` includes the `packages:` directive above.
 4. **Restart HA fully.** The `command_line` integration only loads on a full
-   restart — `reload_all` leaves the sensor `unavailable`.
+   restart — `reload_all` leaves the sensor `unavailable`. Once it is loaded, a
+   changed package (a new sensor or new `json_attributes`) applies with
+   `command_line.reload`; reload it BEFORE `template.reload`, so the template
+   sensors (including the two delayed dead-man binaries) first render against
+   the new attributes, and check every camera `binary_sensor` is off just
+   before `template.reload` (an `on` one re-fires its onset automation).
 5. **Create the automations** — for each JSON file:
    **Prerequisite:** the motion-stale pair and the doorbell announce presuppose
    the MQTT motion/doorbell `binary_sensor`s from
@@ -306,8 +322,36 @@ shows up here first.
   at its own door while other cameras see the activity. The push is gated on the
   `failing_since_ts` freshness stamp, so a restart neither drops nor repeats the
   page; the card is dismissed once the failing set has been empty for 60 minutes.
-- `camera_monitor_stalled` / `_recovered` — **freshness** dead-man for all four
-  monitors, and the one that closes the largest hole in this design. Every other
+- `camera_motion_partial_loss_alert` / `_recovered` — a camera that still fires but
+  has dropped out of most of the motion its usual partners keep recording (see
+  the partial-loss section). The card gives per-camera evidence, the cameras that
+  could not have been convicted, the scope, and the ack stamp. The push goes out
+  on a set change or boot only for a flag whose `since` is under an hour old AND
+  newer than the automation's own `last_triggered` (the door-coverage pattern),
+  so a flag entered by the startup poll still pages and a reload or timeout
+  re-adding a paged flag does not. The card is dismissed after 30 min off.
+- `camera_motion_partial_loss_down` / `_up` — the partial-loss test's own
+  dead-man. The 60-min hold lives in the delayed template binary
+  `binary_sensor.camera_motion_partial_loss_test_down`, not in a template
+  trigger: a template trigger is not armed when its condition is already true
+  at attach (restart, reload, deploy order), while a template binary restores
+  its state and starts its delay from its first render. One push on the
+  binary's off->on edge; boot and an hourly re-assert restore the card.
+- `camera_log_archive_down` / `_down_recovered` — the engine-log archive failed
+  two runs in a row (`binary_sensor.camera_log_archive_down`, delay_on 75 min,
+  same pattern), or has seen no engine line for 48 h. One push on the edge: the
+  journal holds ~37 h, the deadline for a fix. Cleared by the first run that
+  archived.
+- `camera_log_archive_event` / `_event_cleared` — a gap (lines lost), resync
+  (lines may repeat) or withheld line. Card only, restored at boot and every
+  6 h, written only from a payload that carries the counters; cleared by
+  `input_button.camera_log_archive_acknowledge` or after 35 days, never by a good
+  run.
+- `camera_room_walk_test` — a deliberate walk test for a camera with no
+  co-firing partner (see the switch-notes section): double-tap the room's
+  switch, walk in, and get PASS or FAILED pushed within 5 minutes.
+- `camera_monitor_stalled` / `_recovered` — **freshness** dead-man for all five
+  monitors (the engine-log archive is the fifth), and the one that closes the largest hole in this design. Every other
   dead-man here triggers on `unavailable`/`unknown`/`-1`, and none of them looks
   at *age*. Home Assistant rewrites `last_updated` only when the state or an
   attribute **changes**, and a healthy fleet emits a byte-identical payload for
@@ -318,7 +362,8 @@ shows up here first.
   is why a naive age bar false-fires. The fix is a bucketed `updated_at` published
   by each script, so `last_updated` advances at least once per bucket whenever the
   loop actually runs, at roughly one extra recorder row per bucket rather than one
-  per poll. Bars are per sensor because the poll intervals differ 15×.
+  per poll. Bars are per sensor because the poll intervals differ 30× (3 h for the
+  hourly engine-log archive).
 - `camera_vision_monitor_down` / `_recovered` — dead-man for the visual monitor.
   It was the only one of the four without one, which mattered because its most
   likely failure is not a crash but going **blind while still running**:
@@ -331,8 +376,12 @@ shows up here first.
   see. A frame can also be *reachable but not new*: when a camera does not answer
   a snapshot request in time, the webhook returns HTTP 200 with its last cached
   image. A real sensor never produces two byte-identical JPEGs, so
-  `cam_vision.py` treats an identical body as the same old picture: it is not
-  analysed, does not refresh the baselines, and does not move `fresh_ts`, the
+  `cam_vision.py` treats a body identical to **any of the last 8 distinct
+  bodies** from that camera as the same old picture (the cache can hold more
+  than one image: one outage served two JPEGs that alternated for two days,
+  which a check against the previous body alone passed as a new frame every
+  poll; the ring is ordered by when each hash was last seen, so an image the
+  cache keeps serving never ages out). Such a body is not analysed, does not refresh the baselines, and does not move `fresh_ts`, the
   time of the last genuinely new frame. `probe_ts` still moves, so a
   camera-side stall does not page as a dead vision monitor, and `cam_motion.py`
   withholds its visual verdict once a camera has sent no new frame for 15 min.
@@ -490,9 +539,284 @@ shows up here first.
   an unused interior room reached 211 h), not to a round number.
 
 Every fault alert writes a `persistent_notification` (the HA notification
-centre) **and** sends a push via `notify.<your_mobile_app_target>`. Both matter:
+centre) **and**, except the card-only `camera_log_archive_event`, sends a push
+via `notify.<your_mobile_app_target>`. Both matter:
 persistent notifications are in-memory, so a restart erases every card with the
 fault still latched — which is why each alert also carries a re-assert trigger —
 and they are only visible to someone with the HA UI open, which is no use to an
 operator who is away from the property. The push steps are gated to fire on new
 information only, never on a re-assert.
+
+## Partial motion loss (`cam_motion.py` + `partial_loss.py`)
+
+Staleness and the co-firing proof judge only a camera that has gone completely
+silent. A camera that still fires a few times a day resets its staleness clock
+with every stray event, so a camera that has lost most of its detection (a
+narrowed motion zone, a sensitivity or schedule change, a partial obstruction)
+is invisible to both. `partial_loss.py` closes that gap: a pure function called
+on every 30-minute poll of `cam_motion.py`, for every camera that is not stale.
+It ships next to `cam_motion.py`; if it is missing or raises, `partial_loss` is
+published as `null` and the test's own dead-man pages.
+
+**Statistic.** Motion ON rows of all cameras are chained into clusters with the
+co-firing test's 5-minute linkage. For a target camera T and a partner P:
+`n_B`, `k_B` are P's clusters in the reference window and how many also contain
+T; `lb` is the Wilson 95 % lower bound of `k_B/n_B`; `n_R`, `k_R` are the same
+counts over the last 48 h; the tail is `P(X <= k_R)`, `X ~ Binomial(n_R, lb)`.
+The rate is conditional on P firing, so a quiet week does not move it - only T
+dropping out of scenes P still records does. The reference window is the latest
+27 days of usable time ending where the recent window starts (searched back at
+most 60 days); T's own stale silences and every all-entity recorder hole longer
+than 5 minutes are excluded as unobserved time.
+
+**Conviction.** A poll is a hit when some tested partner has tail x m < 1e-6
+(m = eligible partners, a Bonferroni factor), `k_R/n_R <= 0.33 x lb`, and, when
+the last 7 days of the reference hold at least 10 partner clusters,
+`k_R/n_R <= 0.5 x` that week's rate; T's own cluster rate has fallen to 67 % of
+its reference or less; and no other tested partner vetoes. A partner vetoes when
+it has at least 3 recent clusters and its co-fires would be improbable if T were
+really down to `0.33 x lb`: `P(X >= k_R | n_R, 0.33 x lb) < 0.01`. A partner is
+eligible with `n_B >= 20`, `k_B >= 8` and `lb >= 0.15` (the co-firing test's own
+floors, passed in from `cam_motion.py`, never restated), and tested when it also
+has at least 5 recent clusters, fires at no more than 2x its reference cluster
+rate, and has not come back from its own stale silence within the last 48 h. A
+flag is raised when hits have run continuously for 30 minutes of wall time (a
+forced poll seconds after a scheduled one cannot satisfy it). The veto and the
+2x bar were set against a partner that starts firing on junk: Poisson junk
+injected into the real history at 1.0-2.5x a partner's cluster rate (288 runs)
+latched a false flag in 21 runs under an earlier power-floor veto and a 3x bar,
+and in 0 of 288 with the likelihood veto and the 2x bar.
+
+**Power is published, and no flag is not an all-clear.** Each camera's entry in
+`partial_detail.cams` carries its status: `testable` when even a total loss
+could convict it this poll, `underpowered` when tested but not even zero
+co-fires could, `untestable` when no partner is tested, `stale` when staleness
+owns it. `min_loss` is the smallest loss the most sensitive partner would
+convict at its expected count, and `partial_detail.cannot_convict` lists the
+cameras that could not have been convicted this poll. Measured by removing
+whole visit clusters from the real history (6 cameras x 4 healthy onsets),
+losses of 100 / 90 / 80 / 67 / 50 % were caught in 18 / 17 / 14 / 6 / 4 of 24
+cases (staleness pages the missed total losses at 72 h), a day-only loss in 8 of
+24 and a night-only loss in 1 of 24, typically 40-50 h after onset. Slow
+declines are not detected. The same wording is published in
+`partial_detail.scope` and on the card.
+
+**Clearing is evidence-based.** While a camera is flagged, the span that
+convicted it is excluded from its reference, so the reference stays what it was
+at entry. The flag clears only when the entry partner, judged against its frozen entry
+bound (another tested partner against its own bound when the entry partner
+cannot re-test), shows `k_R/n_R >= 0.5 x lb` **and** that many co-fires would
+be improbable if the loss were still present (`P(X >= k_R | n_R, 0.33 x lb) <
+0.01`), continuously for 6 hours. There is no time-based exit: a continued 90 %
+loss replayed 40 days forward stays flagged (an earlier form that let the loss
+become its own reference cleared it after about 17 days). A flagged camera that
+goes stale leaves the set (staleness and its proof outrank this test) but its
+reference stays **dormant**: the flagged span stays out of its baseline, so a
+loss still present when it returns re-enters with the **same** `since` (no
+second page; an acknowledgement still matches), while recovery evidence held
+6 hours forgets the reference. Holding the flag itself through the silence
+would instead re-flag every camera back from a total outage for 40-46 h until a
+partner could re-test it, which a replay of the two real outages showed.
+
+A deliberate, permanent change (a narrowed zone) is silenced per flag in
+`cam_motion.py`: `PARTIAL_LOSS_ACK = {"<camera>": <ack stamp>}`, where the ack
+stamp is printed on the card. The acknowledgement is keyed to that flag, so a
+later, separate flag pages again; one matching no current flag is listed in
+`partial_detail.ack_unmatched`.
+
+**Recorder holes.** Every all-entity gap longer than 5 minutes in the ~62-day
+lookback is passed to the test. Scanning the whole lookback costs about 5 s on
+a Raspberry Pi 5 (4 M rows), so the gap list is cached in the motion state file
+and each poll scans only rows written since the previous scan; a missing or
+unusable cache costs one full scan. If the scan fails the test still runs and
+`partial_detail.gap_error` says so.
+
+**Surfaces.** `partial_loss` lists the flagged cameras minus acknowledged ones,
+and is `null` (never `[]`) whenever the test did not run.
+`binary_sensor.camera_motion_partial_loss` is on while it is non-empty and
+unavailable - never off - when it is `null`. The largest `partial_*` payload in
+a whole-recorder replay was 3.0 KB, well under the recorder's 16 KB attribute
+limit.
+
+**Measured over the recorder** (3,459 polls over 76 days, every real recorder
+hole masked): a camera that kept firing but dropped to 3 co-fires in 77 of its
+best partner's clusters (against 225/667) was flagged 48 h after onset. That
+catch rested on a favourable reference (33.7 %, lb 0.30): the same camera losing
+everything from either of two earlier dates would not have been flagged before
+going stale. A 116 h outage was flagged 27 h before staleness, and a 38 h
+silence that never paged at all was flagged and cleared on recovery. No flag
+entered in a healthy period; one flag raised in the fortnight after a
+fleet-wide plan change (references fitted on a different activity regime) held
+three days into the following healthy period and cleared on evidence.
+
+## Vision recall recency
+
+The 25 % recall floor over the last 40 outcomes answers "could frame
+differencing see this view?" with hits from up to 40 clusters ago, so a detector
+that has just gone deaf keeps clearing it. A trailing run of misses is
+therefore judged against the camera's own rate before the run: `P = (1 -
+p_lb)^run`, where `p_lb` is the Wilson lower bound of the hit rate before the
+run, with the hit that ended the run left out. The quiet verdict is withheld
+when `run >= 4` and `P < 0.01` (the verdict states P and says the silence cannot
+be read as a quiet area), or when `run >= 8` regardless (the verdict states
+neither P nor a cause: a run can also be the camera firing on things frame
+differencing rightly ignores). On records rebuilt from the recorder, a camera
+whose vision threshold had ratcheted to its cap was withheld from its 4th miss
+where the floor alone needed about 30; on healthy history the rule withheld
+0 of 962 and 0 of 1,017 polls the floor allowed on two cameras and 15 of 428 on
+the one whose recall sits at the floor. Deafness that begins as motion stops
+leaves no clusters to score.
+
+## Noise relaxation (visual monitor)
+
+Each camera's threshold is set per exposure regime at 5x a learned noise EMA,
+clamped to [12, 60]. The EMA learns only from samples that are not visual
+changes, which assumes most samples of a regime show an empty scene. That fails
+for a regime seen only while someone is present: an indoor view lit only during
+visits is in day exposure almost exclusively while occupied, so its non-event
+samples are a person who lit one block, each one grows the EMA, and the bar
+climbs past what a person produces. Measured on one such view: the bar went from the floor to the cap over five
+days, and once it was there 9 of the camera's motion clusters drew 1 visual
+change.
+
+`cam_vision.py` therefore stamps each regime's last comparison. Once a regime
+has gone more than 15 min without one, its EMA relaxes toward 2.4 (where the
+12 floor binds) with a 2 h time constant, downward only, and the relaxed value
+is stored before the event decision so an event sample cannot restore the old
+bar on the next poll. From the cap, the first comparison after 0.5 / 1 / 2 / 4 /
+8.5 h of absence is judged at 54 / 45 / 32 / 19 / 13. A regime compared every
+poll never relaxes, and below the clamp its output is byte-identical to the rule
+without relaxation. The stored EMA is also clamped at 12 when the state loads
+(above that the threshold is already at the cap). Replayed over 35 days, the
+ratcheting view stays at 12.0-13.8 and its recall rises from 0.67 to 0.94;
+elsewhere the change adds ~22 visual changes (+1.2 % of ~1,890), about 8 with
+motion on the same camera within 6 min and about 14 without (roughly 0.4 a day; about two thirds of those within 30 min of a regime
+returning, about half within an hour of sunrise). Malformed state
+values are dropped and named in the summary, and a fault in any of these
+refinements falls back to the earlier rule and is named there too. The state
+file is written atomically. A regime compared every poll can still ratchet
+within one long occupied stretch.
+
+## A camera with no co-firing partner: switch notes and the walk test
+
+An interior room's camera has no partner that shares 15 % of its view, so it is
+judged on duration alone (a per-camera window). Silence alone cannot tell an
+empty room from a dead camera. When that camera is stale, its stale verdict
+carries a note listing every physical press of the room's light switch since
+its last motion event (`WITNESS` in `cam_motion.py`). Z-Wave Central Scene
+events are sent only for a paddle pressed by hand, so these are a clean record
+of someone at the switch: a row is a press when its timestamp lies -5 to +120 s
+from the time it records (restart and re-interview rewrites repeat an old time
+and are dropped). Each press shows whether a companion camera fired within
+2 minutes, and the note says that a switch box outside the camera's view makes a
+press with no motion no proof of a fault. Presses never make the camera stale or
+broken. Each visit's outcome is logged in the motion state file (newest 50) to
+build the calibration a press-based rule would need.
+
+`camera_room_walk_test` turns a press into a deliberate test: double-tap
+either paddle (`KeyPressed2x`), then walk into the room. It posts a "running"
+card, waits up to 5 minutes for the camera's motion sensor (motion already being
+reported within 30 s before the tap counts), and pushes PASS with the reaction
+time or FAILED with what to check in the Ring app. Only a fresh double-tap
+starts it: a state restored after a restart or an event older than 2 minutes is
+ignored. A restart during the 5 minutes aborts the test without a result.
+
+## Engine log archive (`cam_logarchive.py`)
+
+The Scrypted engine log is the only record of door trips, per-camera recording
+errors and session teardown, and the systemd journal retains only about
+37-38 hours of it (591,537 lines over 38.1 h when measured), shrinking in
+whole-file steps, so a review run more than ~37 h after the previous one loses
+the difference. `cam_logarchive.py` copies every new engine line, hourly, into a
+**redacted** archive of one gzip file per UTC day under
+`/config/cam_engine.log.d/` (0700; files 0600), kept for 35 days (~1.4 MiB/day
+measured). The directory name matches the Supervisor's core-backup exclusion
+`*.log.*`, so the archive never enters a backup; a core restore empties
+`/config` and deletes it, and the next run backfills what the journal still
+holds. The archive is personal data - camera and door names with times show
+when people come and go - and must not be attached to issues or shared.
+
+**Resume.** Every run that writes ends with a marker line
+`#~camlog~ CURSOR seq=<n> ts=<UTC> c=<journal cursor>` in the newest day file.
+The next run requests `Range: entries=<cursor>:0:<N>` from the Supervisor log
+API: skip 0 returns the anchor entry first, and `X-First-Cursor` must equal the
+stored cursor, which proves the anchor is still in the journal (skip 1 on a
+vacuumed cursor silently drops the journal's head line). The commit cursor must
+match the systemd cursor shape and the API must return the very line archived
+as that entry; otherwise the run fails and writes nothing.
+
+**Run outcomes** (the sensor state):
+
+| State | Meaning |
+|---|---|
+| `ok` | everything new archived |
+| `catchup` | stopped at the 60 s work budget; the next run continues |
+| `deferred` | Home Assistant started < 5 min ago (an archive > 24 h behind runs anyway with a 20 s budget) |
+| `busy` | the previous run still holds the lock |
+| `gap` | the cursor's entry is gone and the journal head is newer: that span exists nowhere; a `#~camlog~ GAP` line records it |
+| `resync` | the cursor could not be verified for any other reason, or a corrupt archive file was set aside; the fetched window is archived again after a `#~camlog~ RESYNC` line - lines may repeat, none are missing |
+| `withheld` | a line still matched the residual scan after redaction and was written as `<WITHHELD residual=...>` |
+| `clock` | no new engine line for 48 h+ (the engine is stopped or hung, its log no longer reaches the journal, or the clock jumped); retention is paused |
+| `error` | the run failed and wrote nothing - including a journal line format the parser does not recognise, so a Supervisor format change cannot silently archive nothing |
+| `unknown` | `command_timeout` passed; Home Assistant 2026.9.4 publishes `unknown` with attributes `{}` and does not kill the process |
+
+**Redaction, before anything is written.** The `<UTC timestamp> <host>
+<ident>[<pid>]: ` prefix is kept (the log readers anchor on it). Rules on the
+message, in order: JWTs and e-mail addresses; IPv6 including `::ffff:a.b.c.d`
+before IPv4 (classified, never kept); credentials (`Authorization`/`Cookie`,
+bearer/basic tokens, ICE `ice-pwd`/`ice-ufrag`/`usernameFragment`, quoted
+passphrases, password/username/token/secret/api-key assignments, a credential
+word before an opaque run); RTSP session ids; DTLS fingerprints and MACs; Ring
+device ids by key, UUIDs, HomeKit codes, coordinates; then runs of 16+ hex and
+bare runs of 7+ digits. An independent **residual scan** runs over the whole
+archived line and withholds rather than writes anything that still looks like
+an identifier: JWT prefixes, dotted quads (also URL-encoded), IPv6 shapes,
+credential assignments with escaped quotes or `%3A`/`%3D` separators,
+`credential`/`api-key`/`signature` keys, URL-encoded e-mail, alternative MAC
+forms, HomeKit setup URIs, a quoted mixed-class value under `auth`/`key`, and
+any keyless mixed-case alphanumeric run of 24+ characters. Base64 blobs (for
+example an SDP `sprop-parameter-sets`) are therefore withheld by design.
+Authentication prose such as "Refresh token is not valid" survives. Measured on
+the whole live journal (574,598 entries): 0 lines withheld, 0 residual hits;
+5,531 distinct secret values extracted independently from the raw lines, none
+present in the archive.
+
+**Request-dump collapse.** The two probing monitors fetch the same `takePicture`
+webhooks every 120 s, and the engine logs each request as a 15-line object
+dump. Each dump that matches a strict grammar is replaced by its url line and a
+note of what was removed (about half the lines; gzip size -33 %); anything else
+is archived verbatim.
+
+**Retention and repair.** A day file is deleted only when it is older than both
+`today - 34 d` and `newest archived day - 34 d`, is not among the newest 35
+files, was not written this run and was not modified within 35 days; with the
+clock more than 2 days past the newest archived line nothing is deleted. A
+half-written gzip tail (a killed run) is truncated before the next append. An
+undecodable member with intact members after it is on-disk corruption, not a
+tail: the whole file is moved aside as `*.corrupt-<epoch>` (outside the day-file
+namespace, so retention never deletes it - remove it by hand) and the run
+reports `resync`.
+
+**Entities and alerts.** `sensor.camera_engine_log_archive` (`scan_interval`
+3600, `command_timeout` 600, 44 attributes); `binary_sensor.camera_log_archive_problem`
+(the current run); `binary_sensor.camera_log_archive_down` (a failed run -
+`error`, `unknown`, `busy` or `clock` - held 75 min, i.e. confirmed by the next
+run); `binary_sensor.camera_log_archive_events` (a gap, resync or withheld event
+younger than 35 days and newer than the last press of
+`input_button.camera_log_archive_acknowledge`). The archive is also the fifth
+member of `camera_monitor_stalled`, with a 3 h bar.
+
+**Measured** in the core container: an hourly increment of 15,000 entries takes
+about 2 s at 25 MB RSS; the whole journal about 85-89 s at 45 MB, so a first backfill takes two to
+three runs. `cam_logarchive.py --dry-run` fetches, collapses,
+redacts and scans, and writes nothing; `--scan FILE...` reports per-file line,
+withheld, residual and marker counts.
+
+**Limits.** Redaction is pattern-based: a new identifier shape that has no key,
+is shorter than the opaque and digit floors, and is not a JWT, IP, UUID or
+colon-hex passes both scans - a `withheld` event or a nonzero `residual_run` is
+the signal to add a rule. A run interrupted between two gzip members (only a run
+that crosses midnight writes two) repeats its first member's lines on the next
+run, which reports `resync`. Whether the journal persists across a host reboot
+is unverified; if it does not, the lines from the last run to the reboot are lost
+and reported as a `gap`.

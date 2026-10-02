@@ -32,6 +32,10 @@ command_line:
         - visual_localized_count
         - updated_at
         - door_evidence
+        # Partial-loss test (partial_loss.py). json_attributes is an ALLOWLIST:
+        # without these two lines the keys are silently dropped.
+        - partial_loss
+        - partial_detail
 
 template:
   - binary_sensor:
@@ -45,3 +49,48 @@ template:
              and state_attr('sensor.camera_motion_stale','error') is none }}
         attributes:
           summary: "{{ state_attr('sensor.camera_motion_stale','summary') }}"
+      # ON while at least one camera that still fires has dropped out of most of
+      # the motion its usual partner cameras keep recording. UNAVAILABLE - never
+      # off - whenever the test did not run (partial_loss null), so a failure can
+      # not read as "no partial loss"; camera_motion_partial_loss_down pages that.
+      - name: Camera motion partial loss
+        unique_id: camera_motion_partial_loss
+        device_class: problem
+        state: >-
+          {{ (state_attr('sensor.camera_motion_stale','partial_loss') or []) | length > 0 }}
+        availability: >-
+          {{ states('sensor.camera_motion_stale') not in ['unknown','unavailable']
+             and state_attr('sensor.camera_motion_stale','error') is none
+             and state_attr('sensor.camera_motion_stale','partial_loss') is not none }}
+        attributes:
+          cameras: "{{ state_attr('sensor.camera_motion_stale','partial_loss') or [] }}"
+          # Cameras that could NOT have been convicted this poll even by a total
+          # loss: an absent flag says nothing about them.
+          cannot_convict: >-
+            {{ (state_attr('sensor.camera_motion_stale','partial_detail') or {}).get('cannot_convict', []) }}
+          scope: >-
+            {{ (state_attr('sensor.camera_motion_stale','partial_detail') or {}).get('scope') }}
+      # The partial-loss TEST could not run (partial_loss null or partial_detail.error)
+      # while the staleness sensor itself is healthy, held 60 min. The hold lives
+      # here, not in a template trigger: this binary restores its state across a
+      # restart and starts its delay from its first render, so a failure already
+      # present when camera_motion_partial_loss_down attaches still pages.
+      - name: Camera motion partial loss test down
+        unique_id: camera_motion_partial_loss_test_down
+        device_class: problem
+        delay_on:
+          minutes: 60
+        # unknown/unavailable (a timeout or a reload; camera_motion_monitor_down owns
+        # those) is no reading: it HOLDS the current verdict, so a reload during a
+        # failure cannot make a new off->on edge and a second push.
+        state: >-
+          {% set s = states('sensor.camera_motion_stale') %}
+          {{ (s not in ['unknown','unavailable']
+              and state_attr('sensor.camera_motion_stale','error') is none
+              and (state_attr('sensor.camera_motion_stale','partial_loss') is none
+                   or (state_attr('sensor.camera_motion_stale','partial_detail') or {}).get('error') is not none))
+             or (s in ['unknown','unavailable'] and this.state == 'on') }}
+        attributes:
+          reason: >-
+            {{ (state_attr('sensor.camera_motion_stale','partial_detail') or {}).get('error')
+               or 'partial_loss attribute missing (json_attributes allowlist, or the script is the old version)' }}

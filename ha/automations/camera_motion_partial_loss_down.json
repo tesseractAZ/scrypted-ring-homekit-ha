@@ -1,0 +1,65 @@
+{
+  "id": "camera_motion_partial_loss_down",
+  "alias": "Cameras - partial-loss test down",
+  "description": "Dead-man for the partial-loss test inside cam_motion.py. When it cannot run (partial_loss.py missing or raising) the script publishes partial_loss null and partial_detail.error, and binary_sensor.camera_motion_partial_loss goes unavailable - which camera_motion_monitor_down does not see (the staleness sensor itself stays healthy). The 60-min hold lives in binary_sensor.camera_motion_partial_loss_test_down (delay_on 60 min): a template binary restores its state across a restart and starts its delay from its first render, so a failure that already exists when this automation attaches (restart, reload, deploy order) still pages - a template trigger would stay disarmed. Also on if the attribute is missing altogether (json_attributes allowlist not updated). Pushes only on the binary's off->on edge (not from unavailable, which a template.reload produces); boot and the hourly :57 re-assert restore the card only, and inherit the 60-min hold through the binary.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.camera_motion_partial_loss_test_down",
+      "to": "on",
+      "not_from": [
+        "unavailable"
+      ],
+      "id": "dead"
+    },
+    {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
+    },
+    {
+      "platform": "time_pattern",
+      "minutes": "57",
+      "id": "reassert"
+    }
+  ],
+  "conditions": [
+    {
+      "condition": "state",
+      "entity_id": "binary_sensor.camera_motion_partial_loss_test_down",
+      "state": "on"
+    }
+  ],
+  "actions": [
+    {
+      "action": "persistent_notification.create",
+      "data": {
+        "notification_id": "camera_partial_loss_down",
+        "title": "📷 Partial-loss test not running",
+        "message": "The partial-loss test in cam_motion.py has not run for 60+ min, so a camera that still fires but has lost most of its detection is NOT being looked for. Per-camera staleness is unaffected. Reason: {{ (state_attr('sensor.camera_motion_stale','partial_detail') or {}).get('error') or 'partial_loss attribute missing (json_attributes allowlist, or the script is the old version)' }}. {{ now().strftime('%b %-d %-I:%M %p') }}."
+      }
+    },
+    {
+      "choose": [
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{{ trigger.id == 'dead' }}"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "notify.<your_mobile_app_target>",
+              "data": {
+                "title": "📷 Partial-loss test not running",
+                "message": "The partial-loss test has failed for an hour - a camera losing most of its motion events is not being looked for. Staleness monitoring is unaffected."
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "mode": "single"
+}
