@@ -103,7 +103,49 @@ DEVICE_IDS = {  # scrypted device id -> short name, for probe accounting
 # the Ring plugin on this signal alone; gate any lost-event claim on an actual
 # motion-delivery gap. Rate is also confounded by push VOLUME (which tracks
 # motion), so normalise before calling a trend.
-PUSH_DECRYPT = "ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY"
+#
+# ONE COUNT PER FAILURE, whichever shape the engine prints. The push receiver
+# either swallows a decrypt failure or rethrows it, never both, so one failure
+# never prints both shapes. Checked in @eneris/push-receiver 4.3.0 (the version
+# ring-client-api 14.3.0 pins; the copy vendored into the Ring plugin was not
+# read) and on its main branch. 4.3.0 logs the swallowed line with Logger.warn,
+# which is why the engine prints it; main logs it at debug, so the deployed
+# receiver behaves like 4.3.0, not main.
+#   swallowed  "Message dropped as it could not be decrypted: <reason>" - ONE
+#              line, no stack, for the reasons it expects ("crypto-key is
+#              missing", "salt is missing", "Unsupported state or unable to
+#              authenticate data"). The only shape seen since August: 1 in the
+#              3-day engine log to 2026-10-03, which the ECDH-only match missed.
+#   rethrown   a Node error DUMP (console.error of the Error): a header that
+#              names the code ("Error [ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY]:
+#              Public key is not valid for specified curve"), indented "    at"
+#              frames, the property line "  code: 'ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY'"
+#              and "}" - the code TWICE for one failure. ECDH.computeSecret
+#              prints this shape for an invalid public key on Node 20 (source)
+#              and Node 26 (reproduced). August: ~1.6 matching lines/h; none
+#              since 08-10.
+# A failure is counted at its FIRST matching line. A later matching line of the
+# same failure is skipped when either
+#   - it is an indented or brace line (PUSH_DUMP_CONT_RE) of a dump already
+#     counted, which also covers a nested "[cause]" line and the head of the
+#     slice: lines that open the slice inside a dump (the 60,000-entry fetch
+#     or the 360-min trim cut its header off) belong to a failure that began
+#     before the window, as the old rule also treated them; or
+#   - it is the "  code: 'ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY'" line of a header
+#     counted within the last PUSH_CODE_LINES lines, even when a foreign line
+#     (another stream's output, a blank, a Scrypted RPC "<plugin>:host" line)
+#     broke the dump between them. The previous rule skipped every "code:"
+#     line, which was immune to that but counted ZERO for a dump whose header
+#     did not name the code; that dump now counts once, at its code line.
+# In the 3-day log to 2026-10-03, all 473 Node error dumps (uncaughtException
+# EPIPE/ECONNRESET) ran from header to "code:" line without a foreign line.
+PUSH_DECRYPT = ("ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY",
+                "Message dropped as it could not be decrypted")
+PUSH_DUMP_CONT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ \S* [\w.-]+(?:\[\d+\])?: (?:\s|[{}\]],?\s*$)")
+# A Node dump is header + 10 frames + code line (~12 lines); 40 leaves room for
+# a foreign 15-line request dump landing inside it.
+PUSH_CODE_LINES = 40
 
 STREAM_FAULTS = (
     "timeout waiting for data, killing parser session",
@@ -242,7 +284,15 @@ DOOR_CAMERA = {
 # wrote ~139 rows/day against 720 polls, and stays ~144 with the heartbeat).
 # Consumed by binary_sensor.camera_monitor_stalled.
 HEARTBEAT_BUCKET_S = 600
-PROBE_RE = re.compile(r"public/(\d+)/[a-f0-9]+/takePicture")
+# Probes are counted by DEVICE ID. The token segment is the live journal's
+# lower-case hex webhook token or <HEX>, the marker the engine-log archive
+# (cam_logarchive.py) writes in its place, so a review reusing this parser on
+# the archive gets the same per-camera counts as production. (Hex-only matched
+# 0 of 26,890 archived takePicture lines: every camera read unprobed.) Nothing
+# else counts: the engine logs the url BEFORE it rejects a bad token with 401,
+# so a prober left with a placeholder ("<webhook_token>") or a failed lookup
+# ("None", "undefined") must stay visible in probe_shortfall.
+PROBE_RE = re.compile(r"public/(\d+)/(?:[a-f0-9]+|<HEX>)/takePicture")
 
 
 _TS_FMT = "%Y-%m-%d %H:%M:%S"
@@ -582,6 +632,9 @@ def main():
     probes = {n: 0 for n in DEVICE_IDS.values()}
     stream_errors = 0
     push_undecryptable = 0
+    push_open = True     # inside the dump of a push failure already counted; True at
+                         # the slice head, which may open mid-dump (header cut off)
+    push_code_left = 0   # lines left in which a counted header's code line may land
     door_events = []     # [(ts_string, door_name)]
     cam_motion = []      # [(ts_string, camera_name)]
     unknown_motion = {}  # camera names seen in the log but absent from CAMS
@@ -607,6 +660,24 @@ def main():
                     # from the witness pool, which inflates the orphan count.
                     unknown_motion[nm] = unknown_motion.get(nm, 0) + 1
 
+        # A push-decrypt failure counts at its FIRST matching line only; a later
+        # matching line of its own dump is the same failure (see PUSH_DECRYPT).
+        # Tracked here, outside the fault chain, so the chain's order is untouched.
+        push_hit = any(p in ln for p in PUSH_DECRYPT)
+        push_new = False
+        if push_hit or push_open:
+            push_cont = PUSH_DUMP_CONT_RE.match(ln) is not None
+            own_code = (push_code_left > 0 and push_cont
+                        and ("code: '%s'" % PUSH_DECRYPT[0]) in ln)
+            push_new = push_hit and not (push_open and push_cont) and not own_code
+            push_open = push_hit or push_cont
+            if own_code:
+                push_code_left = 0
+            elif push_new and ("[%s]" % PUSH_DECRYPT[0]) in ln:
+                push_code_left = PUSH_CODE_LINES
+        if push_code_left:
+            push_code_left -= 1
+
         if "takePicture" in ln:
             m = PROBE_RE.search(ln)
             if m and m.group(1) in DEVICE_IDS:
@@ -619,11 +690,10 @@ def main():
                     else:
                         closed_err[name] += 1
                     break
-        elif PUSH_DECRYPT in ln and "code:" not in ln:
-            # One Node uncaughtException writes its code on a SECOND line
-            # ("  code: 'ERR_...',"), so matching the bare string counted every
-            # error twice - measured on this engine as 212 EPIPE lines for 106
-            # errors. Skipping the `code:` continuation counts errors, not lines.
+        elif push_new:
+            # Failures, not lines: a Node error dump names its code twice, in the
+            # header and in "  code: 'ERR_...'" (cf. 212 EPIPE lines for 106
+            # errors on this engine), and the second is a line of the same dump.
             push_undecryptable += 1
         elif any(f in ln for f in STREAM_FAULTS):
             stream_errors += 1

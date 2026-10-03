@@ -310,7 +310,14 @@ shows up here first.
   separately if the monitor itself sits in an error state for an hour
   (dead-man's switch - covers the watchdog dying too, since that starves
   the monitor's clock). Also carries a tripwire on UNDECRYPTABLE cloud push
-  messages (`push_undecryptable`). These are **not** dropped motion events: across
+  messages (`push_undecryptable`). The push receiver either drops a message it
+  cannot decrypt and logs one line (`Message dropped as it could not be
+  decrypted: <reason>`, e.g. a missing crypto-key) or rethrows the error as a
+  Node dump whose header and `code:` line both name it (e.g.
+  `ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY`), never both for one message; the monitor
+  counts both shapes, once per failure (a dump's later lines, a nested cause, or
+  a window opening inside a dump are not counted again). These are **not**
+  dropped motion events: across
   14 such failures, 30 of 30 engine-side motion detections still reached HA in the
   same second, because the failure sits in the push receiver rather than in the
   signalling session that actually delivers motion. Do **not** re-authenticate the
@@ -785,7 +792,12 @@ present in the archive.
 webhooks every 120 s, and the engine logs each request as a 15-line object
 dump. Each dump that matches a strict grammar is replaced by its url line and a
 note of what was removed (about half the lines; gzip size -33 %); anything else
-is archived verbatim.
+is archived verbatim. `cam_flap.py` counts probes by device id
+(`public/<id>/<token>/takePicture`, the token lower-case hex in the live journal or
+`<HEX>` in the archive), so its parser gives the same `probe_counts` on both. A
+request whose token is neither, such as an unfilled `<webhook_token>`
+placeholder, is not a probe: the engine logs the url before rejecting it with
+401, so such a prober stays visible in `probe_shortfall`.
 
 **Retention and repair.** A day file is deleted only when it is older than both
 `today - 34 d` and `newest archived day - 34 d`, is not among the newest 35
