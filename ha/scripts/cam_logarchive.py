@@ -60,9 +60,12 @@ EACH RUN (command_line, hourly):
   4. Collapses each takePicture request dump to its url line (below), redacts
      every line (REDACTION RULES, fixed order) and runs an independent RESIDUAL
      scan; a line that still trips it is WITHHELD (timestamp kept, text not).
+     Ring camera, ding, media-cell and session ids become KEYED PSEUDONYMS and
+     ding epoch-ms stamps become offsets from the line's own stamp (below).
   5. Measures interior silences (max gap between consecutive entries).
   6. Appends one gzip member per touched UTC day, the CURSOR line last, fsyncs;
-     applies retention; saves state.json; prints ONE JSON object.
+     saves a new pseudonym key AFTER the members (see PSEUDONYMS); applies
+     retention; saves state.json; prints ONE JSON object.
 
 FAILURE SEMANTICS IN HA 2026.9.4 (async_check_output_or_log, read in the core
 container): on command_timeout HA logs 'Timeout for command', returns None and
@@ -73,7 +76,10 @@ report busy. The package therefore treats 'unknown' as a failed run.
 CLI (reviewers and tests; the sensor runs with no arguments):
   cam_logarchive.py               archive run (the sensor)
   cam_logarchive.py --dry-run     fetch + collapse + redact + scan, write NOTHING
-  cam_logarchive.py --scan FILE.. residual-scan archive files (counts only)
+                                  (an EPHEMERAL pseudonym key; the note carries
+                                  the pseudonym census, counts only)
+  cam_logarchive.py --scan FILE.. residual-scan archive files (counts only, incl.
+                                  the pseudonym census per REKEY segment)
 """
 import os
 import sys
@@ -90,6 +96,8 @@ warnings.simplefilter("ignore")
 import calendar  # noqa: E402
 import collections  # noqa: E402
 import fcntl  # noqa: E402
+import hashlib  # noqa: E402
+import hmac  # noqa: E402
 import ipaddress  # noqa: E402
 import json  # noqa: E402
 import re  # noqa: E402
@@ -98,16 +106,19 @@ import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 import zlib  # noqa: E402
 
-try:
-    import resource  # noqa: E402
-except Exception:  # noqa: BLE001
-    resource = None
-
 ADDON = "<scrypted_addon_slug>"
 LOG_URL = os.environ.get("CAMLOG_URL", "http://supervisor/addons/%s/logs?verbose" % ADDON)
 ARCHIVE_DIR = os.environ.get("CAMLOG_DIR", "/config/cam_engine.log.d")
 STATE = os.path.join(ARCHIVE_DIR, "state.json")
 LOCK = os.path.join(ARCHIVE_DIR, ".lock")
+# The pseudonym key (PSEUDONYMS below): 32 random bytes, 0600, beside the day
+# files and therefore outside every backup, like the archive it keys. A DOTFILE:
+# a shell '*' (a review pull of 'cam_engine.log.d/*', tar of '*') skips it, and
+# the key must never travel with the day files - with it, a 9-digit doorbot_id
+# is recovered from its token by ~1e9 HMACs.
+KEY_FILE = os.path.join(ARCHIVE_DIR, ".pseudonym.key")
+KEY_BYTES = 32
+PROC_STATUS = "/proc/self/status"
 PREFIX = "scrypted-"
 SUFFIX = ".log.gz"
 RETAIN_DAYS = 35            # UTC day files kept; measured 2.02-2.10 MiB/day before
@@ -162,6 +173,45 @@ CURSOR_SHAPE = re.compile(r"^(?:[a-z]=[0-9a-f]{1,64};){2,9}[a-z]=[0-9a-f]{1,64}$
 # 7+-digit numbers, 1,935 RTSP 'Session:' ids (8 hex, ephemeral). The 20,531
 # 'username:' keys in webhook dumps hold the JS literal undefined, left as is.
 # Placeholders never contain 7+ digits, 16+ hex, dotted quads or colon-hex.
+#
+# PSEUDONYMS (10-03 review: every doorbot_id was the constant <RID> in 8,474
+# signalling blocks, ding/cell ids too and every dialog_id <UUID>, so ~19 % of
+# the blocks - mostly pong/timed_metadata keepalives - could not be tied to a
+# camera and no message could be tied to its session). These values become
+#   <TAG:token>, token = HMAC-SHA256(key, TAG NUL value) in base 20, letters g-z
+# under the 32-byte KEY_FILE:
+#   DEV  doorbot_id / device_id    8 letters  per camera: attribution
+#   DING ding_id                  12 letters  per ding: ding -> session linkage
+#   CELL cell_id                  12 letters  Ring media cell of a session
+#   SES  dialog_id / session_id   12 letters  one signalling dialog / RMS session
+#        (UUID-valued only, lower-cased first; dialog and session share the
+#        class so an equal value stays visibly equal)
+# location/user/account/owner/household/hardware ids, serials and MACs stay the
+# constant <RID>: account- or hardware-level, constant within this archive, so a
+# pseudonym would tell nothing. A pseudonym is not reversible without the key,
+# which never leaves the host's archive directory (a dotfile, so a '*' copy of the
+# day files leaves it behind) and never enters a backup; the
+# linkage it reveals (same camera, same ding, same session) the camera-name lines
+# around it already reveal. Without a key (redact() called by another tool) every
+# one of these falls back to the constant placeholder.
+# ENCODING. The alphabet holds no hex letter, no digit and no capital, so a token
+# can trip no residual rule whatever its content (8 hex chars are all digits
+# ~2 % of the time and would trip digits7; 12+ hex trips hex12; base32 runs 12
+# hex-alphabet chars ~8e-6 of the time) - the residual scan keeps its full
+# strictness with no exemption. 4.32 bits/letter, birthday bound n^2/2N:
+#   DEV  20^8  = 2.6e10: 50 devices -> 5e-8
+#   DING 20^12 = 4.1e15: 389 dings in 40.35 h measured (2026-10-03), 35 d ~8k
+#                -> 8e-9; even 1e5 -> 1.2e-6
+#   SES  20^12: 778 in 40.35 h (dialog + RMS session per ding), 35 d ~16k -> 3e-8
+#   CELL 20^12: 20 in 40.35 h
+# Measured on the whole live journal (603,004 entries, dry run 2026-10-03
+# 03:20Z): 7 DEV tokens for the 7 cameras that held a session, a bijection over
+# 389 sdp answers; 7,056 of 7,056 signalling blocks attributable; 0 withheld.
+# Ding created_at / requested_at (13-digit epoch-ms) become the signed offset
+# from the line's own UTC stamp, '<T:-1.234s>' (|offset| <= 1 day, so at most 5
+# integer digits): ding latency is measurable without an absolute id-like number
+# (median created_at -1.72 s, requested_at -0.026 s over those 389 dings).
+# Anything else there (no stamp, another length, out of range) stays <NUM>.
 # ---------------------------------------------------------------------------
 _V4NETS = [
     # The private ranges are built from integers, so no private-range dotted quad
@@ -254,11 +304,31 @@ R_SESSION = re.compile(r"(?i)(?<![\w-])(session[\"']?\s*:\s*[\"']?)(?=[A-Za-z0-9
 R_FP = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){7,}(?![0-9A-Fa-f])")
 # R5b MAC (defensive; 0 seen): exactly six pairs.
 R_MAC = re.compile(r"(?<![0-9A-Fa-f:-])[0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}(?:\1[0-9A-Fa-f]{2}){4}(?![0-9A-Fa-f:-])")
+# The key/value separator of the Ring-id rules: util.inspect 'key: v', JSON
+# '"key":"v"', JSON escaped once or more ('\"key\":\"v\"') and URL-encoded
+# ('key%3Dv', '%22key%22%3A%22v'). An id in an array ('cell_ids: [..]'), a
+# nested object ('doorbot: { id: .. }'), split across lines or in prose is out of
+# reach of ANY key-based rule: there a numeric id still meets num7 and a UUID the
+# uuid rule, but a short or alphanumeric one does not (0 such lines measured).
+_KV_SEP = r"(?:\\*[\"']|%22)?\s*(?:[:=]|%3[ad])\s*(?:\\*[\"']|%22)?"
+# R6a Ring ids that become KEYED PSEUDONYMS (see PSEUDONYMS): group 2 is the key,
+# group 3 the value (the same value class as R_RID).
+R_RID_PS = re.compile(
+    r"(?i)(?<![\w-])((doorbot_?id|device_?id|ding_?id|cell_?id)" + _KV_SEP + ")"
+    r"(?!(?:undefined|null|true|false)\b)([0-9A-Za-z_.:-]{4,})")
+# R6a' session UUIDs by key (dialog_id, RMS session_id) -> SES pseudonyms. A body
+# 'session_id' holds a JWT, which R1 has already replaced.
+R_SES_PS = re.compile(
+    r"(?i)(?<![\w-])((?:dialog_?id|session_?id)[\"']?\s*[:=]\s*[\"']?)"
+    r"([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})(?![0-9A-Fa-f])")
+# R6a'' ding epoch-ms -> offset from the line's stamp.
+R_TOFF = re.compile(r"(?i)(?<![\w-])((?:created|requested)_?at[\"']?\s*[:=]\s*[\"']?)(\d{13})(?![\d.])")
+T_MAX_MS = 86400 * 1000
 # R6 Ring account/device identifiers by key, and generic numeric "id".
 R_RID = re.compile(
     r"(?i)(?<![\w-])((?:doorbot_?id|device_?id|location_?id|ding_?id|cell_?id|account_?id|"
     r"user_?id|owner_?id|household_?id|hardware_?id|serial(?:_?number)?|mac_?address)"
-    r"[\"']?\s*[:=]\s*[\"']?)(?!(?:undefined|null|true|false)\b)([0-9A-Za-z_.:-]{4,})")
+    + _KV_SEP + r")(?!(?:undefined|null|true|false)\b)([0-9A-Za-z_.:-]{4,})")
 R_ID = re.compile(r"(?<![\w-])([\"']?id[\"']?\s*[:=]\s*[\"']?)(\d{5,})")
 # R6b UUIDs (dialog_id / RMS session ids / msid / cname): 2,808 distinct, none
 # seen across more than 2 hours.
@@ -273,7 +343,75 @@ R_HEX = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{16,}(?![0-9A-Fa-f])")
 R_NUM = re.compile(r"(?<![\d.])\d{7,}")
 
 
-def _ip6_repl(m, hits):
+PS_ALPHABET = "ghijklmnopqrstuvwxyz"     # 20 letters: no hex letter, no digit
+PS_LEN = {"DEV": 8, "DING": 12, "CELL": 12, "SES": 12}
+_PS_CLASS = {"doorbotid": "DEV", "deviceid": "DEV", "dingid": "DING", "cellid": "CELL"}
+
+
+class Pseudonyms:
+    """Keyed pseudonyms. The key never leaves this object: no repr, no log."""
+
+    def __init__(self, key):
+        self._key = key
+        self._cache = {}
+
+    def token(self, cls, value):
+        t = self._cache.get((cls, value))
+        if t is None:
+            n = int.from_bytes(hmac.new(self._key, ("%s\x00%s" % (cls, value)).encode("utf-8", "replace"),
+                                        hashlib.sha256).digest(), "big")
+            out = []
+            for _ in range(PS_LEN[cls]):
+                n, r = divmod(n, len(PS_ALPHABET))
+                out.append(PS_ALPHABET[r])
+            t = "<%s:%s>" % (cls, "".join(out))
+            if len(self._cache) > 4096:
+                self._cache.clear()
+            self._cache[(cls, value)] = t
+        return t
+
+
+def _ps_rid(m, hits, ctx=None):
+    ps = ctx[0] if ctx else None
+    if ps is None:              # no key: the constant, exactly as before
+        hits["ring_id"] = hits.get("ring_id", 0) + 1
+        return m.group(1) + "<RID>"
+    val = m.group(3)
+    core = val.rstrip(".:-")    # sentence punctuation is not part of the id
+    # (?i) is Unicode: 'i' also matches U+0130/U+0131, so a key such as
+    # 'doorbot_<U+0131>d' matches yet lower-cases to no class. FAIL CLOSED to the
+    # constant: a KeyError here failed every run until the journal vacuumed the
+    # line, and the run after that recorded a GAP (10-03 review).
+    cls = _PS_CLASS.get(m.group(2).lower().replace("_", ""))
+    if cls is None:
+        hits["ring_id"] = hits.get("ring_id", 0) + 1
+        return m.group(1) + "<RID>"
+    name = "ps_" + cls.lower()
+    hits[name] = hits.get(name, 0) + 1
+    return m.group(1) + ps.token(cls, core) + val[len(core):]
+
+
+def _ps_ses(m, hits, ctx=None):
+    ps = ctx[0] if ctx else None
+    if ps is None:
+        hits["uuid"] = hits.get("uuid", 0) + 1
+        return m.group(1) + "<UUID>"
+    hits["ps_ses"] = hits.get("ps_ses", 0) + 1
+    return m.group(1) + ps.token("SES", m.group(2).lower())
+
+
+def _t_offset(m, hits, ctx=None):
+    line_ms = ctx[1] if ctx else None
+    if line_ms is None:
+        return m.group(0)       # no stamp to refer to: num7 makes it <NUM>
+    d = int(m.group(2)) - line_ms
+    if abs(d) > T_MAX_MS:
+        return m.group(0)       # not an epoch-ms near this line: <NUM>
+    hits["ts_offset"] = hits.get("ts_offset", 0) + 1
+    return m.group(1) + "<T:%s%d.%03ds>" % ("-" if d < 0 else "+", abs(d) // 1000, abs(d) % 1000)
+
+
+def _ip6_repl(m, hits, ctx=None):
     run = m.group(0)
     if run.count(":") < 2:
         return run
@@ -312,7 +450,7 @@ def _port_split(core):
     return "", ""
 
 
-def _ip4_repl(m, hits):
+def _ip4_repl(m, hits, ctx=None):
     try:
         octs = [int(g) for g in m.groups()]
     except ValueError:
@@ -324,29 +462,30 @@ def _ip4_repl(m, hits):
 
 
 def _keyed(tag, name):
-    def f(m, hits):
+    def f(m, hits, ctx=None):
         hits[name] = hits.get(name, 0) + 1
         return m.group(1) + tag
     return f
 
 
 def _whole(tag, name):
-    def f(m, hits):
+    def f(m, hits, ctx=None):
         hits[name] = hits.get(name, 0) + 1
         return tag
     return f
 
 
-def _bearer(m, hits):
+def _bearer(m, hits, ctx=None):
     hits["cred"] = hits.get("cred", 0) + 1
     return m.group(1) + " <CRED>"
 
 
 # (name, regex, replacement, prefilter) - THE ORDER IS PART OF THE RULE: JWT;
 # IPv6 (incl. ::ffff:a.b.c.d) before IPv4; ICE/credential values; DTLS
-# fingerprints; Ring device ids; 16+ hex; bare 7+ digits. Each prefilter is a
-# NECESSARY condition for its regex (it only saves time): msg is the message,
-# low its lower-case copy.
+# fingerprints; Ring ids (the pseudonymised keys before the constant ones, the
+# keyed session UUIDs before the generic UUID, the ding stamps before num7);
+# 16+ hex; bare 7+ digits. Each prefilter is a NECESSARY condition for its regex
+# (it only saves time): msg is the message, low its lower-case copy.
 _CRED_KW = ("pwd", "ufrag", "user", "pass", "secret", "api", "token")
 RULES = [
     ("jwt", R_JWT, _whole("<JWT>", "jwt"), lambda msg, low: "eyJ" in msg),
@@ -363,8 +502,12 @@ RULES = [
     ("rtsp_session", R_SESSION, _keyed("<SESS>", "rtsp_session"), lambda msg, low: "session" in low),
     ("fingerprint", R_FP, _whole("<FP>", "fingerprint"), lambda msg, low: msg.count(":") >= 7),
     ("mac", R_MAC, _whole("<MAC>", "mac"), lambda msg, low: msg.count(":") >= 5 or msg.count("-") >= 5),
+    ("ring_ps", R_RID_PS, _ps_rid,
+     lambda msg, low: "doorbot" in low or "device" in low or "ding" in low or "cell" in low),
     ("ring_id", R_RID, _keyed("<RID>", "ring_id"), lambda msg, low: "id" in low or "serial" in low or "mac" in low),
     ("id_num", R_ID, _keyed("<RID>", "ring_id"), lambda msg, low: "id" in low),
+    ("ses_ps", R_SES_PS, _ps_ses, lambda msg, low: "dialog" in low or "session" in low),
+    ("ts_offset", R_TOFF, _t_offset, lambda msg, low: "created" in low or "requested" in low),
     ("uuid", R_UUID, _whole("<UUID>", "uuid"), lambda msg, low: msg.count("-") >= 4),
     ("hk_code", R_HK, _whole("<HKCODE>", "hk_code"), lambda msg, low: msg.count("-") >= 2),
     ("geo", R_GEO, _keyed("<GEO>", "geo"), lambda msg, low: "la" in low or "ln" in low or "lo" in low),
@@ -373,12 +516,20 @@ RULES = [
 ]
 
 
-def redact(msg, hits):
+def redact(msg, hits, ps=None, line_ms=None):
+    """ps: the run's Pseudonyms (None: constant placeholders); line_ms: the
+    line's own UTC stamp in epoch-ms (None: ding stamps stay <NUM>)."""
+    ctx = (ps, line_ms)
     for _name, rx, fn, pre in RULES:
         if pre is not None and not pre(msg, msg.lower()):
             continue
-        msg = rx.sub(lambda m, fn=fn: fn(m, hits), msg)
+        msg = rx.sub(lambda m, fn=fn: fn(m, hits, ctx), msg)
     return msg
+
+
+def stamp_ms(ts):
+    """'YYYY-MM-DD HH:MM:SS.fff..' (UTC) -> epoch-ms, integer arithmetic."""
+    return int(utc_epoch(ts[:19])) * 1000 + (int(ts[20:23].ljust(3, "0")) if len(ts) > 20 else 0)
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +537,12 @@ def redact(msg, hits):
 # Any hit withholds the line. Must read 0 on a clean archive.
 # Credential KEYS count only as an ASSIGNMENT ('password: x', 'token=x'); a
 # credential WORD followed by whitespace counts only before an opaque run.
+# After a credential or Ring-id key only an EXACT placeholder of the rules is
+# exempt: a raw value that merely starts with '<' ('password=<Hunter2..>',
+# 'doorbot_id: <123456>', 'doorbot_id: <DEV:abc123XYZ>') is a value like any other.
 # ---------------------------------------------------------------------------
+_PH = (r"(?-i:<(?:JWT|EMAIL|CRED|SESS|FP|MAC|RID|UUID|HKCODE|GEO|HEX|NUM|IP[46]:[a-z]+|"
+       r"DEV:[g-z]{8}|(?:DING|CELL|SES):[g-z]{12}|T:[+-][0-9]{1,5}\.[0-9]{3}s)>)")
 RESIDUAL = [
     ("jwt", re.compile(r"eyJ")),
     ("dotted_quad", re.compile(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")),
@@ -395,11 +551,13 @@ RESIDUAL = [
     ("hex_colon4", re.compile(r"(?i)(?<![0-9a-f])[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){3,}")),
     ("cred_key", re.compile(r"(?i)(?:ice-pwd|ice-ufrag|usernamefragment|password|passwd|pwd|"
                             r"username|ufrag|secret|token|authorization|cookie|credential|api[-_]?key|signature)"
-                            r"(?:\\?[\"'])?\s*(?:[:=]|%3[ad])\s*(?:\\?[\"'])?(?!<|(?:bearer|basic)\s+<|null\b|undefined\b|true\b|false\b|\\?[\"',})\]]|$)\S")),
+                            r"(?:\\?[\"'])?\s*(?:[:=]|%3[ad])\s*(?:\\?[\"'])?(?!" + _PH + r"|(?:bearer|basic)\s+" + _PH
+                            + r"|null\b|undefined\b|true\b|false\b|\\?[\"',})\]]|$)\S")),
     ("cred_word", re.compile(r"(?i)(?<![\w-])(?:token|secret|password|ufrag|bearer)\s+(?!<)" + _OPAQUE12C)),
     ("rtsp_session", re.compile(r"(?i)(?<![\w-])session[\"']?\s*:\s*[\"']?(?!<)(?=[A-Za-z0-9$_.+-]*\d)[A-Za-z0-9$_.+-]{6,}")),
-    ("ring_id_key", re.compile(r"(?i)(?:doorbot_?id|device_?id|location_?id|ding_?id)"
-                               r"[\"']?\s*[:=]\s*[\"']?(?!<|null\b|undefined\b)[0-9A-Za-z]")),
+    ("ring_id_key", re.compile(r"(?i)(?:doorbot_?id|device_?id|location_?id|ding_?id|cell_?id)"
+                               r"(?:\\*[\"']|%22)?\s*(?:[:=]|%3[ad])\s*(?:\\*[\"']|%22)?"
+                               r"(?!" + _PH + r"|null\b|undefined\b|true\b|false\b)[<0-9A-Za-z]")),
     ("hex12", re.compile(r"(?i)[0-9a-f]{12,}")),
     ("digits7", re.compile(r"\d{7,}")),
     ("email", re.compile(r"@[A-Za-z0-9-]+\.[A-Za-z]{2,}")),
@@ -434,7 +592,7 @@ def withhold(line, kinds):
     return head + "<WITHHELD residual=%s>" % ",".join(kinds)
 
 
-def process_line(raw, hits):
+def process_line(raw, hits, ps=None):
     """raw journal line -> (archived text, residual kinds or []).
     The verbose prefix '<ts> host ident[pid]: ' is kept VERBATIM: cam_flap's
     MOTION_RE anchors on the ': ' before the camera name, and a stripped archive
@@ -442,7 +600,7 @@ def process_line(raw, hits):
     residual scan on the WHOLE archived line."""
     m = PREFIX_RE.match(raw)
     head, msg = (raw[:m.end()], raw[m.end():]) if m else ("", raw)
-    red = head + redact(msg, hits)
+    red = head + redact(msg, hits, ps, stamp_ms(m.group(1)) if m else None)
     kinds = residual(re.sub(r"\[\d+\]: $", "[]: ", head) + red[len(head):])
     if kinds:
         return withhold(red, kinds), kinds
@@ -458,7 +616,7 @@ def process_line(raw, hits):
 # live. A dump is collapsed to its url line plus a note of what was dropped:
 #   '  url: '/endpoint/.../public/<id>/<HEX>/takePicture', <request dump
 #    collapsed: 15 lines, GET, user-agent Python-urllib/3.14>'
-# so 'public/(\d+)/[^/]+/takePicture' still counts probes per device and the
+# so cam_flap's 'public/(\d+)/(?:[a-f0-9]+|<HEX>)/takePicture' still counts probes per device and the
 # user-agent still tells a watchdog probe from a dashboard pull. The grammar is
 # STRICT (exact opener, exact closer, allow-listed keys at fixed indents, one url
 # line, no nested object, one writer): anything else - a browser request with
@@ -875,6 +1033,80 @@ def save_state(st):
     os.replace(tmp, STATE)
 
 
+# ---------------------------------------------------------------------------
+# Pseudonym key. Read at the start of a run, BEFORE the archive scan may repair
+# or set aside a file; a MISSING one is generated in memory and saved only AFTER
+# this run's members are on disk, so every key that ever produced an archived
+# token is preceded in the archive by its REKEY line - at the head of EVERY
+# member the rekeying run appends, so each day file it touches says where its
+# tokens change key:
+#  - nothing written (no new entry, an error): the key is dropped unsaved and the
+#    next run generates another, with its own REKEY line;
+#  - killed between the members and the key save: the next run finds no key and
+#    writes a new REKEY line before its tokens.
+# A key file of the wrong size is replaced the same way (REKEY says why); any
+# other read error FAILS the run (status=error, nothing written, nothing
+# repaired): a transient EIO must not silently split the pseudonyms.
+# ---------------------------------------------------------------------------
+def load_key():
+    """-> (key or None, why a new key is needed or None). Creates nothing."""
+    try:
+        with open(KEY_FILE, "rb") as fh:
+            key = fh.read(KEY_BYTES + 1)    # the size is all that is checked
+    except FileNotFoundError:
+        return None, "no key file"
+    if len(key) > KEY_BYTES:
+        return None, "the key file held more than %d bytes" % KEY_BYTES
+    if len(key) != KEY_BYTES:
+        return None, "the key file held %d bytes, not %d" % (len(key), KEY_BYTES)
+    return key, None
+
+
+def save_key(key):
+    """Atomic: a 0600 temp file, every byte written, fsync, rename over KEY_FILE,
+    fsync the dir. A failure removes the temp file: it holds the key."""
+    tmp = KEY_FILE + ".tmp.%d" % os.getpid()
+    try:
+        os.remove(tmp)
+    except FileNotFoundError:
+        pass
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            view = memoryview(key)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, KEY_FILE)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    fsync_dir()
+
+
+def drop_stale_key_tmps():
+    """Under the run lock, never in a dry run: a key save KILLED between its temp
+    write and the rename (SIGKILL, power cut) left the key under another pid's
+    temp name, which nothing else would ever remove."""
+    pre = os.path.basename(KEY_FILE) + ".tmp."
+    try:
+        names = os.listdir(ARCHIVE_DIR)
+    except OSError:
+        return
+    for n in names:
+        if n.startswith(pre):
+            try:
+                os.remove(os.path.join(ARCHIVE_DIR, n))
+            except OSError:
+                pass
+
+
 def clean_events(st):
     ev = st.get("events") if isinstance(st.get("events"), list) else []
     return [e for e in ev if isinstance(e, dict) and isinstance(e.get("at"), (int, float))
@@ -939,6 +1171,36 @@ def ha_process_age():
         return None
 
 
+def peak_rss_mb():
+    """This script's own peak RSS: VmHWM of /proc/self/status, MB, 1 dp; None
+    when unavailable. NOT getrusage(RUSAGE_SELF).ru_maxrss: that is the
+    PROCESS's high-water mark, and Linux folds the replaced memory map's peak
+    into it at execve. HA Core starts this command by forking itself (the child's
+    map starts with Core's resident set) and exec'ing the shell, which execs
+    python in the same process, so ru_maxrss read Core's 711.2 MB on every run
+    (10-03 review). VmHWM belongs to the map the last exec created."""
+    try:
+        with open(PROC_STATUS) as fh:
+            for ln in fh:
+                if ln.startswith("VmHWM:"):
+                    return round(int(ln.split()[1]) / 1024.0, 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def lag_minutes(now, through):
+    """Minutes from the newest archived line to now, 1 dp, clamped at 0 AFTER
+    rounding: a line stamped after `now` (the run's own start) published -0.0.
+    The clamp is deliberate: `now` is the run's START, so every line the engine
+    logs while a run streams lands 'in the future' (up to the 60 s budget), and
+    such a negative is an artifact, not a clock fault. lag_min's readers (the
+    'clock' page text, the problem sensor's attribute) read it as an age; the
+    warnings use the unclamped lag."""
+    lag = round((now - utc_epoch(through)) / 60.0, 1)
+    return lag if lag > 0 else 0.0
+
+
 # ---------------------------------------------------------------------------
 def emit(payload):
     # Every key here must also be in the package's json_attributes (an
@@ -961,11 +1223,7 @@ def emit(payload):
         "note": None, "error": None, "summary": "", "updated_at": None,
     }
     base.update(payload)
-    try:
-        if resource is not None:
-            base["rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, 1)
-    except Exception:  # noqa: BLE001
-        pass
+    base["rss_mb"] = peak_rss_mb()
     try:
         sys.stdout.write(json.dumps(base, separators=(",", ":")) + "\n")
         sys.stdout.flush()
@@ -991,7 +1249,7 @@ def _since(st, now):
     lr = st.get("last_run") if isinstance(st.get("last_run"), dict) else {}
     through = lr.get("through")
     try:
-        lag = round((now - utc_epoch(through)) / 60.0, 1) if through else None
+        lag = lag_minutes(now, through) if through else None
     except Exception:  # noqa: BLE001
         lag = None
     return through, lag
@@ -1039,7 +1297,15 @@ def run(dry=False, now=None):
         budget = min(budget, STARTUP_BUDGET_S)
         notes.append("ran during HA startup with a %.0f s budget: the archive was %.1f h behind" % (budget, lag / 60.0))
 
+    # ---- pseudonym key (see load_key): read BEFORE scan_archive may repair or set
+    # aside a file, so a key read error fails a run that has changed nothing (a
+    # set-aside whose run then failed left no RESYNC behind: the next run STARTed)
+    if not dry:
+        drop_stale_key_tmps()
+    disk_key, key_why = load_key()
+
     arch = scan_archive(notes, repair=not dry)
+    had_lines = arch["has_lines"]   # what a REAL run finds (CAMLOG_DRY_BACK pretends)
     marker = arch["marker"]
     if dry and not arch["has_lines"] and os.environ.get("CAMLOG_DRY_BACK"):
         marker = dry_marker(int(os.environ["CAMLOG_DRY_BACK"]))
@@ -1052,6 +1318,28 @@ def run(dry=False, now=None):
             notes.append("state.json was one run behind the archive (seq %d committed)" % marker["seq"])
     except (TypeError, ValueError):
         interrupted = True
+
+    # A dry run always uses an ephemeral key and saves nothing; it still reports
+    # whether a real run would write REKEY.
+    key = disk_key if (disk_key is not None and not dry) else os.urandom(KEY_BYTES)
+    new_key = key if (disk_key is None and not dry) else None
+    disk_key = None
+    ps = Pseudonyms(key)
+    key = None
+    # REKEY only where tokens from an earlier key (or the constant placeholders
+    # of the pre-pseudonym archive) can exist; a first run starts with START.
+    rekey = key_why if (key_why and (had_lines or list_days())) else None
+    if dry:
+        notes.append("pseudonym key: ephemeral (dry run)%s"
+                     % ("; a real run would write REKEY (%s)" % key_why if rekey else ""))
+    if key_why and state.get("ps_key_at"):
+        # after deploy the only REKEY is the first; a later one means the key was
+        # deleted, cut short or replaced, and must not pass as an ordinary run
+        warns.append("pseudonym key lost (%s): a new key starts at the next REKEY line; tokens on its two "
+                     "sides are not comparable" % key_why)
+    elif new_key is None and not dry and not state.get("ps_key_at"):
+        state["ps_key_at"] = int(now)
+    census = Census() if dry else None
 
     # ---- fetch: from the verified cursor, else the whole journal from its head
     passes = 0
@@ -1111,22 +1399,41 @@ def run(dry=False, now=None):
     capped = False
     cur_ts = [None]
 
+    def new_member(day):
+        # A rekeying run heads EVERY member it appends with the REKEY line - also
+        # a CURSOR-only one, since later runs append new-key tokens to that file -
+        # so each day file says where its tokens change key. Nothing written: no
+        # REKEY line and no saved key.
+        b = bufs[day] = DayBuf()
+        if rekey:
+            b.add(MARK + "REKEY new pseudonym key (%s): <DEV:..> <DING:..> <CELL:..> <SES:..> tokens "
+                  "below this line are not comparable with those above it" % rekey, None)
+        return b
+
     def put(text, ts, held=False):
         day = (ts or cur_ts[0] or day_of_epoch(now))[:10]
         b = bufs.get(day)
         if b is None:
-            b = bufs[day] = DayBuf()
+            b = new_member(day)
         b.add(text, ts)
         if held:
             b.withheld += 1
 
     def out_line(raw, ts):
         nonlocal archived, withheld, newest_out
-        text, kinds = process_line(raw, hits)
+        try:
+            text, kinds = process_line(raw, hits, ps)
+        except Exception:  # noqa: BLE001 - ONE line must never stop the archive
+            # (fails closed: no text; a run that raised here was retried on the
+            # same line every hour until the journal vacuumed it into a GAP)
+            kinds = ["redact_error"]
+            text = withhold(raw, kinds)
         if kinds:
             withheld += 1
             for k in kinds:
                 residual_counts[k] = residual_counts.get(k, 0) + 1
+        if census is not None:
+            census.feed(text)
         put(text, ts, bool(kinds))
         archived += 1
         if ts and (newest_out is None or ts > newest_out):
@@ -1245,7 +1552,7 @@ def run(dry=False, now=None):
         existing = list_days()
         final_day = max(([existing[-1]] if existing else []) + list(bufs))
         if final_day not in bufs:
-            bufs[final_day] = DayBuf()
+            new_member(final_day)
         bufs[final_day].add(MARK + "CURSOR seq=%d ts=%s c=%s" % (seq, commit[1] or "-", commit[0]), None)
         for day in sorted(bufs):
             b = bufs[day]
@@ -1262,6 +1569,15 @@ def run(dry=False, now=None):
             ds["last"] = b.last or ds.get("last")
             day_stats[day] = ds
         fsync_dir()
+        if rekey:
+            notes.append("REKEY: a new pseudonym key started in this run (%s)" % rekey)
+        if new_key is not None:
+            # AFTER the members (see load_key); a failure costs a REKEY, not a line
+            try:
+                save_key(new_key)
+                state["ps_key_at"] = int(now)
+            except OSError as exc:
+                warns.append("pseudonym key not saved (%s): the next run starts another key" % type(exc).__name__)
     elif bufs:
         new_bytes = sum(len(b.finish()) for b in bufs.values())
 
@@ -1354,7 +1670,7 @@ def run(dry=False, now=None):
     if not clock_bad:
         events = [e for e in events if e["at"] >= now - RETAIN_DAYS * 86400]
     events = events[-EVENTS_KEPT:]
-    lag = round((now - utc_epoch(through)) / 60.0, 1) if through else None
+    lag = lag_minutes(now, through) if through else None
     files = list_days() if not dry else []
     total_b = sum(os.path.getsize(day_path(d)) for d in files) if files else 0
     today = day_of_epoch(now)
@@ -1374,6 +1690,8 @@ def run(dry=False, now=None):
         status = "ok"
     if capped:
         notes.append("work budget reached after %d entries; the next run continues from the cursor" % n_entries)
+    if census is not None:
+        notes.append(census.text())
     if not dry:
         state.update({
             "version": 2, "days": day_stats, "events": events,
@@ -1428,9 +1746,144 @@ def run(dry=False, now=None):
     emit(out)
 
 
+# ---------------------------------------------------------------------------
+# PSEUDONYM CENSUS over ARCHIVED (redacted) lines - counts only, for --scan and
+# --dry-run. A Ring signalling block ('incoming message {' .. '}') with method
+# 'sdp' is answered by '[<camera>] setRemoteDescription': measured on the 10-01..
+# 10-03 archive, 476 of 476 sdp blocks within 46 ms and never with another sdp
+# block in between. That pairs each <DEV:..> token with a camera name (held in
+# memory, never printed); every other block carrying the same token is then
+# attributable. The mapping must be a bijection: one token per camera.
+# ---------------------------------------------------------------------------
+PS_TOKEN_RE = re.compile(r"<(DEV|DING|CELL|SES):([^<>\s]*)>")
+T_TOKEN_RE = re.compile(r"<T:([^<>\s]*)>")
+_PS_SHAPE = dict((t, re.compile(r"[%s]{%d}" % (PS_ALPHABET, n))) for t, n in PS_LEN.items())
+_T_SHAPE = re.compile(r"[+-]\d{1,5}\.\d{3}s")
+# Key AND token together (one line may carry both stamps). ASCII case folding:
+# under Unicode (?i) 's' also matches U+017F, and the lower-cased key then names
+# no list (a KeyError that stopped --scan and the dry run).
+_T_KEY = re.compile(r"(created|requested)_?at[\"']?\s*[:=]\s*[\"']?<T:([^<>\s]*)>", re.I | re.A)
+_T_NUM = re.compile(r"(?:created|requested)_?at[\"']?\s*[:=]\s*[\"']?<NUM>", re.I)
+_WEBRTC_RE = re.compile(r"^\[([^\]]{1,64})\] (setRemoteDescription|sendIceCandidate|iceConnectionState)\b")
+_METHOD_RE = re.compile(r"^  method: '(\w+)'")
+_DEV_KEY_RE = re.compile(r"(?i)(?:doorbot_?id|device_?id)[\"']?\s*[:=]\s*[\"']?<DEV:([a-z]+)>")
+
+
+class Census:
+    def __init__(self):
+        self.tokens = dict((t, collections.Counter()) for t in PS_LEN)
+        self.bad = 0
+        self.t = {"created": [], "requested": []}
+        self.t_other = self.t_num = 0
+        self.blocks = self.blocks_dev = self.ambiguous = 0
+        self.dev_blocks = collections.Counter()
+        self.cams = set()
+        self.pairs = {}
+        self._blk = None
+        self._sdp_dev = None
+        self.lines = 0
+
+    def feed(self, line):
+        self.lines += 1
+        m = PREFIX_RE.match(line)
+        msg = line[m.end():] if (m and m.group(2)) else line
+        if "<" in msg:
+            for tm in PS_TOKEN_RE.finditer(msg):
+                if _PS_SHAPE[tm.group(1)].fullmatch(tm.group(2)):
+                    self.tokens[tm.group(1)][tm.group(2)] += 1
+                else:
+                    self.bad += 1
+            good = 0
+            for tm in T_TOKEN_RE.finditer(msg):
+                if _T_SHAPE.fullmatch(tm.group(1)):
+                    good += 1
+                else:
+                    self.bad += 1
+            for km in _T_KEY.finditer(msg):
+                v = km.group(2)
+                if _T_SHAPE.fullmatch(v):
+                    good -= 1
+                    self.t[km.group(1).lower()].append(
+                        (1 if v[0] == "+" else -1) * (int(v[1:-5]) * 1000 + int(v[-4:-1])))
+            self.t_other += good        # well-formed <T:> under no ding-stamp key
+            if _T_NUM.search(msg):
+                self.t_num += 1         # a ding stamp that stayed <NUM>
+        if msg == "incoming message {":
+            self._blk = {"method": None, "dev": None, "n": 0}
+            return
+        if self._blk is not None and (msg.startswith("[") or self._blk["n"] > DUMP_MAX_LINES * 10):
+            self._blk = None        # never closed: a cut block attributes nothing
+        if self._blk is not None:
+            self._blk["n"] += 1
+            if msg == "}":
+                blk, self._blk = self._blk, None
+                self.blocks += 1
+                if blk["dev"]:
+                    self.blocks_dev += 1
+                    self.dev_blocks[blk["dev"]] += 1
+                    if blk["method"] == "sdp":
+                        if self._sdp_dev is not None:
+                            self.ambiguous += 1
+                        self._sdp_dev = blk["dev"]
+                return
+            mm = _METHOD_RE.match(msg)
+            if mm:
+                self._blk["method"] = mm.group(1)
+            dm = _DEV_KEY_RE.search(msg)
+            if dm:
+                self._blk["dev"] = dm.group(1)
+            return
+        wm = _WEBRTC_RE.match(msg)
+        if wm:
+            self.cams.add(wm.group(1))
+            if wm.group(2) == "setRemoteDescription" and self._sdp_dev is not None:
+                self.pairs.setdefault(self._sdp_dev, collections.Counter())[wm.group(1)] += 1
+                self._sdp_dev = None
+
+    def result(self):
+        major = dict((d, c.most_common(1)[0][0]) for d, c in self.pairs.items())
+        conflicts = sum(sum(c.values()) - c.most_common(1)[0][1] for c in self.pairs.values())
+        mapped_cams = set(major.values())
+
+        def med(v):
+            v = sorted(v)
+            return round(v[len(v) // 2] / 1000.0, 3) if v else None
+        return {
+            "tokens": dict((t, [sum(c.values()), len(c)]) for t, c in self.tokens.items()),
+            "bad_tokens": self.bad,
+            "t_offsets": {"created_at": len(self.t["created"]), "requested_at": len(self.t["requested"]),
+                          "other": self.t_other, "stayed_num": self.t_num},
+            "t_median_s": {"created_at": med(self.t["created"]), "requested_at": med(self.t["requested"])},
+            "blocks": self.blocks, "blocks_dev": self.blocks_dev,
+            "blocks_attributable": sum(n for d, n in self.dev_blocks.items() if d in major),
+            "dev_distinct": len(self.tokens["DEV"]), "cameras": len(self.cams),
+            "sdp_pairs": sum(sum(c.values()) for c in self.pairs.values()),
+            "dev_paired": len(major), "cameras_paired": len(mapped_cams),
+            "bijective": bool(major) and len(mapped_cams) == len(major) and conflicts == 0,
+            "conflicts": conflicts, "ambiguous": self.ambiguous,
+        }
+
+    def text(self):
+        r = self.result()
+        tk = r["tokens"]
+        return ("census: DEV %d distinct, cameras %d; sdp pairs %d -> %d DEV x %d cameras, %s, %d conflicts, "
+                "%d ambiguous; blocks %d, %d with DEV, %d attributable; DING %d, CELL %d, SES %d distinct; "
+                "T created_at %d (median %s s), requested_at %d (median %s s), other %d, stayed <NUM> %d; "
+                "bad tokens %d" % (
+                    r["dev_distinct"], r["cameras"], r["sdp_pairs"], r["dev_paired"], r["cameras_paired"],
+                    "bijective" if r["bijective"] else "NOT bijective", r["conflicts"], r["ambiguous"],
+                    r["blocks"], r["blocks_dev"], r["blocks_attributable"], tk["DING"][1], tk["CELL"][1],
+                    tk["SES"][1], r["t_offsets"]["created_at"], r["t_median_s"]["created_at"],
+                    r["t_offsets"]["requested_at"], r["t_median_s"]["requested_at"], r["t_offsets"]["other"],
+                    r["t_offsets"]["stayed_num"], r["bad_tokens"]))
+
+
 def scan_files(paths):
     """Reviewer tool: residual-scan archive files; prints counts, never lines.
-    Marker lines are checked for SHAPE (a CURSOR line may hold only a cursor)."""
+    Marker lines are checked for SHAPE (a CURSOR line may hold only a cursor).
+    'census' counts the pseudonym tokens (a malformed one is a bad token): a
+    LIST, one census per key segment - a REKEY line starts the next one, since
+    tokens on its two sides are not comparable (one camera, two tokens)."""
     res = {}
     for p in paths:
         texts, valid, size, nmem = read_members(p)
@@ -1438,6 +1891,7 @@ def scan_files(paths):
         kinds = {}
         marks = {}
         bad_marks = 0
+        census = [Census()]
         for ln in "".join(texts).split("\n"):
             if not ln:
                 continue
@@ -1450,6 +1904,8 @@ def scan_files(paths):
                         bad_marks += 1
                 elif residual(_strip_marker_ts(ln)):
                     bad_marks += 1
+                if k == "REKEY" and census[-1].lines:
+                    census.append(Census())
                 continue
             n += 1
             if "<WITHHELD" in ln:
@@ -1457,8 +1913,10 @@ def scan_files(paths):
                 continue
             for k in residual(ln):
                 kinds[k] = kinds.get(k, 0) + 1
+            census[-1].feed(ln)
         res[os.path.basename(p)] = {"lines": n, "withheld": w, "residual": kinds, "markers": marks,
-                                    "bad_markers": bad_marks, "members": nmem, "complete": valid == size}
+                                    "bad_markers": bad_marks, "members": nmem, "complete": valid == size,
+                                    "census": [c.result() for c in census]}
     sys.stdout.write(json.dumps(res) + "\n")
 
 

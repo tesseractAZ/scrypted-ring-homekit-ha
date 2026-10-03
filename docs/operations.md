@@ -490,7 +490,7 @@ Three writers matter:
 | `.cam_motion_state.json` | `cam_motion.py` | 14 B (measured on the reference fleet, 2026-09-14) | 48 | negligible |
 | `.cam_vision_state.json` | `cam_vision.py` | 43,965 B (measured on the reference fleet, 2026-09-14) | 720 | ~32 MB (derived) |
 
-| `cam_engine.log.d/` | `cam_logarchive.py` | one gzip file per UTC day, ~1.4 MiB/day after the request-dump collapse; 35 days kept (~50 MB), plus a small `state.json` | 24 appends + 24 `state.json` renames | ~1.4 MiB (measured on the reference fleet's journal, 2026-10-02) |
+| `cam_engine.log.d/` | `cam_logarchive.py` | one gzip file per UTC day, ~1.4 MiB/day after the request-dump collapse; 35 days kept (~50 MB), plus a small `state.json` and the 32-byte pseudonym key `.pseudonym.key` (written once; again only after a REKEY) | 24 appends + 24 `state.json` renames | ~1.4 MiB (measured on the reference fleet's journal, 2026-10-02) |
 
 In total that is about 35 MB/day written to `/config` (derived). This is worth knowing on SD-card storage.
 

@@ -810,8 +810,7 @@ message, in order: JWTs and e-mail addresses; IPv6 including `::ffff:a.b.c.d`
 before IPv4 (classified, never kept); credentials (`Authorization`/`Cookie`,
 bearer/basic tokens, ICE `ice-pwd`/`ice-ufrag`/`usernameFragment`, quoted
 passphrases, password/username/token/secret/api-key assignments, a credential
-word before an opaque run); RTSP session ids; DTLS fingerprints and MACs; Ring
-device ids by key, UUIDs, HomeKit codes, coordinates; then runs of 16+ hex and
+word before an opaque run); RTSP session ids; DTLS fingerprints and MACs; Ring ids by key (pseudonyms for camera, ding, cell and session ids, below), UUIDs, HomeKit codes, coordinates; then runs of 16+ hex and
 bare runs of 7+ digits. An independent **residual scan** runs over the whole
 archived line and withholds rather than writes anything that still looks like
 an identifier: JWT prefixes, dotted quads (also URL-encoded), IPv6 shapes,
@@ -824,6 +823,43 @@ Authentication prose such as "Refresh token is not valid" survives. Measured on
 the whole live journal (574,598 entries): 0 lines withheld, 0 residual hits;
 5,531 distinct secret values extracted independently from the raw lines, none
 present in the archive.
+
+**Pseudonyms.** The Ring identifiers that a review needs in order to tie
+messages together are replaced by keyed pseudonyms instead of a constant
+placeholder: `doorbot_id`/`device_id` become `<DEV:xxxxxxxx>` (one per camera),
+`ding_id` `<DING:…>`, `cell_id` `<CELL:…>`, and the UUID-valued
+`dialog_id`/`session_id` `<SES:…>` (dialog and media session share the class,
+so an equal value stays visibly equal). A token is HMAC-SHA256 over the field
+class and the value, under a 32-byte key, written in base 20 with the letters
+`g`-`z`: 8 letters for cameras, 12 for the rest. That alphabet has no hex
+letter, no digit and no capital, so a token can never trip the residual scan,
+which keeps its full strictness for raw values; at 12 letters the chance of
+any collision among 100,000 values is about 1e-6. Account-level ids (location,
+user, account), hardware ids, serials and MACs stay the constant `<RID>`, and
+other UUIDs (SDP stream ids) stay `<UUID>`. A ding's `created_at` and
+`requested_at` (epoch milliseconds) become the signed offset from the line's
+own UTC stamp, for example `<T:-1.722s>`, so the latency from Ring to the
+engine can be measured without keeping an absolute number; anything else
+there stays `<NUM>`. The key lives in `.pseudonym.key` in the archive
+directory (0600, never logged, outside every backup like the archive). It is a
+dotfile so that a `*` copy of the directory leaves it behind: pull day files by
+name and never copy the key off the host, because with the key the camera ids
+can be recovered from their tokens by brute force. A run that finds no key, or
+a key of the wrong size, generates a new one and saves it only after its lines
+are on disk. When the archive already has day files, that run writes
+`#~camlog~ REKEY …` at the head of every gzip member it appends (a fresh
+archive starts with `START` instead), so each day file shows where its tokens
+change key: tokens on the two sides of a REKEY line are not comparable. A key
+lost after it was in use also raises a `pseudonym key lost` warning. Any other
+error reading the key fails the run before anything is written or repaired. A
+dry run always uses a throwaway key and saves nothing. Measured on
+the whole retained journal (about 600,000 entries): one token per camera that
+held a session, an exact one-to-one match with the camera names over every
+`sdp` answer, every signalling block attributable to a camera (previously
+about 19 % could not be), 0 lines withheld. Ring ids are recognised by key in
+the `key: value`, JSON, escaped-JSON and URL-encoded forms; an id inside an
+array, a nested object or split across lines is out of reach of any key-based
+rule (a numeric id or a UUID there still meets the number and UUID rules).
 
 **Request-dump collapse.** The two probing monitors fetch the same `takePicture`
 webhooks every 120 s, and the engine logs each request as a 15-line object
@@ -857,9 +893,16 @@ member of `camera_monitor_stalled`, with a 3 h bar.
 
 **Measured** in the core container: an hourly increment of 15,000 entries takes
 about 2 s at 25 MB RSS; the whole journal about 85-89 s at 45 MB, so a first backfill takes two to
-three runs. `cam_logarchive.py --dry-run` fetches, collapses,
-redacts and scans, and writes nothing; `--scan FILE...` reports per-file line,
-withheld, residual and marker counts.
+three runs. `cam_logarchive.py --dry-run` fetches, collapses, redacts and scans, writes
+nothing, and adds a pseudonym census to its note (counts only: tokens per
+class, cameras, sdp pairs, whether the token-to-camera map is one-to-one,
+attributable blocks, offset medians); `--scan FILE...` reports per-file line,
+withheld, residual and marker counts plus the same census, one per REKEY
+segment, where a malformed token counts as a bad token. A line that makes the
+redaction itself fail is withheld (`residual=redact_error`) instead of stopping
+the run. `rss_mb` is the script's own peak resident set
+(`VmHWM`): `getrusage().ru_maxrss` carried Home Assistant Core's high-water mark
+across the exec.
 
 **Limits.** Redaction is pattern-based: a new identifier shape that has no key,
 is shorter than the opaque and digit floors, and is not a JWT, IP, UUID or
