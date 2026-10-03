@@ -17,7 +17,9 @@ exposure, not motion). Each camera is classified into one of THREE exposure
 regimes every sample (see SAT_IR / LUMA_DARK below) and keeps a SEPARATE
 baseline frame and noise estimate per regime, so a regime flip costs nothing:
 the frame is compared against the last frame in the SAME regime rather than
-across two different exposures. Nothing is reset on a flip.
+across two different exposures. Nothing is reset on a flip. A grayscale frame
+too dark to have been lit by the illuminator, arriving while a fresh lit IR
+baseline exists (see LUMA_IR_MIN), is not compared at all.
 
 Honest limitations: samples every ~2 min, so brief walk-throughs can fall
 between frames — absence of visual change over hours is strong evidence of
@@ -166,8 +168,64 @@ MAX_FRACTION = 0.7             # more than this fraction hot = global change, ig
 # These are three genuinely different EXPOSURE REGIMES, and because each keeps
 # its own baseline frame and its own noise estimate, switching between them is
 # free - there is no need for hysteresis to suppress the switching itself.
+# (Grayscale is not proof that the illuminator is ON - see LUMA_IR_MIN.)
 SAT_IR = 10.0                  # mean saturation below this = grayscale = IR on
 LUMA_DARK = 40.0               # ...else mean luma below this = unlit/near-black
+# UNLIT GRAYSCALE FRAMES. One camera keeps its image in mono for a frame while
+# its illuminator is off, so the frame is grayscale AND near-black (luma 15.6-
+# 25.4, once 45.8). It was filed as "ir", compared against the lit IR baseline
+# (luma ~86-130) and logged a visual change - and, stored as that baseline, made
+# the next lit frame log a second one.
+# Measured 2026-08-28..10-03 (36 days, 9 cameras): 27 such frames, all on that
+# camera, 54 of its 481 visual changes, none with motion on it within 6 min.
+# Each read <= 0.53x its lit baseline. No LIT IR frame read below 64.0 over the
+# same 36 days (p1 >= 70.6 on each of the six cameras that use IR), so
+# LUMA_IR_MIN sits in the 45.8..64.0 gap; and every IR change with motion on the
+# camera read >= 0.856x its (visible) baseline, bar one return from a light
+# spike far above LUMA_IR_MIN (86.9 after 178.4).
+# A grayscale frame is UNLIT when its luma is below LUMA_IR_MIN AND below
+# UNLIT_RATIO x the mean of a FRESH (<= BASELINE_MAX_AGE_S) IR baseline (a
+# stored frame's mean equals its recorded luma to within 0.04). It is SKIPPED:
+# not compared (it never logs a change and has no max_norm_diff entry), not
+# stored as the regime's baseline (the next lit frame is compared against the
+# last LIT one - in all 27 cases 4-12 min old and within 1.7 luma), and the
+# noise EMA and its stamp are untouched (a pending relaxation runs on from the
+# last real comparison; the re-compared lit frame is then an ordinary quiet
+# sample, so the EMA takes one sample live never took). It IS a new frame:
+# probe_ts, fresh_ts and the body-hash ring move as for any other, and the
+# summary names it on the poll it happens. Its regime label is unchanged ("ir",
+# ir_mode true).
+# Both tests are needed. The bar alone is a fixed cut on a camera's whole night
+# picture: one whose lit IR scene settled below it (an ageing lamp, wet ground,
+# a scene change - that camera's lit level fell 126 -> 87 within one night)
+# would never be compared or re-baselined again while every freshness guard
+# stayed green. The ratio alone would skip lit frames: the 64.0 frame, right
+# after lights went off, read 0.52x. A ratio is unmoved by a drift of the whole
+# picture, so a camera that darkens evenly keeps comparing frame against frame.
+# With no FRESH baseline nothing is skipped: the frame seeds the slot exactly as
+# before, so a lasting dim scene costs at most BASELINE_MAX_AGE_S of IR
+# comparisons. The price, never worse than before and seen 0 times in 36 days:
+# a lit frame arriving on an unlit SEED (an unlit first IR frame after > 15 min
+# away, or a lamp-off run longer than 15 min) is compared against it and can log
+# one change. Skipping that lit frame instead would need the seed's luma, which
+# the recorder never shows (a seed is not compared), and 3 IR changes with
+# motion in the window were compared against seeds of unknown luma.
+# Not covered: the same camera's PARTIAL dips (lit ~120 -> 96-114 for one frame,
+# then back: 45 pairs, 90 changes, 08-28..09-15, none since). They stay above the
+# bar, and luma cannot tell them from motion-corroborated dips on other cameras
+# (0.856-0.881x).
+# Rejected on the same 36 days: testing luma first moves 26 of the 27 into
+# "dark", where 22 would have been compared against the colour near-black
+# frames that regime holds (a comparison never made before, outcome unknown),
+# and leaves the 45.8 one in "ir". Skipping any same-regime comparison whose
+# mean luma JUMPS by more than T (T = 15..40) dropped, at every T, changes that
+# had motion on the camera within 6 min (luma jumps of 15-92; lights switched
+# on or off during visits among them). Restricted to IR, every variant still
+# lost a change of the visit at 2026-09-29 23:15Z: lights on while the image
+# was still mono read luma 87 -> 178 -> 87, the same shape as single bright
+# frames seen on other nights with no motion at all.
+LUMA_IR_MIN = 55.0
+UNLIT_RATIO = 0.6
 KEEP_HOURS = 48.0
 TIMEOUT = 12
 # HEARTBEAT. Home Assistant rewrites last_updated only when the state or an
@@ -380,6 +438,7 @@ def main():
     # summary. Malformed state values they drop are named there too (once - the
     # repaired state is written back).
     repaired, faults = [], []
+    unlit_skips = []
     for name, body in results:
         prev = st.get(name, {})
         log = [t for t in prev.get("log", []) if now - t < KEEP_HOURS * 3600]
@@ -457,12 +516,25 @@ def main():
                 old = None
                 if base and (now - float(base[1])) <= BASELINE_MAX_AGE_S:
                     old = base[0]
+                # grayscale, too dark to be lit AND far below a FRESH IR baseline:
+                # neither compared nor stored (see UNLIT GRAYSCALE FRAMES). With
+                # no fresh baseline the frame seeds the slot as any other does.
+                unlit = False
+                if mode == "ir" and lum < LUMA_IR_MIN and old is not None:
+                    try:
+                        ob = base64.b64decode(old)
+                        unlit = lum < UNLIT_RATIO * (sum(ob) / float(len(ob)))
+                    except Exception:  # noqa: BLE001 - unreadable baseline: compare as before
+                        unlit = False
                 # With like-for-like (same-mode) comparison there is nothing to
                 # settle: a flip no longer costs a comparison. If this mode has no
                 # usable baseline we simply seed it and compare on the next poll.
                 # `settle` is only drained here so state written by the previous
                 # schema finishes cleanly.
-                if settle > 0:
+                if unlit:
+                    # truncated, so a frame below the bar never reads as 55.0
+                    unlit_skips.append("%s (luma %.1f)" % (name, math.floor(lum * 10.0) / 10.0))
+                elif settle > 0:
                     settle -= 1
                 elif old is not None:
                     old_b = base64.b64decode(old)
@@ -498,12 +570,16 @@ def main():
                             # excursions it exists to catch. Decay stays uncapped.
                             ema_new = 0.9 * ema + 0.1 * max(peak, 0.0)
                             noise[mode] = round(min(ema_new, max(ema * 1.15, 0.5), NOISE_MAX), 2)
-                frames[mode] = [base64.b64encode(luma).decode(), now]
+                if not unlit:
+                    frames[mode] = [base64.b64encode(luma).decode(), now]
                 # drop any mode baseline that has aged out, so state cannot grow
                 frames = {m: v for m, v in frames.items()
                           if (now - float(v[1])) <= BASELINE_MAX_AGE_S * 4}
                 entry["frames"] = frames
-                entry["frame"] = frames[mode][0]   # back-compat for readers
+                if not unlit:
+                    entry["frame"] = frames[mode][0]   # back-compat for readers
+                elif prev.get("frame"):
+                    entry["frame"] = prev["frame"]     # the newest STORED frame
                 entry["probe_ts"] = now            # this camera WAS seen
                 entry["fresh_ts"] = now            # ...and sent a NEW frame
                 entry["body_hash"] = body_hash     # newest fresh body (back-compat)
@@ -574,6 +650,10 @@ def main():
     if cached:
         summary += "; SNAPSHOTS CACHED (no new frame >%.0fm): %s" % (
             PROBE_BLIND_MIN, ",".join(cached))
+    if unlit_skips:
+        # Only on the poll it happens, so the recorder keeps every occurrence
+        # without a new attribute (json_attributes is a fixed allowlist).
+        summary += "; unlit grayscale frame not compared: " + ", ".join(unlit_skips)
     for label, items in (("state repaired, malformed values dropped", repaired),
                          ("FAULT, fell back to the previous rule", faults)):
         if items:

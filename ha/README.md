@@ -737,6 +737,28 @@ refinements falls back to the earlier rule and is named there too. The state
 file is written atomically. A regime compared every poll can still ratchet
 within one long occupied stretch.
 
+**Unlit grayscale frames.** A grayscale frame is filed as "ir" on the assumption
+that the illuminator lit it. One camera occasionally delivers a single mono frame
+with the illuminator off: nearly black (mean luma 15.6-45.8, 0.13-0.53 of the lit
+picture). Compared against the lit IR baseline it logged a visual change, and,
+stored as the new baseline, made the next lit frame log a second one: 27 times
+in 36 days (54 changes), none with motion on the camera within 6 minutes.
+`cam_vision.py` therefore skips a grayscale frame whose mean luma is below 55
+(`LUMA_IR_MIN`) AND below 0.6 (`UNLIT_RATIO`) of an IR baseline stored in the
+last 15 minutes: it is not compared, not stored as the baseline, leaves the noise
+estimate alone, still counts as a fresh frame, and the summary says "unlit
+grayscale frame not compared" on that poll. Both conditions are needed: the bar
+alone would permanently stop comparisons for a camera whose genuine night picture
+settled below 55 (an ageing lamp, wet ground), and would drop a real exposure dip;
+the ratio alone would skip a lit frame right after lights go off (64.0, 0.52 of
+the picture before it). With no fresh IR baseline nothing is skipped, so a lasting
+dim scene costs at most 15 minutes of comparisons. Replayed over the 36 days
+(227,038 comparisons), the rule removes all 54 changes and loses no change with
+motion on the camera; skipping any same-regime comparison whose luma jumps by more
+than T (T = 15-40) lost real changes at every T, and testing luma before saturation
+missed the 45.8 frame. A shallower family of single-frame dips on the same camera
+stays above the bar and is not addressed.
+
 ## A camera with no co-firing partner: switch notes and the walk test
 
 An interior room's camera has no partner that shares 15 % of its view, so it is
