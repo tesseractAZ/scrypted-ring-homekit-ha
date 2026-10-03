@@ -86,8 +86,30 @@ restart, reload and forced update_entity adds a poll, so "2 polls" could be
 two polls seconds apart over identical data. POLL_JITTER_S absorbs the jitter
 of the 30-min schedule's own clock readings.
 
+EVIDENCE TIMES ARE PUBLISHED, NOT INTERPRETED. For a camera that is flagged or
+in a hit run - and only then, so the payload stays bounded - the detail carries
+own_recent (the start of each of the camera's own motion clusters in the recent
+window) and cofire_recent (the camera's own first detection in each recent
+cluster of cofire_partner that contained it; clusters counted by their start,
+as k_R is), epoch ints, newest last, at most EVIDENCE_MAX each, with the full
+counts in own_recent_n / cofire_recent_n. cofire_partner is the best tested
+partner - the one whose recent/baseline counts the detail reports - else (no
+partner tested) the one judging recovery, else the entry partner. Measured
+2026-10-03: a camera convicted at ~90 % loss still fired only on close
+approaches (a mail carrier, door openings), all 13:00-17:00 local, so a
+doorstep walk test or a door trip passed under the loss. The times show the
+reader when the camera still works; no cause is inferred from them - a time
+window and a zone or range restriction fitted that case equally.
+len(cofire_recent) before the cap is that partner's k_R by construction, and
+every co-fire time is also one of own_recent's: the cluster START can be
+another camera's event minutes earlier (up to 492 s, a different local hour on
+96 of 4,219 entries in a 30-min replay of the real history), and a camera event
+within LINK_S before that start would have chained into the cluster, so the
+camera's first event in it also starts one of its own clusters.
+
 Pure: no I/O, no clock, no globals mutated. Deterministic for given inputs.
 """
+import bisect
 import math
 
 RECENT_H = 48.0
@@ -118,6 +140,10 @@ PARAMS = dict(RECENT_H=RECENT_H, BASE_D=BASE_D, MAX_LOOKBACK_D=MAX_LOOKBACK_D,
               RECOVERED_RATIO=RECOVERED_RATIO, OWN_DROP=OWN_DROP,
               NEAR_D=NEAR_D, MIN_NEAR=MIN_NEAR, EFFECT_NEAR=EFFECT_NEAR,
               PARTNER_RETURN_H=PARTNER_RETURN_H)
+
+# Evidence times per list (own_recent, cofire_recent): 24 + 24 epoch ints are
+# ~0.6 KB per camera, published only for a flagged or hit-run camera.
+EVIDENCE_MAX = 24
 
 # Supplied by the caller (cam_motion.partial_shared()) so this module cannot
 # drift from the co-firing test it reuses: the cluster linkage, the three
@@ -227,6 +253,23 @@ def _back(excl, limit, end, need):
     return hi
 
 
+def _evidence(cam, own_ts, cl, start, link, partner):
+    """cam's own recent detections (the start of each of its own clusters from
+    `start` on) and its recent co-fires with `partner` (cam's own first detection
+    in each settled joint cluster that STARTS from `start` on, as k_R counts
+    them), epoch ints, newest last, at most EVIDENCE_MAX each. Own clusters may
+    still be open (a detection is a fact once it happened); the co-fires come
+    from the settled clusters the test itself counts. own_ts is in time order."""
+    own = [int(a) for a, _, _ in _clusters([(t, cam) for t in own_ts if t >= start], link)]
+    # Listed at cam's OWN event, not the cluster start (often the partner's,
+    # minutes earlier): `cam in s` puts one of own_ts in [a, b].
+    co = [int(own_ts[bisect.bisect_left(own_ts, a)]) for a, _, s in cl
+          if a >= start and cam in s and partner in s]
+    return {"own_recent": own[-EVIDENCE_MAX:], "own_recent_n": len(own),
+            "cofire_partner": partner, "cofire_recent": co[-EVIDENCE_MAX:],
+            "cofire_recent_n": len(co)}
+
+
 def _fmt_p(x):
     return float("%.2g" % x)
 
@@ -290,7 +333,9 @@ def evaluate(events, now, state=None, cams=None, stale_now=None, gaps=(), shared
     Returns (result, new_state). result = {"flagged": [...], "detail": {...},
     "events": [...]}: "flagged" is the latched set (never contains a stale
     camera); "events" lists this poll's transitions as {"cam", "kind":
-    "enter"|"exit", "reason", ...}. Raises ValueError on missing shared input.
+    "enter"|"exit", "reason", ...}; a flagged or hit-run camera's detail also
+    carries the evidence times (see EVIDENCE TIMES). Raises ValueError on
+    missing shared input.
     """
     P = dict(PARAMS)
     P.update(p or {})
@@ -532,6 +577,15 @@ def evaluate(events, now, state=None, cams=None, stale_now=None, gaps=(), shared
                 d["held_since"] = int(held_from)
         elif hit_from is not None:
             d["hit_since"] = int(hit_from)
+        if (since is not None and not dormant) or hit_from is not None:
+            # Flagged or in a hit run only (bounded payload). The partner is the
+            # best tested one, whose recent/baseline counts this detail reports, so
+            # the co-fire list always backs the count printed beside it (the
+            # recovery judge differed on 572 of 1,212 real flagged polls); with
+            # no partner tested, the judge, else (a held flag) the entry partner.
+            co_p = (best["partner"] if best else exit_info["partner"] if exit_info
+                    else (entry or {}).get("partner"))
+            d.update(_evidence(T, by_cam.get(T, []), cl, now - R, link, co_p))
         d["_tests"] = tests            # full figures for calibration; strip before HA
         detail[T] = d
     return ({"flagged": sorted(flagged), "detail": detail, "events": transitions},

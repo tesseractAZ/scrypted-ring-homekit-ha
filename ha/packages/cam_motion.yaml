@@ -91,6 +91,15 @@ template:
                    or (state_attr('sensor.camera_motion_stale','partial_detail') or {}).get('error') is not none))
              or (s in ['unknown','unavailable'] and this.state == 'on') }}
         attributes:
+          # The CURRENT reading, whatever the (delayed) state: the failure text only
+          # while the test is failing - never as the healthy value.
           reason: >-
-            {{ (state_attr('sensor.camera_motion_stale','partial_detail') or {}).get('error')
-               or 'partial_loss attribute missing (json_attributes allowlist, or the script is the old version)' }}
+            {% set s = states('sensor.camera_motion_stale') %}
+            {% set pd = state_attr('sensor.camera_motion_stale','partial_detail') or {} %}
+            {% if s in ['unknown','unavailable']
+                  or state_attr('sensor.camera_motion_stale','error') is not none %}no reading (motion sensor unavailable or in error - camera_motion_monitor_down covers that)
+            {%- elif state_attr('sensor.camera_motion_stale','partial_loss') is not none
+                     and pd.get('error') is none %}test running
+            {%- else %}{{ pd.get('error')
+                 or 'partial_loss attribute missing (json_attributes allowlist, or the script is the old version)' }}
+            {%- endif %}

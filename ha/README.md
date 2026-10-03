@@ -332,7 +332,15 @@ shows up here first.
 - `camera_motion_partial_loss_alert` / `_recovered` — a camera that still fires but
   has dropped out of most of the motion its usual partners keep recording (see
   the partial-loss section). The card gives per-camera evidence, the cameras that
-  could not have been convicted, the scope, and the ack stamp. The push goes out
+  could not have been convicted, the scope, and the ack stamp. For each flagged
+  camera it also lists, in local time, the camera's own detections and its
+  co-fires with the partner whose count the card shows over the last 48 h, and
+  states that a walk test at the door or a door opening does not clear the flag:
+  a partial loss can spare close approaches or some hours of the day, so a
+  detected walk proves only that spot at that hour; the outer parts of the view
+  that the partner cameras record are walked instead, at hours with no detection
+  listed. The push carries a one-line version (the local hours the camera was
+  still seen at, or how many hours when there are more than eight). The push goes out
   on a set change or boot only for a flag whose `since` is under an hour old AND
   newer than the automation's own `last_triggered` (the door-coverage pattern),
   so a flag entered by the startup poll still pages and a reload or timeout
@@ -343,7 +351,10 @@ shows up here first.
   trigger: a template trigger is not armed when its condition is already true
   at attach (restart, reload, deploy order), while a template binary restores
   its state and starts its delay from its first render. One push on the
-  binary's off->on edge; boot and an hourly re-assert restore the card.
+  binary's off->on edge; boot and an hourly re-assert restore the card. The
+  binary's `reason` attribute states the current reading: `test running` while
+  the test runs, the test's own error or the missing-attribute text while it
+  fails, and `no reading` while the staleness sensor itself is unavailable.
 - `camera_log_archive_down` / `_down_recovered` — the engine-log archive failed
   two runs in a row (`binary_sensor.camera_log_archive_down`, delay_on 75 min,
   same pattern), or has seen no engine line for 48 h. One push on the edge: the
@@ -419,6 +430,10 @@ shows up here first.
   can mean a genuinely unvisited area, disabled/zoned-out motion detection in
   the camera app, or a dead event-push path — a walk-test discriminates, and
   under a 24/7-recording plan the camera records continuously regardless.
+  When a stale camera's verdict carries a switch note (see the switch-notes
+  section), the push ends with how to run that camera's walk test, because the
+  push is the only part of the page that reliably reaches a phone; the card's
+  corroboration header says the check reads recorder rows only.
   The staleness page carries TWO automated discriminators, printed strongest
   first. **Cross-camera corroboration** is the decisive one: cameras that share
   a sight-line co-fire at a stable rate, and that rate is a real test of one
@@ -625,6 +640,20 @@ second page; an acknowledgement still matches), while recovery evidence held
 would instead re-flag every camera back from a total outage for 40-46 h until a
 partner could re-test it, which a replay of the two real outages showed.
 
+**Evidence times.** For a camera that is flagged or in a hit run - and only
+then, so the payload stays bounded - `partial_detail.cams.<camera>` carries
+`own_recent` (the start of each of the camera's own motion clusters in the 48 h
+window) and `cofire_recent` (the camera's own first detection in each cluster of
+`cofire_partner` that contained it, so every co-fire time is also one of its own
+detection times), as epoch seconds, newest last, at most 24 each, with the full
+counts in `own_recent_n` and `cofire_recent_n`. `cofire_partner` is the partner
+whose counts the detail reports. On this fleet a camera convicted at roughly
+90 % loss still fired only on close approaches (a delivery at the door, door
+openings), all inside one afternoon window, so a doorstep walk test or a door
+trip passed under the loss. The times are published as facts, with no cause
+inferred: a time-of-day schedule and a zone, range or sensitivity restriction
+fitted that case equally well.
+
 A deliberate, permanent change (a narrowed zone) is silenced per flag in
 `cam_motion.py`: `PARTIAL_LOSS_ACK = {"<camera>": <ack stamp>}`, where the ack
 stamp is printed on the card. The acknowledgement is keyed to that flag, so a
@@ -641,9 +670,13 @@ unusable cache costs one full scan. If the scan fails the test still runs and
 **Surfaces.** `partial_loss` lists the flagged cameras minus acknowledged ones,
 and is `null` (never `[]`) whenever the test did not run.
 `binary_sensor.camera_motion_partial_loss` is on while it is non-empty and
-unavailable - never off - when it is `null`. The largest `partial_*` payload in
-a whole-recorder replay was 3.0 KB, well under the recorder's 16 KB attribute
-limit.
+unavailable - never off - when it is `null`. The recorder stores no attributes at all for a state whose
+attributes exceed 16 KB, so the evidence lists are trimmed (oldest first, counts
+kept) whenever the whole payload would pass 12,000 bytes, and
+`partial_detail.evidence_cap` then records the cap (absent when nothing was
+trimmed). Replayed every 6 hours over 56 days of recorder history, the whole
+attribute set peaked at 8.1 KB and nothing was trimmed; nine cameras flagged at
+the full cap would come to 14.4 KB untrimmed.
 
 **Measured over the recorder** (3,459 polls over 76 days, every real recorder
 hole masked): a camera that kept firing but dropped to 3 co-fires in 77 of its
@@ -726,7 +759,11 @@ card, waits up to 5 minutes for the camera's motion sensor (motion already being
 reported within 30 s before the tap counts), and pushes PASS with the reaction
 time or FAILED with what to check in the Ring app. Only a fresh double-tap
 starts it: a state restored after a restart or an event older than 2 minutes is
-ignored. A restart during the 5 minutes aborts the test without a result.
+ignored. A restart during the 5 minutes aborts the test without a result. A
+double-tap that is not recognised (not reported by the switch, or dropped by
+those checks) starts no test, so the stale verdict's note says: if no "walk
+test running" card appears within a few seconds, the double-tap was not
+recognised - walking in is enough on its own.
 
 ## Engine log archive (`cam_logarchive.py`)
 

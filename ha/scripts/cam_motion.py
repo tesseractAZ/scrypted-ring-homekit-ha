@@ -186,6 +186,24 @@ PARTIAL_SCOPE = (
 # cached in MOTION_STATE and each poll scans only the rows written since the
 # previous scan; a missing or unusable cache costs one full scan.
 PARTIAL_GAP_MIN_S = 300.0
+# ATTRIBUTE BUDGET. The recorder stores NO attributes for a state whose
+# attributes pass 16 KB (it logs a warning and keeps the state alone), and every
+# review reads this sensor's history. The evidence times partial_loss.py publishes
+# for a flagged or hit-run camera (own_recent / cofire_recent, up to 24 + 24 epoch
+# ints each, ~0.6 KB per camera) are the one part of this payload that grows with
+# the number of flagged cameras, so they are trimmed - oldest first, every camera
+# alike, the full counts kept - whenever the whole payload would pass this budget;
+# partial_detail.evidence_cap then says to what. Measured 2026-10-03 with the real
+# main() every 6 h over 56 days of recorder history: the attribute set peaked at
+# 8.1 KB (7.5 KB without the evidence times, four cameras stale); at most two
+# cameras carried evidence at once, 0.5 KB of it at most, and nothing was trimmed.
+# Nine cameras flagged at the full cap with every optional field present come to
+# 14.4 KB untrimmed. When the payload is over this budget even WITHOUT the lists
+# (something else grew), the lists are trimmed against PAYLOAD_CEILING_B instead -
+# the recorder's own limit less headroom for the keys HA adds - so lists the
+# recorder would still store are kept rather than emptied for nothing.
+PAYLOAD_BUDGET_B = 12000
+PAYLOAD_CEILING_B = 16384 - 1024   # recorder MAX_STATE_ATTRS_BYTES - headroom
 
 # ---------------------------------------------------------------------------
 # CROSS-CAMERA CORROBORATION.
@@ -720,7 +738,13 @@ def partial_ack(flag_since):
 # CORROBORATE_MIN_HITS sets). A double-tap of either paddle (KeyPressed2x,
 # listed in each entity's event_types) is a deliberate walk test, run by the
 # camera_room_walk_test automation: one followed by no motion from the
-# camera is named in the note.
+# camera is named in the note. No KeyPressed2x had been recorded from this
+# switch by 2026-10-03 (every press single), and the automation also drops a
+# reported one (from an unavailable/unknown state after a re-interview or a
+# Z-Wave restart, stamped 2 min or more from now, or the automation disabled),
+# so a double-tap can start no test and say nothing: the note tells the reader
+# to walk in anyway when no "walk test running" card appears, without naming a
+# cause it cannot know.
 WITNESS = {
     # "<rarely_visited_interior_cam>": {
     #     "on": ("event.<witness_switch_scene_1>",),   # top paddle: light on
@@ -803,7 +827,9 @@ def witness_note(cam, cfg, rows, presses, last_event, on_by_cam, data_from, now)
     """The note appended to a stale camera's verdict. Never raises on its inputs."""
     test = ("To test it: double-tap either paddle of the room switch, then walk into "
             "the room - the walk-test automation pushes PASS or FAIL within 5 minutes; if "
-            "the camera fires, it leaves the stale list at the next poll.")
+            "the camera fires, it leaves the stale list at the next poll. If no 'walk test "
+            "running' card appears within a few seconds of the double-tap, the double-tap "
+            "was not recognised - just walk in; the camera firing clears this.")
     caveat = ("The switch box is outside this camera's view, so a press with no motion "
               "here is NOT proof of a fault - a companion camera firing shows someone "
               "in the garage, not in the room.")
@@ -880,6 +906,41 @@ def update_witness_log(prev, visits, own_on, on_by_cam, cfg, gaps, data_from, no
             "hole": any(x < b and y > a for x, y in gaps),
         }
     return [log[k] for k in sorted(log)][-WITNESS_LOG_KEEP:]
+
+
+def fit_evidence(payload, budget=None):
+    """Trim partial_detail's evidence lists until the compact payload is at most
+    `budget` bytes (see ATTRIBUTE BUDGET). Returns the per-list cap applied, or
+    None when nothing had to be trimmed (and then writes no evidence_cap). Only
+    the evidence lists are touched. When the payload is over `budget` even with
+    every list empty, the lists are trimmed against PAYLOAD_CEILING_B instead, so
+    they are kept whenever the recorder would still store them."""
+    budget = PAYLOAD_BUDGET_B if budget is None else budget
+    cams = ((payload.get("partial_detail") or {}).get("cams") or {})
+    lists = [(d, k) for d in cams.values() if isinstance(d, dict)
+             for k in ("own_recent", "cofire_recent") if isinstance(d.get(k), list)]
+
+    def size():
+        return len(json.dumps(payload, separators=(",", ":")))
+    cap = max((len(d[k]) for d, k in lists), default=0)
+    if cap == 0 or size() <= budget:
+        return None
+    full = [(d, k, d[k]) for d, k in lists]
+    for d, k, _ in full:
+        d[k] = []
+    base = size()
+    for d, k, v in full:
+        d[k] = v
+    if base > budget:
+        budget = max(budget, PAYLOAD_CEILING_B)
+        if size() <= budget:
+            return None
+    while cap > 0 and size() > budget:
+        cap //= 2
+        for d, k in lists:
+            d[k] = d[k][-cap:] if cap else []
+        payload["partial_detail"]["evidence_cap"] = cap   # measured with the rest
+    return cap
 
 
 def emit(payload):
@@ -1331,6 +1392,8 @@ def main():
         acked, ack_unmatched = partial_ack(flag_since)
         cams_detail = {}
         for c in CAMS:
+            # Only "_" keys are internal; the evidence times of a flagged or hit-run
+            # camera (own_recent, cofire_recent, ...) are published as they are.
             d = {k: v for k, v in (pres["detail"].get(c) or {}).items() if not k.startswith("_")}
             if c in partial_cleared:
                 d["cleared"] = partial_cleared[c]
@@ -1442,7 +1505,7 @@ def main():
     summary += door_summary_suffix(door_evidence, door_failing)
     if witness_failed:
         summary += " | WITNESS LOG FAILED: " + "; ".join(witness_failed)
-    emit({
+    out = {
         "stale": stale,
         "stale_count": len(stale),
         "oldest_cam": oldest_cam,
@@ -1462,7 +1525,12 @@ def main():
         "partial_loss": partial_loss,
         "partial_detail": partial_detail,
         "updated_at": int(time.time() // HEARTBEAT_BUCKET_S) * HEARTBEAT_BUCKET_S,
-    })
+    }
+    try:
+        fit_evidence(out)
+    except Exception:  # noqa: BLE001 - a size guard must never fail the sensor
+        pass
+    emit(out)
 
 
 if __name__ == "__main__":
