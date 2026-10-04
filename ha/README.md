@@ -434,6 +434,19 @@ shows up here first.
   section), the push ends with how to run that camera's walk test, because the
   push is the only part of the page that reliably reaches a phone; the card's
   corroboration header says the check reads recorder rows only.
+  The push opens with what caused it. `New: <cameras>.` names the cameras that a
+  stale-set change added. It is the same set difference the push gate computes from
+  the trigger's old and new stale lists. When that change fires as the motion
+  monitor recovers from a gap (the previous reading was unavailable, unknown,
+  missing its stale list or carrying an error: a command_line reload, a timeout or
+  a script error), the push opens with `Motion monitor back after a gap - stale:
+  <cameras>.` instead, because the gate then counts every camera still stale as
+  added. `HA restarted.` marks the boot push. A proven push gets no extra lead:
+  its existing `PROVEN event-path failure: <cameras>.` line already leads it. It
+  opens with `Motion monitor back after a gap.` when the proof re-fires as the
+  monitor recovers. The fleet summary and any walk-test hint follow unchanged.
+  Without this lead, a page for a newly stale camera opened with a summary that
+  still listed a camera paged earlier, and it read like a repeat of that page.
   The staleness page carries TWO automated discriminators, printed strongest
   first. **Cross-camera corroboration** is the decisive one: cameras that share
   a sight-line co-fire at a stable rate, and that rate is a real test of one
