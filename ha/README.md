@@ -324,6 +324,18 @@ shows up here first.
   camera-source plugin on this signal alone — confirm a real motion-delivery gap
   first. The rate is also confounded by push volume, which tracks motion, so
   normalise before calling a trend.
+  Error-coded HKSV closes (`closed_with_error`, unchanged) are also split by HAP
+  close reason (HAP-NodeJS `HDSProtocolSpecificErrorReason`): `closed_cancelled`
+  (3, how a clip ends: HAP closes 12 s after the fragment generator stops),
+  `closed_timeout` (6, the home hub stopped waiting for data) and `closed_other`;
+  the three sum to `closed_with_error`. `video_stalls` counts mid-session video
+  stalls once per on-demand session: a code-6 close at least 10 s after the
+  camera's last sent fragment, or an `unspecified size` / `exit code: 234` ffmpeg
+  line tagged with the camera while its session is up (the same lines from a
+  snapshot racing a healthy teardown are not counted); `video_stall_times` lists
+  the latest 20 episodes and the summary names stalls only when present. Stalls
+  are informational and do not page: each stalled recording also ends in a
+  `motion recording error`, which already is the paging metric.
 - `camera_door_coverage_alert` / `_recovered` — per-camera door coverage (see the
   door-contact section above): pages when a camera keeps failing to report motion
   at its own door while other cameras see the activity. The push is gated on the

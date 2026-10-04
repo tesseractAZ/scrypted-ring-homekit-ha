@@ -18,10 +18,18 @@ structurally incapable of firing. It reported "no faults" when it meant
                 of the alert metric - code 3 also covers a benign max-duration
                 cancel - but it is counted, published, and surfaced in the
                 summary so a camera failing this way is visible.)
+                Error-coded closes are also published split by reason - hub
+                TIMEOUT (6), CANCELLED (3), other - because the lumped count
+                cannot tell a stalled stream from a benign clip end (see HKSV
+                CLOSE REASONS).
   STREAM FAULTS (fleet-wide; these lines carry no camera bracket):
                 "timeout waiting for data, killing parser session"
                 "rebroadcast error", "rtsp read loop exited",
                 "camera_rsp_timeout", "camera_unexpected_close"
+  VIDEO STALLS  (per camera, informational - NOT in the alert metric): an
+                on-demand session whose video stopped part-way, counted ONCE per
+                session however many lines it printed (see MID-SESSION VIDEO
+                STALLS).
 
 Window clock: the log API's ?verbose=true form prefixes real timestamps, so
 the span is measured, not inferred. (v1 estimated it from probe cadence and
@@ -294,6 +302,114 @@ HEARTBEAT_BUCKET_S = 600
 # ("None", "undefined") must stay visible in probe_shortfall.
 PROBE_RE = re.compile(r"public/(\d+)/(?:[a-f0-9]+|<HEX>)/takePicture")
 
+# ---------------------------------------------------------------------------
+# HKSV CLOSE REASONS. "motion recording closed (error code: N)" is the HomeKit
+# plugin's closeRecordingStream() log line (scrypted plugins/homekit/src/types/
+# camera.ts prints "(error code: N)" only when reason > 0), and N is HAP-NodeJS's
+# HDSProtocolSpecificErrorReason (src/lib/datastream/DataStreamServer.ts; the same
+# values from v0.11.0 through v2.1.3 - the floor of the ^2.1.3 range the plugin
+# declares - to master): 0 NORMAL, 1 NOT_ALLOWED, 2 BUSY, 3 CANCELLED,
+# 4 UNSUPPORTED, 5 UNEXPECTED_FAILURE, 6 TIMEOUT, 7 BAD_DATA, 8 PROTOCOL_ERROR,
+# 9 INVALID_CONFIGURATION. The lumped count mixes two different things:
+#   3 CANCELLED  the end of a clip. RecordingManagement.ts closes a recording with
+#                it itself 12 s after the delegate's generator stops without an
+#                end-of-stream fragment (kickOffCloseTimeout, 12000 ms). Measured
+#                10-01..10-03: all 16 landed exactly 12.0 s after the clip's last
+#                fragment - 12 at the ~192 s maximum clip length, 4 after a
+#                "motion recording error" that already counts as one.
+#   6 TIMEOUT    the HOME HUB gave up waiting for data. HAP-NodeJS never closes
+#                with it on its own (only NOT_ALLOWED, CANCELLED and
+#                UNEXPECTED_FAILURE, or an HDSProtocolError's reason, which the
+#                plugin's recording code never raises), so it can only be the
+#                hub's DATA_SEND CLOSE (handleDataSendClose). Measured: all 3 landed
+#                16-17 s after a last fragment, 1-4 fragments into the clip - a
+#                stream that stopped. Every one sat in the stall below.
+#   5 UNEXPECTED_FAILURE  (filed in closed_other, like every code but 3 and 6)
+#                the plugin's generator threw BEFORE its fragment loop - stream or
+#                ffmpeg setup (camera-recording.ts) - or the hub sent it. The loop
+#                itself catches every error and logs "motion recording error", so
+#                those clips end CANCELLED 12 s later instead. A setup failure is
+#                not mid-session, so it is never stall evidence. None 10-01..10-03.
+# closed_with_error keeps the lumped count, unchanged; closed_timeout,
+# closed_cancelled and closed_other split it and always sum to it per camera.
+CLOSE_CODE_RE = re.compile(r"motion recording closed \(error code: (\d+)\)")
+CLOSE_TIMEOUT = 6
+CLOSE_CANCELLED = 3
+
+# ---------------------------------------------------------------------------
+# MID-SESSION VIDEO STALLS. Measured 2026-10-03 02:32-02:38 UTC on one camera:
+# an on-demand session delivered four fragments of a recording and then no more
+# video. The hub closed that recording, and the two that joined the same session,
+# with TIMEOUT; every ffmpeg that opened the stream meanwhile (four snapshots, two
+# recordings) failed with "Could not find codec parameters ... (Video: h264,
+# none): unspecified size"; the snapshot path reported "ffmpeg input to image
+# conversion failed with exit code: 234" and served a cached picture; and the
+# session ran on for six minutes until its last consumer left. Two clips were
+# lost and one cut short. Published, it read "error-coded closes: <cam>=3" - the
+# same clause five benign max-duration closes produced that afternoon.
+#
+# One EPISODE = one on-demand session of a camera (STALL_SESSION_START to
+# STALL_SESSION_END, bracketed with that camera) holding any stall evidence for
+# that camera. Evidence:
+#   - a TIMEOUT close, wherever it lands, once the camera's video had gone quiet:
+#     its last "motion fragment #N sent" line at least STALL_SILENCE_S earlier, or
+#     none in the window. The hub had a recording open and gave up on its data;
+#     the silence is what makes that the camera's stall and not a hub- or
+#     HDS-link timeout with video still flowing (closed_timeout counts both).
+#     Measured: the 3 TIMEOUTs followed 16.2, 16.6 and 16.9 s of fragment
+#     silence; every CANCELLED sat 12.0 s after its last fragment; a healthy
+#     clip's fragments run 2.2 s apart (median, 4.8 s at p99), and its one 15.8 s
+#     gap (10-02) drew no close. One that lands after its session's end marker
+#     still belongs to that session - a recording can outlive the session's last
+#     ffmpeg by seconds.
+#   - an "unspecified size" or "exit code: 234" line bracketed with the camera,
+#     WHILE its session is up. After the end marker it is a snapshot racing the
+#     teardown, not a stall: measured 10-03 14:21:02, 0.1 s after a healthy
+#     session ended ("session terminated before socket connected"), the same two
+#     lines from one snapshot.
+#   The bare "[rtsp @ 0x..]" / "[out#0/image2 @ ..]" ffmpeg lines are continuation
+#   lines of the snapshot ffmpeg's multi-line output, whose first line - the
+#   bracketed command echo - names the camera. Each is followed within 0-3 ms by
+#   that ffmpeg's bracketed "exit code: 234" RPCResultError line, which is what is
+#   read. The recording ffmpeg's "unspecified size" line is bracketed only when it
+#   opens a stderr chunk (both 10-03 ones did); when it does not, the session's
+#   TIMEOUT close still marks it.
+# The slice head can open inside a session. Evidence seen before a camera's first
+# marker is held until that marker says where it was (an end marker: inside; a
+# start marker: outside). With no marker at all it counts: a stall spanning the
+# whole window is the worst case, not a reason to read zero.
+# A session that stalls, recovers and stalls again counts once. A snapshot that
+# raced a session's FIRST keyframe would read as a stall; none of the 756
+# sessions on 10-01..10-03 did that. A TIMEOUT that lands after the camera's NEXT
+# start marker is keyed to that next session (two episodes if the first also had
+# evidence). That needs the next session to start before the TIMEOUT lands: at
+# most ~17 s after the end marker (the hub gives up 16-17 s after the last
+# fragment), ~7 s after the usual idle end (752 of 756 sessions ended 10 s after
+# their last consumer left; 4 ended at once, when the upstream closed). The
+# shortest end-to-next-start gap on 10-01..10-03 was 18.4 s (749 gaps).
+# 10-01 and 10-02 printed none of these lines; 10-03 holds exactly the one
+# episode.
+#
+# INFORMATIONAL - deliberately NOT in the alert metric. Every stalled recording
+# also ended in a "motion recording error" (3 of 3), which the alert already
+# counts, so paging on stalls too would page twice for the same clips. And one
+# six-minute episode in three days, which cleared by itself, is no basis for a
+# threshold (see DOOR CONTACTS on inventing a bar from noise).
+STALL_SESSION_START = "WebRTC prebuffer session started"
+STALL_SESSION_END = "WebRTC prebuffer session ended"
+STALL_FFMPEG = ("unspecified size", "exit code: 234")
+# A TIMEOUT close is stall evidence only this many seconds after its camera's last
+# fragment line (see the TIMEOUT evidence above): above a healthy clip's fragment
+# spacing, well under the 16.2-16.9 s after which the hub gave up.
+STALL_FRAGMENT = " motion fragment #"
+STALL_SILENCE_S = 10
+# video_stall_times keeps the latest this many episodes; video_stalls stays exact.
+# Home Assistant's recorder stores NONE of an entity's attributes once their JSON
+# passes 16 KiB (MAX_STATE_ATTRS_BYTES; this payload runs ~2.5 KiB), which would
+# blank the recorded history of every attribute here, so a camera that stalls in
+# every session must not be able to grow the list without bound.
+STALL_TIMES_MAX = 20
+
 
 _TS_FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -379,6 +495,30 @@ def judge_doors(door_events, cam_motion, win_start, win_end):
 def _finite(x):
     return (isinstance(x, (int, float)) and not isinstance(x, bool)
             and x == x and abs(x) != float("inf"))
+
+
+def close_kind(ln):
+    """'timeout', 'cancelled' or 'other' for an error-coded close line (see HKSV
+    CLOSE REASONS). A code that does not parse is 'other', so the three always
+    sum to closed_with_error."""
+    m = CLOSE_CODE_RE.search(ln)
+    code = int(m.group(1)) if m else None
+    if code == CLOSE_TIMEOUT:
+        return "timeout"
+    if code == CLOSE_CANCELLED:
+        return "cancelled"
+    return "other"
+
+
+def stall_note(spans, key, t0, t1=None):
+    """Widen spans[key] = [first, last] to cover stall evidence t0..t1. Times are
+    "YYYY-MM-DD HH:MM:SS" strings (lexicographic) or None for an unstamped line."""
+    t1 = t0 if t1 is None else t1
+    span = spans.setdefault(key, [t0, t1])
+    if t0 is not None and (span[0] is None or t0 < span[0]):
+        span[0] = t0
+    if t1 is not None and (span[1] is None or t1 > span[1]):
+        span[1] = t1
 
 
 def load_background(now):
@@ -563,6 +703,8 @@ def emit(payload):
         "door_missed_by_cam": None, "door_miss_times": None,
         "door_cover_stats": None,
         "door_deferred": None, "door_rolling": None, "door_coverage_failing": None,
+        "closed_timeout": None, "closed_cancelled": None, "closed_other": None,
+        "video_stalls": None, "video_stall_times": None,
         "summary": "", "error": None,
     }
     base.update(payload)
@@ -638,6 +780,13 @@ def main():
     door_events = []     # [(ts_string, door_name)]
     cam_motion = []      # [(ts_string, camera_name)]
     unknown_motion = {}  # camera names seen in the log but absent from CAMS
+    closed_by = {k: {n: 0 for n in CAMS.values()} for k in ("timeout", "cancelled", "other")}
+    stall_in = {}        # camera -> True inside a session, False after its end marker;
+                         # absent until the camera's first marker (slice head: unknown)
+    stall_sess = {}      # camera -> session ordinal; 0 = the one (if any) open at the head
+    stall_head = {}      # camera -> [first, last] evidence held until its first marker
+    stall_eps = {}       # (camera, session) -> [first, last] evidence times: ONE episode each
+    stall_frag = {}      # camera -> time of its latest "motion fragment #N sent" line
 
     for ln in lines:
         # Door and motion lines are their own shapes and are collected BEFORE
@@ -678,6 +827,42 @@ def main():
         if push_code_left:
             push_code_left -= 1
 
+        # Video stalls (see MID-SESSION VIDEO STALLS): session markers and stall
+        # evidence, tracked outside the fault chain like the push state above.
+        if (" prebuffer session " in ln or "(error code: " in ln
+                or STALL_FRAGMENT in ln or any(s in ln for s in STALL_FFMPEG)):
+            scam = None
+            for label, name in CAMS.items():
+                if ("[%s]" % label) in ln:
+                    scam = name
+                    break
+            if scam is not None:
+                tsm = TS_RE.match(ln)
+                sts = tsm.group(1) if tsm else None
+                if STALL_SESSION_START in ln:
+                    stall_head.pop(scam, None)   # held head evidence was outside any session
+                    stall_sess[scam] = stall_sess.get(scam, 0) + 1
+                    stall_in[scam] = True
+                elif STALL_SESSION_END in ln:
+                    if scam not in stall_in and scam in stall_head:
+                        stall_note(stall_eps, (scam, 0), *stall_head.pop(scam))
+                    stall_in[scam] = False
+                elif "motion recording closed (error code:" in ln:
+                    # a TIMEOUT counts only after fragment silence (no fragment
+                    # line, or an unstamped one, leaves it counting)
+                    last = stall_frag.get(scam)
+                    quiet = (last is None or sts is None
+                             or _utc(sts) - _utc(last) >= STALL_SILENCE_S)
+                    if close_kind(ln) == "timeout" and quiet:
+                        stall_note(stall_eps, (scam, stall_sess.get(scam, 0)), sts)
+                elif STALL_FRAGMENT in ln:
+                    stall_frag[scam] = sts
+                elif any(s in ln for s in STALL_FFMPEG):
+                    if stall_in.get(scam) is True:
+                        stall_note(stall_eps, (scam, stall_sess[scam]), sts)
+                    elif scam not in stall_in:
+                        stall_note(stall_head, scam, sts)
+
         if "takePicture" in ln:
             m = PROBE_RE.search(ln)
             if m and m.group(1) in DEVICE_IDS:
@@ -689,6 +874,7 @@ def main():
                         rec[name] += 1
                     else:
                         closed_err[name] += 1
+                        closed_by[close_kind(ln)][name] += 1
                     break
         elif push_new:
             # Failures, not lines: a Node error dump names its code twice, in the
@@ -697,6 +883,16 @@ def main():
             push_undecryptable += 1
         elif any(f in ln for f in STREAM_FAULTS):
             stream_errors += 1
+
+    # Head evidence for a camera that printed no marker at all: the whole slice
+    # lay inside one session (or outside one), and a stall that long must show.
+    for scam, span in stall_head.items():
+        stall_note(stall_eps, (scam, 0), *span)
+    video_stalls = {n: 0 for n in CAMS.values()}
+    for scam, _ in stall_eps:
+        video_stalls[scam] += 1
+    video_stall_times = sorted(([t0, t1, scam] for (scam, _), (t0, t1) in stall_eps.items()),
+                               key=lambda e: (e[0] or "", e[2]))[-STALL_TIMES_MAX:]
 
     # Judge door evidence only where this slice holds its whole window.
     win_start = None
@@ -730,7 +926,9 @@ def main():
 
     # Alert metric = hard recording errors only. Error-coded closes are
     # reported as context but excluded: code 3 also covers a benign
-    # max-duration cancel, so counting them over-flags healthy cameras.
+    # max-duration cancel, so counting them over-flags healthy cameras. Video
+    # stalls stay out as well: each stalled recording also ends in a recording
+    # error that this metric already counts (see MID-SESSION VIDEO STALLS).
     fails = dict(rec)
     rates = {n: round(v / span_min * 60, 1) for n, v in fails.items()}
     worst = max(rates, key=rates.get)
@@ -778,6 +976,12 @@ def main():
     if err_closes:
         summary += "; error-coded closes: " + ",".join(
             "%s=%d" % (n, closed_err[n]) for n in err_closes)
+    # Last, so a window without a stall publishes exactly the summary it did before.
+    # Most episodes first; ties keep CAMS order, as the error-coded closes clause does.
+    stalled = sorted((n for n, v in video_stalls.items() if v), key=lambda n: -video_stalls[n])
+    if stalled:
+        summary += "; mid-session video stalls: " + ",".join(
+            "%s=%d" % (n, video_stalls[n]) for n in stalled)
 
     emit({
         "span_min": round(span_min, 1),
@@ -801,6 +1005,9 @@ def main():
         "door_deferred": door_deferred, "door_rolling": door_rolling,
         "door_coverage_failing": door_failing,
         "door_orphans_by_door": orphan_by_name, "door_orphan_times": orphan_times,
+        "closed_timeout": closed_by["timeout"], "closed_cancelled": closed_by["cancelled"],
+        "closed_other": closed_by["other"],
+        "video_stalls": video_stalls, "video_stall_times": video_stall_times,
         "summary": summary,
     })
 

@@ -47,6 +47,15 @@ command_line:
         - door_deferred
         - door_rolling
         - door_coverage_failing
+        # error-coded closes split by HAP close reason (sum = closed_with_error):
+        # hub TIMEOUT (6) vs CANCELLED (3, a clip ending) vs any other code
+        - closed_timeout
+        - closed_cancelled
+        - closed_other
+        # mid-session video stalls, once per on-demand session (informational;
+        # not in the paging metric) and their first/last evidence times
+        - video_stalls
+        - video_stall_times
 
 template:
   - binary_sensor:
