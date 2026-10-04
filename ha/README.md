@@ -784,6 +784,31 @@ than T (T = 15-40) lost real changes at every T, and testing luma before saturat
 missed the 45.8 frame. A shallower family of single-frame dips on the same camera
 stays above the bar and is not addressed.
 
+**Single-frame luma spikes.** The same camera also delivers, about once a night,
+one IR frame much brighter than the frames either side (luma 86 -> 98 -> 86, or
+86 -> 184 -> 86) with no motion near. The spike is compared and logs a change -
+right once - but was then stored as the baseline, so the next, normal frame
+logged a second change against it. Luma cannot tell such a spike from a real
+one-frame event (room lights on for one frame during a visit), so the spike is
+always compared and always logs. When an IR frame logs a change and its luma
+differs from its baseline by more than 8 (`SPIKE_LUMA`), `cam_vision.py` keeps
+that baseline for one more IR frame (surviving failed, cached, unlit and dark
+polls; a lit colour frame drops it). If the next IR frame also logs a change,
+reads within 3 (`SPIKE_RETURN`) of the kept frame and shows no change against
+it, the picture is back: the spike's change is withdrawn and the return's kept,
+so the pair counts once, and the summary says "one-frame luma spike counted
+once" with the luma values and the test result ("... both kept" when the return
+differs). Every frame is still compared against the same frame and stored as
+before, so a lasting change is never held back and a change can only be
+withdrawn, never added. The withdrawn stamp moves to a "merged" list in the
+state file: `cam_motion.py` counts a camera's own changes from the log (a false
+pair alone no longer reads "detection/event path suspect" on a stale camera) but
+scores vision recall and cross-camera co-change on log + merged, so a merge never
+costs a motion cluster its recall hit. Replayed over 36.9 days, 89 of 135
+motion-free pairs become one change, no change with motion is lost and no motion
+cluster loses its hit. The rule is limited to IR (in colour a one-frame spike is
+mostly a light switched on and off during a visit).
+
 ## A camera with no co-firing partner: switch notes and the walk test
 
 An interior room's camera has no partner that shares 15 % of its view, so it is

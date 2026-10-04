@@ -19,7 +19,8 @@ baseline frame and noise estimate per regime, so a regime flip costs nothing:
 the frame is compared against the last frame in the SAME regime rather than
 across two different exposures. Nothing is reset on a flip. A grayscale frame
 too dark to have been lit by the illuminator, arriving while a fresh lit IR
-baseline exists (see LUMA_IR_MIN), is not compared at all.
+baseline exists (see LUMA_IR_MIN), is not compared at all. A one-frame luma
+spike in IR and the return from it count as ONE change (see SPIKE_LUMA).
 
 Honest limitations: samples every ~2 min, so brief walk-throughs can fall
 between frames — absence of visual change over hours is strong evidence of
@@ -30,7 +31,9 @@ annotation, not a pager, until per-camera baselines are tuned.
 
 Emits ONE JSON object on stdout, always, exit 0 (command_line contract).
 State: /config/.cam_vision_state.json (per-cam baseline frames, noise EMAs and
-their last-comparison stamps, recent body hashes, change log).
+their last-comparison stamps, recent body hashes, change log, the stamps of
+spike changes counted once ("merged"), and - until the next IR frame after a
+luma spike - the frame from before it).
 """
 import base64
 import hashlib
@@ -226,6 +229,76 @@ LUMA_DARK = 40.0               # ...else mean luma below this = unlit/near-black
 # frames seen on other nights with no motion at all.
 LUMA_IR_MIN = 55.0
 UNLIT_RATIO = 0.6
+# SINGLE-FRAME LUMA SPIKES. One IR frame much brighter (or darker) than the frames
+# either side of it is compared against the frame before it and logs a change -
+# rightly, once - but it is then STORED as the baseline, so the next frame, back
+# to normal, is compared against the spike and logs a second change. <cam_8>
+# does this about once a night with no motion anywhere near: luma 86.1 -> 97.8
+# -> 86.2 (2026-10-03 23:03Z), 87.9 -> 183.5 -> 86.4 (23:47Z). Measured
+# 2026-08-28..10-04 (36.9 days, 9 cameras, every regime, lamp-off frames already
+# skipped): 163 one-frame excursions of 5+ luma logged BOTH halves, 135 of them
+# with no motion on the camera within 6 min. 38 were bright IR frames on
+# <cam_8> (14 since 09-20, 1.0/day); 3 of those had motion, among them a real
+# visit (09-29 23:15Z, 87 -> 178 -> 87: lights switched on while the image was
+# still mono). Luma cannot tell them apart, so the spike is always compared and
+# always logs.
+# When an IR frame logs a change AND its mean luma differs by more than
+# SPIKE_LUMA from the frame it was compared against (B0), B0 is kept for ONE more
+# IR frame (state key "spike": dropped once used, or once B0 is older than
+# BASELINE_MAX_AGE_S). It survives failed, cached, unlit and colour-dark polls -
+# at night <cam_8> alternates IR and dark frames: 37 of the 95 merges below
+# had 1-4 dark frames between spike and return - but a lit colour ("day") frame
+# drops it: room lights on between the two IR frames is a visit, not a
+# one-frame glitch (0 of the 95 had one). If that next IR frame logs a change
+# against the spike as before, but reads within SPIKE_RETURN of B0 AND shows no
+# change against B0 (same test, same bar), the picture is back to what it was:
+# the SPIKE's change is withdrawn and the return's is kept - the pair counts
+# once, stamped when the picture came back - and the summary names it on that
+# poll with the test against B0 (peak d / bar, hot blocks). If the return does
+# show a change against B0 (someone is still there), both stand, and the
+# summary says so with the same numbers.
+# The withdrawn stamp moves from "log" to "merged" (pruned like the log).
+# cam_motion.py counts a camera's OWN changes from "log", so the pair counts once
+# towards MIN_VISUAL_EVENTS, but scores vision recall - and the co-change test
+# of the OTHER cameras - on log + merged, which is exactly the log written
+# without this rule. So no motion cluster loses its recall hit to a merge,
+# whatever the spike-to-return gap (bounded only by BASELINE_MAX_AGE_S; up to
+# 600 s on the record). With "log" alone one cluster on the record would have
+# (<cam_3> 09-10 02:40:51Z: motion 4.3 min before the spike and 6.3 min
+# before the return), and no single stamp serves every cluster: the spike's
+# misses the 09-29 visit above (its spike came 7.3 min before the motion, only
+# the return fell inside cam_motion.py's 6 min). Capping the gap (300 s) instead
+# would undo 23 of the 95 merges (22 with no motion, all before 09-16) and
+# still lose that cluster: its return came 120 s after the spike.
+# Nothing else moves: every frame is compared against the same frame and stored
+# exactly as before (a lasting step is compared frame against frame; no
+# baseline is ever held back), the noise EMA and max_norm_diff are those of
+# that comparison, and a change can only be withdrawn, never added.
+# On the same 36.9 days: 89 of the 135 pairs become one change (all 35 bright
+# <cam_8> pairs with no motion), 95 spike changes go if every return is quiet
+# against B0 (93 with no motion on the spike - <cam_8>'s IR comparisons with
+# |dL| <= 3 and no motion within 30 min log a change 0.04% of the time). 2 with
+# motion go if their return is quiet, and stay in "merged". Withdrawing the
+# RETURN's change instead (a veto) would turn a frame that logged into a quiet
+# noise sample; withdrawing the spike's keeps every comparison as it was.
+# IR only: "day" adds 12 pairs with no motion but 6 spikes with motion and 17
+# outcomes the record cannot decide (all with motion: the first comparison after
+# the room lights come on is against a seed frame the recorder never shows).
+# SPIKE_LUMA 8 is under every bright <cam_8> pair (smallest 8.6; 11.4 since
+# 09-20); 6-11 leave the same 2 changes with motion. SPIKE_RETURN 3 covers every
+# such return (largest 2.9; 1.7 since 09-20); 4-5 add 2-4 pairs and 3 more
+# spikes with motion.
+# Rejected on the same record (IR only, T = 8): not storing a spike frame as the
+# baseline holds a lasting step against an older frame - 30 comparisons lost to
+# re-seeding, 1 change with motion lost with certainty and 342 quiet comparisons
+# re-made (adopting the second held frame: 5 and 219), 6 motion clusters at
+# risk; comparing EVERY returning frame against B0 re-makes 151 quiet
+# comparisons as well, i.e. can ADD changes (3 clusters at risk).
+SPIKE_LUMA = 8.0
+SPIKE_RETURN = 3.0
+# a return's summary entry: luma B0 -> spike -> return, then its test against B0
+# (median-removed peak / bar, hot blocks), so the recorder can audit the merge
+SPIKE_SEEN = "%s (luma %.1f -> %.1f -> %.1f, vs before: d %.1f/%.1f, %d hot)"
 KEEP_HOURS = 48.0
 TIMEOUT = 12
 # HEARTBEAT. Home Assistant rewrites last_updated only when the state or an
@@ -418,6 +491,62 @@ def load_ring(prev):
     return ring[-BODY_RING_N:], dropped
 
 
+def load_spike(raw, now):
+    """{"ir": [b64 frame from before a luma spike, its stamp, the spike's stamp]}
+    while that frame is still usable, and the names of malformed entries dropped.
+    An entry older than BASELINE_MAX_AGE_S is simply gone (expired, not bad)."""
+    if raw is None:
+        return {}, []
+    if not isinstance(raw, dict):
+        return {}, ["spike"]
+    spike, dropped = {}, []
+    for m, v in raw.items():
+        try:
+            ok = (m == "ir" and isinstance(v, list) and len(v) == 3 and isinstance(v[0], str)
+                  and len(base64.b64decode(v[0])) == RESIZE[0] * RESIZE[1])
+            ts, t1 = (_finite(v[1]), _finite(v[2])) if ok else (None, None)
+        except Exception:  # noqa: BLE001 - undecodable frame
+            ok, ts, t1 = False, None, None
+        if not ok or ts is None or t1 is None:
+            dropped.append("spike[%s]" % m)
+        elif now - ts <= BASELINE_MAX_AGE_S:
+            spike[m] = [v[0], ts, t1]
+    return spike, dropped
+
+
+def load_merged(raw, now):
+    """Stamps of spike changes withdrawn from the log (see SINGLE-FRAME LUMA
+    SPIKES) younger than KEEP_HOURS, and the names of malformed entries dropped."""
+    if raw is None:
+        return [], []
+    if not isinstance(raw, list):
+        return [], ["merged"]
+    merged, dropped = [], []
+    for v in raw:
+        f = _finite(v) if not isinstance(v, bool) else None
+        if f is None:
+            dropped.append("merged[]")
+        elif now - f < KEEP_HOURS * 3600:
+            merged.append(f)
+    return merged, dropped
+
+
+def back_from_spike(pending, luma, lum, thr):
+    """(mean luma of the pre-spike frame, quiet, peak, hot) when this frame reads
+    within SPIKE_RETURN of the frame from before the spike, else (that mean,
+    None, None, None). quiet: no change against it, by the same test and bar as
+    any comparison; peak / hot: that comparison's median-removed peak and number
+    of blocks over the bar (for the summary)."""
+    b0 = base64.b64decode(pending[0])
+    l0 = sum(b0) / float(len(b0))
+    if abs(lum - l0) > SPIKE_RETURN:
+        return l0, None, None, None
+    bd = block_diffs(luma, b0)
+    med = sorted(bd)[len(bd) // 2]
+    hot = sum(1 for d in bd if d - med > thr)
+    return l0, not (MIN_BLOCKS <= hot <= int(MAX_FRACTION * len(bd))), max(bd) - med, hot
+
+
 def main():
     if not PIL_OK:
         fail("PIL unavailable in this python environment")
@@ -438,7 +567,7 @@ def main():
     # summary. Malformed state values they drop are named there too (once - the
     # repaired state is written back).
     repaired, faults = [], []
-    unlit_skips = []
+    unlit_skips, spike_pairs, spike_kept = [], [], []
     for name, body in results:
         prev = st.get(name, {})
         log = [t for t in prev.get("log", []) if now - t < KEEP_HOURS * 3600]
@@ -460,6 +589,18 @@ def main():
         except Exception as exc:  # noqa: BLE001 - back to the single-previous-hash check
             ring = [prev["body_hash"]] if isinstance(prev.get("body_hash"), str) else []
             faults.append("%s hash ring %s" % (name, type(exc).__name__))
+        try:
+            spike, dropped_spike = load_spike(prev.get("spike"), now)
+            dropped += dropped_spike
+        except Exception as exc:  # noqa: BLE001 - no pending spike: every change stands
+            spike = {}
+            faults.append("%s spike %s" % (name, type(exc).__name__))
+        try:
+            merged, dropped_merged = load_merged(prev.get("merged"), now)
+            dropped += dropped_merged
+        except Exception as exc:  # noqa: BLE001 - recall loses the stamps, nothing else
+            merged = []
+            faults.append("%s merged %s" % (name, type(exc).__name__))
         if dropped:
             repaired.append("%s %s" % (name, "/".join(dropped)))
         settle = int(prev.get("settle", 0))
@@ -520,6 +661,7 @@ def main():
                 # neither compared nor stored (see UNLIT GRAYSCALE FRAMES). With
                 # no fresh baseline the frame seeds the slot as any other does.
                 unlit = False
+                new_spike = None
                 if mode == "ir" and lum < LUMA_IR_MIN and old is not None:
                     try:
                         ob = base64.b64decode(old)
@@ -561,6 +703,28 @@ def main():
                         if MIN_BLOCKS <= hot <= int(MAX_FRACTION * len(bd)):
                             log.append(now)
                             events.append([now, mode])
+                            # one-frame luma spike (see SINGLE-FRAME LUMA SPIKES)
+                            try:
+                                returned = False
+                                pending = spike.get(mode)      # only ever "ir" (load_spike)
+                                if pending is not None:
+                                    l0, quiet, peak0, hot0 = back_from_spike(pending, luma, lum, thr)
+                                    returned = quiet is not None
+                                    if returned:
+                                        seen = SPIKE_SEEN % (name, l0, sum(old_b) / float(len(old_b)),
+                                                             lum, peak0, thr, hot0)
+                                    if quiet and pending[2] in log:
+                                        log.remove(pending[2])
+                                        events[:] = [e for e in events if e[0] != pending[2]]
+                                        merged.append(pending[2])     # kept for recall
+                                        spike_pairs.append(seen)
+                                    elif quiet is False:
+                                        spike_kept.append(seen)
+                                if mode == "ir" and not returned and \
+                                        abs(lum - sum(old_b) / float(len(old_b))) > SPIKE_LUMA:
+                                    new_spike = [old, float(base[1]), now]
+                            except Exception as exc:  # noqa: BLE001 - both changes stand
+                                faults.append("%s spike %s" % (name, type(exc).__name__))
                         else:
                             # quiet sample = this camera+mode's live noise estimate.
                             # Growth is capped at 15%/sample: a single above-threshold
@@ -572,6 +736,14 @@ def main():
                             noise[mode] = round(min(ema_new, max(ema * 1.15, 0.5), NOISE_MAX), 2)
                 if not unlit:
                     frames[mode] = [base64.b64encode(luma).decode(), now]
+                    # a kept pre-spike frame serves the NEXT frame of its regime only
+                    spike.pop(mode, None)
+                    if mode == "day":
+                        # a lit colour scene in between (room lights on): whatever
+                        # the IR frame before it was, it was not a one-frame glitch
+                        spike.clear()
+                    if new_spike is not None:
+                        spike[mode] = new_spike
                 # drop any mode baseline that has aged out, so state cannot grow
                 frames = {m: v for m, v in frames.items()
                           if (now - float(v[1])) <= BASELINE_MAX_AGE_S * 4}
@@ -600,6 +772,10 @@ def main():
             # happened to be - i.e. it restored the cross-exposure comparison this
             # release exists to remove, on every probe miss.
             entry.update({k: prev[k] for k in ("frame", "frames", "ir", "settle") if k in prev})
+        if spike:
+            entry["spike"] = spike
+        if merged:
+            entry["merged"] = merged
         st[name] = entry
         day_events += sum(1 for e in events if now - e[0] < 24 * 3600 and e[1] == "day")
         ir_events += sum(1 for e in events if now - e[0] < 24 * 3600 and e[1] == "ir")
@@ -654,6 +830,13 @@ def main():
         # Only on the poll it happens, so the recorder keeps every occurrence
         # without a new attribute (json_attributes is a fixed allowlist).
         summary += "; unlit grayscale frame not compared: " + ", ".join(unlit_skips)
+    if spike_pairs:
+        # likewise only on the poll the pair is merged
+        summary += "; one-frame luma spike counted once: " + ", ".join(spike_pairs)
+    if spike_kept:
+        # a return within SPIKE_RETURN of the frame before the spike that is NOT
+        # quiet against it: nothing merged, but the test is on the record
+        summary += "; luma spike return differs from before, both kept: " + ", ".join(spike_kept)
     for label, items in (("state repaired, malformed values dropped", repaired),
                          ("FAULT, fell back to the previous rule", faults)):
         if items:

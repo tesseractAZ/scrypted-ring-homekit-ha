@@ -557,6 +557,18 @@ def background_rates(events, now):
     return out
 
 
+def vision_merged(entry):
+    """The stamps cam_vision.py withdrew from a camera's vision log when it
+    counted a one-frame luma spike once (its "merged" key, see SINGLE-FRAME LUMA
+    SPIKES there): finite numbers only, anything else ignored. Absent = []."""
+    raw = entry.get("merged") if isinstance(entry, dict) else None
+    out = []
+    for v in raw if isinstance(raw, list) else []:
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+            out.append(float(v))
+    return out
+
+
 def motion_clusters(ts, link=None):
     """Group sorted timestamps into [first, last] clusters linked by <= link s."""
     link = RECALL_LINK_S if link is None else link
@@ -1154,6 +1166,17 @@ def main():
         and cam_fresh_age[c] is not None and cam_fresh_age[c] > VISION_BLIND_MIN
     )
     raw_log = {cam: sorted((vs.get(cam) or {}).get("log") or []) for cam in CAMS}
+    # ONE-FRAME LUMA SPIKES. cam_vision.py counts a spike and its return once: the
+    # spike's stamp leaves "log" for "merged". A camera's OWN changes are counted
+    # from raw_log, so such a pair is one change towards MIN_VISUAL_EVENTS (a
+    # false pair alone no longer reads "detection/event path suspect"). Anything
+    # that asks WHEN the monitor saw a change - the recall record, and whether
+    # OTHER cameras changed at the same moment (co-change) - reads seen_log =
+    # log + merged, i.e. the log as written before the merge: a merge can then
+    # neither cost a motion cluster its recall hit (the stamp kept in "log" can
+    # be minutes from the cluster) nor turn another camera's change localized.
+    # A state without "merged" gives seen_log == raw_log.
+    seen_log = {cam: sorted(raw_log[cam] + vision_merged(vs.get(cam))) for cam in CAMS}
     visual_hours, localized_hours, localized_count = {}, {}, {}
     for cam in CAMS:
         if not vision_ok:
@@ -1164,7 +1187,7 @@ def main():
         local = []
         for ts in mine:
             others = sum(1 for c2 in CAMS if c2 != cam and
-                         any(abs(t2 - ts) <= CO_CHANGE_WINDOW_S for t2 in raw_log[c2]))
+                         any(abs(t2 - ts) <= CO_CHANGE_WINDOW_S for t2 in seen_log[c2]))
             if others < CO_CHANGE_MIN - 1:
                 local.append(ts)
         localized_count[cam] = len(local)
@@ -1184,7 +1207,7 @@ def main():
     try:
         recall_state = update_recall(
             mstate.get("vision_recall") if isinstance(mstate.get("vision_recall"), dict) else {},
-            motion_events, raw_log if vision_ok else {}, now,
+            motion_events, seen_log if vision_ok else {}, now,
             now - VISION_KEEP_H * 3600, unusable_now, usable_since, last)
     except Exception:  # noqa: BLE001
         recall_state = {}
