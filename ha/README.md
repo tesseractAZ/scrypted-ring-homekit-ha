@@ -863,7 +863,11 @@ archived line and withholds rather than writes anything that still looks like
 an identifier: JWT prefixes, dotted quads (also URL-encoded), IPv6 shapes,
 credential assignments with escaped quotes or `%3A`/`%3D` separators,
 `credential`/`api-key`/`signature` keys, URL-encoded e-mail, alternative MAC
-forms, HomeKit setup URIs, a quoted mixed-class value under `auth`/`key`, and
+forms, HomeKit setup URIs, a quoted mixed-class value under `auth`/`key`, a quoted value under any key
+ending in `id` or `_key` that still holds a run of eight or more letters, digits
+and dashes mixing letters and digits, a raw segment after `mode/location/`,
+`locations/` or `accounts/` in a URL path, any text but the placeholder after
+`for location` in either Ring location error, and
 any keyless mixed-case alphanumeric run of 24+ characters. Base64 blobs (for
 example an SDP `sprop-parameter-sets`) are therefore withheld by design.
 Authentication prose such as "Refresh token is not valid" survives. Measured on
@@ -903,10 +907,40 @@ dry run always uses a throwaway key and saves nothing. Measured on
 the whole retained journal (about 600,000 entries): one token per camera that
 held a session, an exact one-to-one match with the camera names over every
 `sdp` answer, every signalling block attributable to a camera (previously
-about 19 % could not be), 0 lines withheld. Ring ids are recognised by key in
-the `key: value`, JSON, escaped-JSON and URL-encoded forms; an id inside an
-array, a nested object or split across lines is out of reach of any key-based
-rule (a numeric id or a UUID there still meets the number and UUID rules).
+about 19 % could not be), 0 lines withheld. Ring ids are recognised by key in the `key: value`, JSON, escaped-JSON and
+URL-encoded forms, and as the `id` of a `location`, `device`, `doorbot` or
+`ding` object, whether the object is written on one line or its `id` follows
+on a line of its own inside the same dump. The location id is also recognised
+where the Ring client library writes it outside a key: as the path segment
+after `mode/location/`, `locations/` or `accounts/` in the URL of a failed or
+retried request, and in its two errors that name a location (`... found for
+location <name> - <id>`, `Could not find a security panel for location <name>
+- <id>`), where the name goes too. An id inside an array, as a map key, in
+other prose or as a bare string is out of reach of every rule (a numeric id or
+a UUID there still meets the number and UUID rules).
+
+**Push notifications.** A doorbell press makes the engine log the Ring push
+notification as an object dump (`<camera> onDoorbellPressed { ... }`). Its
+location id (as `group_key` and as `data.location.id`) becomes `<RID>`; its
+`data.device.id`, the camera's own id, becomes the same `<DEV:…>` token as the
+camera's `doorbot_id`, so the press is attributable (a `device` or `doorbot`
+object whose id is not a Ring id of six or more digits gets `<RID>`, so a
+non-Ring device never reads as a camera); the ding id at the head of
+`server_correlation_id` becomes the ding's `<DING:…>` token, which ties the
+press to its live session, and its suffix becomes `<RID>` whether quoted or
+not, after `|` or `%7C`; `triggered_at`, `sent_at` and the snapshot
+`timestamp` become offsets like the ding stamps. The other copies of the camera
+id in the dump (the channel suffix, `referring_item_id`, the snapshot id) stay
+`<NUM>`. As a general rule, any quoted value under a key ending in `id` or
+`_key` (or `Key`) has every run of eight or more letters, digits, dashes and
+underscores that mixes letters and digits replaced by `<RID>`; stream and track
+ids, counters and codec names are digits only, UUIDs or shorter and are not
+touched. The residual scan withholds any such run that is still there, so a
+variant under a quoted `..id` or `.._key` key that no rule knows is withheld
+instead of archived; an id outside a quoted key (prose, an array element, a map
+key, a URL path other than the Ring paths above) is still out of reach. A rule
+fix applies to new lines only: day files written before it keep what they hold
+until they are re-redacted.
 
 **Request-dump collapse.** The two probing monitors fetch the same `takePicture`
 webhooks every 120 s, and the engine logs each request as a 15-line object
@@ -943,7 +977,8 @@ about 2 s; the whole journal about 85-89 s, so a first backfill takes two to
 three runs. `cam_logarchive.py --dry-run` fetches, collapses, redacts and scans, writes
 nothing, and adds a pseudonym census to its note (counts only: tokens per
 class, cameras, sdp pairs, whether the token-to-camera map is one-to-one,
-attributable blocks, offset medians); `--scan FILE...` reports per-file line,
+attributable blocks, offset medians, push-notification dumps and how many carry
+their camera's token); `--scan FILE...` reports per-file line,
 withheld, residual and marker counts plus the same census, one per REKEY
 segment, where a malformed token counts as a bad token. A line that makes the
 redaction itself fail is withheld (`residual=redact_error`) instead of stopping

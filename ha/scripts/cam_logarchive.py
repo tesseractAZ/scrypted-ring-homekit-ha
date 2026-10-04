@@ -61,7 +61,10 @@ EACH RUN (command_line, hourly):
      every line (REDACTION RULES, fixed order) and runs an independent RESIDUAL
      scan; a line that still trips it is WITHHELD (timestamp kept, text not).
      Ring camera, ding, media-cell and session ids become KEYED PSEUDONYMS and
-     ding epoch-ms stamps become offsets from the line's own stamp (below).
+     ding epoch-ms stamps become offsets from the line's own stamp (below); a
+     Ring push-notification dump (onDoorbellPressed ..) loses its location id,
+     group key and correlation suffix, and a logged Ring REST URL or location
+     error its location id (PUSH DUMPS below).
   5. Measures interior silences (max gap between consecutive entries).
   6. Appends one gzip member per touched UTC day, the CURSOR line last, fsyncs;
      saves a new pseudonym key AFTER the members (see PSEUDONYMS); applies
@@ -212,6 +215,51 @@ CURSOR_SHAPE = re.compile(r"^(?:[a-z]=[0-9a-f]{1,64};){2,9}[a-z]=[0-9a-f]{1,64}$
 # integer digits): ding latency is measurable without an absolute id-like number
 # (median created_at -1.72 s, requested_at -0.026 s over those 389 dings).
 # Anything else there (no stamp, another length, out of range) stays <NUM>.
+#
+# PUSH DUMPS (10-04 review). The first doorbell press in the archive (10-03,
+# an onDoorbellPressed / button_press push of 42 lines, the only push dump in the
+# 628,613-line journal) wrote the Ring LOCATION id in clear twice - as
+# 'group_key' (android_config) and as 'location: [Object: null prototype] { id:
+# .. }' (data.location) - because every Ring-id rule keyed on a '.._id' NAME and
+# the value (12 chars: letters, digits, two dashes) met no residual rule. The
+# same dump's data.device.id became the constant <RID> (R_ID), not the camera's
+# token. Measured on the raw journal (counts and booleans only): device.id equals
+# the doorbot_id that the sdp pairing ties to the camera the dump names (so it
+# takes the same DEV token); location.id equals group_key and occurs in no other
+# line; referring_item_id ('device_id' type), the channel suffix and the second
+# half of snapshot_uuid are that same device id (they stay <NUM>: the dump names
+# its camera and device.id carries the token); the server_correlation_id is
+# '<ding_id>|ding_<9 mixed chars>' (the ding id -> DING token, linking the press
+# to its ding; the suffix occurs nowhere else -> <RID>); triggered_at, sent_at
+# and img.timestamp are epoch-ms 89-217 ms before the line (-> <T:> offsets);
+# riid (a UUID) and the 32-hex snapshot id occur only in this dump (<UUID>,
+# <HEX>). Rules:
+#   R6d  the id of a location / device / doorbot / ding OBJECT, on one line
+#        ('location: [Object: null prototype] { id: .. }', JSON, escaped JSON)
+#        or on its own line as a direct member of such an object opened earlier
+#        in the same writer's dump (Nest): location -> <RID>, device/doorbot ->
+#        DEV, ding -> DING when the value is a Ring id (6+ digits; anything else,
+#        e.g. a Scrypted device id, and no key: <RID>);
+#   R6e  group_key -> <RID>; R6f server_correlation_id's leading ding id -> DING
+#        and its '<kind>_<suffix>' -> <RID>, quoted or not, after '|' or '%7C';
+#   R6g  the segment after 'mode/location/', 'locations/' or 'accounts/' in a
+#        URL path -> <RID> (skeptic pass: ring-client-api logs the URL of every
+#        failed or retried request, and those paths carry the location id; 0
+#        such lines in the archive so far, a DNS outage would repeat one every
+#        few seconds); R6h the two location.js errors that name a location in
+#        prose ('.. for location <name> - <id>'): name and id -> <RID>;
+#   R9   LAST, the generalisation: in a QUOTED value under any key ending in 'id'
+#        or '_key' ('Key' in camelCase), every run of 8+ [A-Za-z0-9_-] holding a
+#        letter AND a digit -> <RID>. On the 10-02/10-03 archive (381,137
+#        lines) it meets ONE value, the correlation suffix (R6d/R6e take the
+#        two location ids first); stream/track ids (msid, trackID, mid),
+#        counters and codec names are digits-only, UUIDs or short.
+# The residual's kv_id rule is the backstop for the next unseen variant: on that
+# archive as written it flags exactly the 3 leaked lines, after these rules 0;
+# its ring_path and ring_prose rules are R6g's and R6h's. Out of reach of every
+# rule, and so of the residual: an id that is no '..id'/'.._key' value, no such
+# path segment and not in those two errors - an array element, a map key, other
+# prose, a bare string under 'location:'.
 # ---------------------------------------------------------------------------
 _V4NETS = [
     # The private ranges are built from integers, so no private-range dotted quad
@@ -306,11 +354,14 @@ R_FP = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){7,}(?![0-9
 R_MAC = re.compile(r"(?<![0-9A-Fa-f:-])[0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}(?:\1[0-9A-Fa-f]{2}){4}(?![0-9A-Fa-f:-])")
 # The key/value separator of the Ring-id rules: util.inspect 'key: v', JSON
 # '"key":"v"', JSON escaped once or more ('\"key\":\"v\"') and URL-encoded
-# ('key%3Dv', '%22key%22%3A%22v'). An id in an array ('cell_ids: [..]'), a
-# nested object ('doorbot: { id: .. }'), split across lines or in prose is out of
-# reach of ANY key-based rule: there a numeric id still meets num7 and a UUID the
-# uuid rule, but a short or alphanumeric one does not (0 such lines measured).
+# ('key%3Dv', '%22key%22%3A%22v'). An id in an array ('cell_ids: [..]') or in
+# prose is out of reach of ANY key-based rule: there a numeric id still meets
+# num7 and a UUID the uuid rule, but a short or alphanumeric one does not. The id
+# of a location/device/doorbot/ding OBJECT is reached by R6d (one line, or its
+# own line inside the object); a quoted id-shaped value under any other '..id'
+# key by R9.
 _KV_SEP = r"(?:\\*[\"']|%22)?\s*(?:[:=]|%3[ad])\s*(?:\\*[\"']|%22)?"
+_Q = r"(?:\\*[\"'])?"         # an optional quote, escaped any number of times
 # R6a Ring ids that become KEYED PSEUDONYMS (see PSEUDONYMS): group 2 is the key,
 # group 3 the value (the same value class as R_RID).
 R_RID_PS = re.compile(
@@ -321,9 +372,48 @@ R_RID_PS = re.compile(
 R_SES_PS = re.compile(
     r"(?i)(?<![\w-])((?:dialog_?id|session_?id)[\"']?\s*[:=]\s*[\"']?)"
     r"([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})(?![0-9A-Fa-f])")
-# R6a'' ding epoch-ms -> offset from the line's stamp.
-R_TOFF = re.compile(r"(?i)(?<![\w-])((?:created|requested)_?at[\"']?\s*[:=]\s*[\"']?)(\d{13})(?![\d.])")
+# R6a'' ding and push epoch-ms -> offset from the line's stamp.
+R_TOFF = re.compile(r"(?i)(?<![\w-])((?:(?:created|requested|triggered|sent)_?at|timestamp)[\"']?\s*[:=]\s*[\"']?)"
+                    r"(\d{13})(?![\d.])")
 T_MAX_MS = 86400 * 1000
+# R6d the id of a Ring OBJECT (see PUSH DUMPS): group 2 the object, group 3 the
+# value. One line: the object's '{', then anything but a brace, then its 'id'.
+# ASCII case folding here and in R6f: the prefilters are then necessary
+# conditions, and an object name spelled with a folded letter is no object.
+_OBJ_CLASS = {"location": None, "device": "DEV", "doorbot": "DEV", "ding": "DING"}   # None: <RID>
+_RING_NUM = re.compile(r"[0-9]{6,}")     # a doorbot id (9 digits) or a ding id (19)
+_OBJ_NAMES = r"(location|device|doorbot|ding)"
+_OBJ_BRACE = r"\s*[:=]\s*(?:\[Object: null prototype\]\s*)?\{"
+R_OBJ_ID = re.compile(
+    r"(?ia)(?<![\w-])(" + _Q + _OBJ_NAMES + _Q + _OBJ_BRACE + r"[^{}\n]*?(?<![\w-])" + _Q + r"id" + _Q
+    + r"\s*[:=]\s*" + _Q + r")(?!(?:undefined|null|true|false)\b)([0-9A-Za-z_.:-]+)")
+# ... and across lines: an opener that ends its line, then 'id' as a DIRECT member
+# (Nest decides which object a line belongs to; the rule acts only on such a line).
+_OBJ_OPEN = re.compile(r"(?ia)^( *)" + _Q + _OBJ_NAMES + _Q + _OBJ_BRACE + r"\s*$")
+R_OBJ_MEMBER = re.compile(r"(?ia)^(\s*" + _Q + r"id" + _Q + r"\s*[:=]\s*" + _Q + r")"
+                          r"(?!(?:undefined|null|true|false)\b)([0-9A-Za-z_.:-]+)")
+# R6e group_key: an Android notification's group, which Ring sets to the location id.
+R_GROUP = re.compile(r"(?i)(?<![\w-])(group_?key" + _KV_SEP + r")(?!(?:undefined|null|true|false)\b)"
+                     r"([0-9A-Za-z_.:-]{4,})")
+# R6f a push's server_correlation_id: '<ding_id>|<kind>_<suffix>'. The ding id
+# becomes its DING token and the suffix <RID> - here, not by R9, so that an
+# unquoted or URL-encoded ('%7C') one goes too (skeptic pass: R9 sees quoted
+# values only).
+R_SCID = re.compile(r"(?ia)(?<![\w-])(server_correlation_?id" + _KV_SEP + r")(\d{6,})(\||%7c)"
+                    r"(?:([a-z]+_)([A-Za-z0-9]+))?")
+# R6g a Ring REST path that carries the LOCATION id (skeptic pass, read in the
+# ring-client-api source): rest-client logs the URL of every failed or retried
+# request ('Retry #n failed to reach Ring server at <url>.', 'Request to <url>
+# failed with status ..', '404 from endpoint <url>', 'http request failed.  <url>
+# returned errors:'), and location.js builds 'mode/location/<id>[/..]',
+# 'locations/<id>/events' and 'rs/monitoring/accounts/<id>[/..]'. A DNS outage
+# repeats the retry line every few seconds. The segment after them -> <RID>.
+R_LOC_PATH = re.compile(r"(?ia)(/(?:mode/location|locations|accounts)/)([0-9A-Za-z_~%-]+)")
+# R6h the two ring-client-api errors that name a location in prose (location.js:
+# 'No assets (alarm hubs or beam bridges) found for location <name> - <id>',
+# 'Could not find a security panel for location <name> - <id>'): the name (an
+# owner's free text) and the id -> <RID>.
+R_LOC_PROSE = re.compile(r"(?ia)((?:found|security panel) for location ).+")
 # R6 Ring account/device identifiers by key, and generic numeric "id".
 R_RID = re.compile(
     r"(?i)(?<![\w-])((?:doorbot_?id|device_?id|location_?id|ding_?id|cell_?id|account_?id|"
@@ -341,6 +431,18 @@ R_HEX = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{16,}(?![0-9A-Fa-f])")
 # R8 bare runs of 7+ digits (ding/cell ids, epoch-ms, SDP session ids). Not
 # after '.', so decimal fractions survive.
 R_NUM = re.compile(r"(?<![\d.])\d{7,}")
+# R9 (LAST, see PUSH DUMPS) a QUOTED value under any key ending in 'id' or '_key'
+# (any case; 'Key' after a lower-case letter or digit, camelCase): group 2 is the
+# key, group 3 the quoted text, in which every run of 8+ [A-Za-z0-9_-] holding a
+# letter and a digit becomes <RID>. ASCII key letters, so the prefilter ('id' or
+# 'key' in the lower-cased message) is a necessary condition. Placeholders hold
+# no such run (tokens are letters only), so the rule never touches them.
+R_KV_ID = re.compile(r"((?<![\w$-])([\w$-]*?(?:[Ii][Dd]|_[Kk][Ee][Yy]|[a-z0-9]Key))"
+                     r"(?:\\*[\"']|%22)?\s*(?:[:=]|%3[aAdD])\s*(?:\\*[\"']|%22))((?:(?!%22)[^'\"\\\n])*)")
+R_KV_RUN = re.compile(r"(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{8,}")
+# R9's hits per KEY (lower case, digits as 9), for the dry-run note and the scrub
+# tool only: a key name never reaches a published attribute.
+KV_KEYS = collections.Counter()
 
 
 PS_ALPHABET = "ghijklmnopqrstuvwxyz"     # 20 letters: no hex letter, no digit
@@ -409,6 +511,105 @@ def _t_offset(m, hits, ctx=None):
         return m.group(0)       # not an epoch-ms near this line: <NUM>
     hits["ts_offset"] = hits.get("ts_offset", 0) + 1
     return m.group(1) + "<T:%s%d.%03ds>" % ("-" if d < 0 else "+", abs(d) // 1000, abs(d) % 1000)
+
+
+def _obj_value(kind, val, hits, ps):
+    """The id of a Ring object -> its token (device/doorbot DEV, ding DING) or
+    the constant <RID> (location; no key; an object name that (?i) folded from
+    another letter - fails CLOSED, never a KeyError; a value not shaped like the
+    Ring id the token class stands for, e.g. a Scrypted 'device: { id: '42' }',
+    which must not read as a camera in the census)."""
+    core = val.rstrip(".:-")
+    cls = _OBJ_CLASS.get(kind.lower()) if kind else None
+    hits["ring_obj"] = hits.get("ring_obj", 0) + 1
+    if cls is None or ps is None or not _RING_NUM.fullmatch(core):
+        return "<RID>" + val[len(core):]
+    return ps.token(cls, core) + val[len(core):]
+
+
+def _obj_id(m, hits, ctx=None):
+    return m.group(1) + _obj_value(m.group(2), m.group(3), hits, ctx[0] if ctx else None)
+
+
+def _obj_member(m, hits, ctx=None):
+    kind = ctx[2] if ctx and len(ctx) > 2 else None
+    if kind is None:
+        return m.group(0)       # not a direct member of a tracked object
+    return m.group(1) + _obj_value(kind, m.group(2), hits, ctx[0])
+
+
+def _scid(m, hits, ctx=None):
+    ps = ctx[0] if ctx else None
+    tail = m.group(3)
+    if m.group(5):          # '<kind>_<suffix>' -> <RID>, as R9 writes a quoted one
+        tail += "<RID>"
+        hits["ring_kv"] = hits.get("ring_kv", 0) + 1
+        KV_KEYS["server_correlation_id"] += 1
+    if ps is None:
+        hits["ring_id"] = hits.get("ring_id", 0) + 1
+        return m.group(1) + "<RID>" + tail
+    hits["ps_ding"] = hits.get("ps_ding", 0) + 1
+    return m.group(1) + ps.token("DING", m.group(2)) + tail
+
+
+def _kv_id(m, hits, ctx=None):
+    new, n = R_KV_RUN.subn("<RID>", m.group(3))
+    if not n:
+        return m.group(0)
+    hits["ring_kv"] = hits.get("ring_kv", 0) + n
+    key = re.sub(r"\d", "9", m.group(2).lower())[:40]
+    if key in KV_KEYS or len(KV_KEYS) < 64:
+        KV_KEYS[key] += n
+    else:
+        KV_KEYS["(other)"] += n
+    return m.group(1) + new
+
+
+# A dump is one log statement per line: '<cam> onDoorbellPressed {', then its
+# members at 2-space steps, then '}'. Nest follows, per writer, the location /
+# device / doorbot / ding objects opened on a line of their own, so that an 'id'
+# member on a LATER line is known to be that object's id (R6d). A line at the
+# opener's indent or shallower (its '}', the next statement, a blank) closes it.
+NEST_DEPTH = 8
+NEST_MAX_LINES = 400
+NEST_WRITERS = 64
+
+
+class Nest:
+    def __init__(self):
+        self._open = {}         # writer -> [[indent, object, member indent, lines], ..]
+
+    def feed(self, who, msg):
+        """-> the tracked object `msg` is a DIRECT member of, or None."""
+        ind = len(msg) - len(msg.lstrip(" "))
+        stack = self._open.get(who)
+        kind = None
+        if stack:
+            blank = not msg.strip()
+            while stack and (blank or ind <= stack[-1][0]):
+                stack.pop()
+            if stack:
+                top = stack[-1]
+                top[3] += 1
+                if top[3] > NEST_MAX_LINES:     # never closed: forget it
+                    del stack[:]
+                else:
+                    if top[2] is None:
+                        top[2] = ind
+                    if ind == top[2]:
+                        kind = top[1]
+        om = _OBJ_OPEN.match(msg)
+        if om:
+            if stack is None:
+                if len(self._open) >= NEST_WRITERS:
+                    self._open.clear()
+                stack = self._open[who] = []
+            if len(stack) >= NEST_DEPTH:
+                del stack[0]
+            stack.append([len(om.group(1)), om.group(2), None, 0])
+        if stack is not None and not stack:
+            self._open.pop(who, None)
+        return kind
 
 
 def _ip6_repl(m, hits, ctx=None):
@@ -483,10 +684,13 @@ def _bearer(m, hits, ctx=None):
 # (name, regex, replacement, prefilter) - THE ORDER IS PART OF THE RULE: JWT;
 # IPv6 (incl. ::ffff:a.b.c.d) before IPv4; ICE/credential values; DTLS
 # fingerprints; Ring ids (the pseudonymised keys before the constant ones, the
-# keyed session UUIDs before the generic UUID, the ding stamps before num7);
-# 16+ hex; bare 7+ digits. Each prefilter is a NECESSARY condition for its regex
-# (it only saves time): msg is the message, low its lower-case copy.
+# object ids before the generic numeric 'id', the keyed session UUIDs before the
+# generic UUID, the ding stamps before num7); 16+ hex; bare 7+ digits; LAST the
+# generic quoted '..id' / '.._key' value (R9), which sees only what every other
+# rule left. Each prefilter is a NECESSARY condition for its regex (it only saves
+# time): msg is the message, low its lower-case copy.
 _CRED_KW = ("pwd", "ufrag", "user", "pass", "secret", "api", "token")
+_OBJ_KW = ("location", "device", "doorbot", "ding")
 RULES = [
     ("jwt", R_JWT, _whole("<JWT>", "jwt"), lambda msg, low: "eyJ" in msg),
     ("email", R_EMAIL, _whole("<EMAIL>", "email"), lambda msg, low: "@" in msg),
@@ -504,22 +708,32 @@ RULES = [
     ("mac", R_MAC, _whole("<MAC>", "mac"), lambda msg, low: msg.count(":") >= 5 or msg.count("-") >= 5),
     ("ring_ps", R_RID_PS, _ps_rid,
      lambda msg, low: "doorbot" in low or "device" in low or "ding" in low or "cell" in low),
+    ("ring_obj", R_OBJ_ID, _obj_id, lambda msg, low: "{" in msg and any(k in low for k in _OBJ_KW)),
+    ("ring_member", R_OBJ_MEMBER, _obj_member, lambda msg, low: "id" in low),
+    ("ring_group", R_GROUP, _keyed("<RID>", "ring_group"), lambda msg, low: "group" in low),
+    ("ring_scid", R_SCID, _scid, lambda msg, low: "correlation" in low),
+    ("ring_path", R_LOC_PATH, _keyed("<RID>", "ring_path"), lambda msg, low: "location" in low or "accounts/" in low),
+    ("ring_prose", R_LOC_PROSE, _keyed("<RID>", "ring_prose"), lambda msg, low: "for location " in low),
     ("ring_id", R_RID, _keyed("<RID>", "ring_id"), lambda msg, low: "id" in low or "serial" in low or "mac" in low),
     ("id_num", R_ID, _keyed("<RID>", "ring_id"), lambda msg, low: "id" in low),
     ("ses_ps", R_SES_PS, _ps_ses, lambda msg, low: "dialog" in low or "session" in low),
-    ("ts_offset", R_TOFF, _t_offset, lambda msg, low: "created" in low or "requested" in low),
+    ("ts_offset", R_TOFF, _t_offset,
+     lambda msg, low: "created" in low or "requested" in low or "triggered" in low or "sent" in low
+     or "timestamp" in low),
     ("uuid", R_UUID, _whole("<UUID>", "uuid"), lambda msg, low: msg.count("-") >= 4),
     ("hk_code", R_HK, _whole("<HKCODE>", "hk_code"), lambda msg, low: msg.count("-") >= 2),
     ("geo", R_GEO, _keyed("<GEO>", "geo"), lambda msg, low: "la" in low or "ln" in low or "lo" in low),
     ("hex16", R_HEX, _whole("<HEX>", "hex16"), None),
     ("num7", R_NUM, _whole("<NUM>", "num7"), None),
+    ("ring_kv", R_KV_ID, _kv_id, lambda msg, low: "id" in low or "key" in low),
 ]
 
 
-def redact(msg, hits, ps=None, line_ms=None):
+def redact(msg, hits, ps=None, line_ms=None, obj=None):
     """ps: the run's Pseudonyms (None: constant placeholders); line_ms: the
-    line's own UTC stamp in epoch-ms (None: ding stamps stay <NUM>)."""
-    ctx = (ps, line_ms)
+    line's own UTC stamp in epoch-ms (None: ding stamps stay <NUM>); obj: the
+    Ring object (Nest) this line is a direct member of, or None."""
+    ctx = (ps, line_ms, obj)
     for _name, rx, fn, pre in RULES:
         if pre is not None and not pre(msg, msg.lower()):
             continue
@@ -571,6 +785,23 @@ RESIDUAL = [
                            r"(?=[A-Za-z0-9_+/=-]*[A-Z])(?=[A-Za-z0-9_+/=-]*[a-z])(?=[A-Za-z0-9_+/=-]*\d)"
                            r"[A-Za-z0-9_+/=-]{16,}")),
     ("opaque24", re.compile(r"(?<![A-Za-z0-9_+/=-])(?=[A-Za-z0-9_+/=-]*[A-Z])(?=[A-Za-z0-9_+/=-]*[a-z])(?=[A-Za-z0-9_+/=-]*\d)[A-Za-z0-9_+/=-]{24,}")),
+    # A Ring REST path's location segment (R6g's backstop, Unicode folding
+    # included): only a placeholder may follow 'mode/location/', 'locations/' or
+    # 'accounts/'.
+    ("ring_path", re.compile(r"(?i)/(?:mode/location|locations|accounts)/[0-9A-Za-z_~%-]")),
+    ("ring_prose", re.compile(r"(?i)(?:found|security panel) for location (?!<RID>$)")),
+    # The BACKSTOP of R9 (10-04 review: a 12-character location id under
+    # 'group_key' and inside 'location: { id: .. }' met no rule above): a QUOTED
+    # value under any key ending in 'id' or '_key' (any case, Unicode folding
+    # included) that still holds a run of 8+ letters/digits/dashes with a letter
+    # AND a digit, at the start of the value or after a character outside that
+    # class (not after the '2' of an opening %22). No placeholder holds one
+    # (tokens are letters only), so only a raw value can trip it - also one
+    # wrapped as '<..>'. Whatever precedes the suffix is some key, so the key's
+    # start is not matched (1.5x faster, same lines).
+    ("kv_id", re.compile(r"(?:(?i:id|_key)|[a-z0-9]Key)(?:\\*[\"']|%22)?\s*(?:[:=]|%3[aAdD])\s*"
+                         r"(?:\\*[\"']|%22)(?:(?:(?!%22)[^'\"\\\n])*?(?!%22)[^A-Za-z0-9'\"\\\n-])?"
+                         r"(?=[A-Za-z0-9-]*[A-Za-z])(?=[A-Za-z0-9-]*\d)[A-Za-z0-9-]{8,}")),
 ]
 # A ':'-group run of 4+ is also how a TIME with ms never looks (HH:MM:SS.mmm has
 # 3), so hex_colon4 does not fire on timestamps.
@@ -592,15 +823,18 @@ def withhold(line, kinds):
     return head + "<WITHHELD residual=%s>" % ",".join(kinds)
 
 
-def process_line(raw, hits, ps=None):
+def process_line(raw, hits, ps=None, nest=None):
     """raw journal line -> (archived text, residual kinds or []).
     The verbose prefix '<ts> host ident[pid]: ' is kept VERBATIM: cam_flap's
     MOTION_RE anchors on the ': ' before the camera name, and a stripped archive
     lost 57 of 57 motion lines in a replay. Redaction runs on the message; the
-    residual scan on the WHOLE archived line."""
+    residual scan on the WHOLE archived line. nest: the run's Nest (lines must
+    then come in journal order), None: an object id on its own line is left to
+    R_ID / R9 / the residual."""
     m = PREFIX_RE.match(raw)
     head, msg = (raw[:m.end()], raw[m.end():]) if m else ("", raw)
-    red = head + redact(msg, hits, ps, stamp_ms(m.group(1)) if m else None)
+    obj = nest.feed(m.group(2) if m else None, msg) if nest is not None else None
+    red = head + redact(msg, hits, ps, stamp_ms(m.group(1)) if m else None, obj)
     kinds = residual(re.sub(r"\[\d+\]: $", "[]: ", head) + red[len(head):])
     if kinds:
         return withhold(red, kinds), kinds
@@ -1340,6 +1574,7 @@ def run(dry=False, now=None):
     elif new_key is None and not dry and not state.get("ps_key_at"):
         state["ps_key_at"] = int(now)
     census = Census() if dry else None
+    nest = Nest()
 
     # ---- fetch: from the verified cursor, else the whole journal from its head
     passes = 0
@@ -1422,7 +1657,7 @@ def run(dry=False, now=None):
     def out_line(raw, ts):
         nonlocal archived, withheld, newest_out
         try:
-            text, kinds = process_line(raw, hits, ps)
+            text, kinds = process_line(raw, hits, ps, nest)
         except Exception:  # noqa: BLE001 - ONE line must never stop the archive
             # (fails closed: no text; a run that raised here was retried on the
             # same line every hour until the journal vacuumed it into a GAP)
@@ -1692,6 +1927,8 @@ def run(dry=False, now=None):
         notes.append("work budget reached after %d entries; the next run continues from the cursor" % n_entries)
     if census is not None:
         notes.append(census.text())
+        if KV_KEYS:
+            notes.append("ring_kv keys: %s" % ", ".join("%s %d" % kv for kv in sorted(KV_KEYS.items())))
     if not dry:
         state.update({
             "version": 2, "days": day_stats, "events": events,
@@ -1767,6 +2004,12 @@ _T_NUM = re.compile(r"(?:created|requested)_?at[\"']?\s*[:=]\s*[\"']?<NUM>", re.
 _WEBRTC_RE = re.compile(r"^\[([^\]]{1,64})\] (setRemoteDescription|sendIceCandidate|iceConnectionState)\b")
 _METHOD_RE = re.compile(r"^  method: '(\w+)'")
 _DEV_KEY_RE = re.compile(r"(?i)(?:doorbot_?id|device_?id)[\"']?\s*[:=]\s*[\"']?<DEV:([a-z]+)>")
+# A Ring push dump: '<camera> onDoorbellPressed {' .. '}'. Its device id carries
+# the camera's DEV token (R6d); 'on their camera' counts the dumps whose token the
+# sdp pairing maps to the very camera the opener names (10-04: device.id ==
+# doorbot_id).
+_PUSH_OPEN = re.compile(r"^([^\s\[][^\[\]]{0,63}?) on[A-Z]\w{2,40} \{$")
+_DEV_TOKEN_RE = re.compile(r"<DEV:([g-z]{8})>")
 
 
 class Census:
@@ -1782,6 +2025,9 @@ class Census:
         self._blk = None
         self._sdp_dev = None
         self.lines = 0
+        self.push = self.push_dev = 0
+        self.push_pairs = []    # (DEV token, camera name): memory only
+        self._push = None
 
     def feed(self, line):
         self.lines += 1
@@ -1808,6 +2054,26 @@ class Census:
             self.t_other += good        # well-formed <T:> under no ding-stamp key
             if _T_NUM.search(msg):
                 self.t_num += 1         # a ding stamp that stayed <NUM>
+        if self._push is not None:
+            self._push["n"] += 1
+            if msg == "}" or self._push["n"] > NEST_MAX_LINES:
+                p, self._push = self._push, None
+                if msg == "}":
+                    self.push += 1
+                    if p["dev"]:
+                        self.push_dev += 1
+                        self.push_pairs.append((p["dev"], p["cam"]))
+                return
+            if self._push["dev"] is None:
+                dm = _DEV_TOKEN_RE.search(msg)
+                if dm:
+                    self._push["dev"] = dm.group(1)
+            return
+        pm = _PUSH_OPEN.match(msg)
+        if pm:
+            self._push = {"cam": pm.group(1), "dev": None, "n": 0}
+            self._blk = None        # a signalling block cut by a dump attributes nothing
+            return
         if msg == "incoming message {":
             self._blk = {"method": None, "dev": None, "n": 0}
             return
@@ -1861,6 +2127,8 @@ class Census:
             "dev_paired": len(major), "cameras_paired": len(mapped_cams),
             "bijective": bool(major) and len(mapped_cams) == len(major) and conflicts == 0,
             "conflicts": conflicts, "ambiguous": self.ambiguous,
+            "push_dumps": self.push, "push_dev": self.push_dev,
+            "push_dev_on_camera": sum(1 for d, c in self.push_pairs if major.get(d) == c),
         }
 
     def text(self):
@@ -1869,13 +2137,14 @@ class Census:
         return ("census: DEV %d distinct, cameras %d; sdp pairs %d -> %d DEV x %d cameras, %s, %d conflicts, "
                 "%d ambiguous; blocks %d, %d with DEV, %d attributable; DING %d, CELL %d, SES %d distinct; "
                 "T created_at %d (median %s s), requested_at %d (median %s s), other %d, stayed <NUM> %d; "
-                "bad tokens %d" % (
+                "push dumps %d, %d with DEV, %d on their camera; bad tokens %d" % (
                     r["dev_distinct"], r["cameras"], r["sdp_pairs"], r["dev_paired"], r["cameras_paired"],
                     "bijective" if r["bijective"] else "NOT bijective", r["conflicts"], r["ambiguous"],
                     r["blocks"], r["blocks_dev"], r["blocks_attributable"], tk["DING"][1], tk["CELL"][1],
                     tk["SES"][1], r["t_offsets"]["created_at"], r["t_median_s"]["created_at"],
                     r["t_offsets"]["requested_at"], r["t_median_s"]["requested_at"], r["t_offsets"]["other"],
-                    r["t_offsets"]["stayed_num"], r["bad_tokens"]))
+                    r["t_offsets"]["stayed_num"], r["push_dumps"], r["push_dev"], r["push_dev_on_camera"],
+                    r["bad_tokens"]))
 
 
 def scan_files(paths):
@@ -1911,13 +2180,23 @@ def scan_files(paths):
             if "<WITHHELD" in ln:
                 w += 1
                 continue
-            for k in residual(ln):
+            for k in residual(scan_view(ln)):
                 kinds[k] = kinds.get(k, 0) + 1
             census[-1].feed(ln)
         res[os.path.basename(p)] = {"lines": n, "withheld": w, "residual": kinds, "markers": marks,
                                     "bad_markers": bad_marks, "members": nmem, "complete": valid == size,
                                     "census": [c.result() for c in census]}
     sys.stdout.write(json.dumps(res) + "\n")
+
+
+def scan_view(ln):
+    """An archived line as process_line's residual scan saw it: the writer's
+    [pid] dropped (a 7-digit pid - pid_max is 4194304 - is no identifier, and a
+    re-scan must not flag a line the archive passed)."""
+    m = PREFIX_RE.match(ln)
+    if not m or not m.group(2):
+        return ln
+    return re.sub(r"\[\d+\]: $", "[]: ", ln[:m.end()]) + ln[m.end():]
 
 
 _MARK_TS = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+")
