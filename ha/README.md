@@ -914,7 +914,7 @@ younger than 35 days and newer than the last press of
 member of `camera_monitor_stalled`, with a 3 h bar.
 
 **Measured** in the core container: an hourly increment of 15,000 entries takes
-about 2 s at 25 MB RSS; the whole journal about 85-89 s at 45 MB, so a first backfill takes two to
+about 2 s; the whole journal about 85-89 s, so a first backfill takes two to
 three runs. `cam_logarchive.py --dry-run` fetches, collapses, redacts and scans, writes
 nothing, and adds a pseudonym census to its note (counts only: tokens per
 class, cameras, sdp pairs, whether the token-to-camera map is one-to-one,
@@ -922,9 +922,13 @@ attributable blocks, offset medians); `--scan FILE...` reports per-file line,
 withheld, residual and marker counts plus the same census, one per REKEY
 segment, where a malformed token counts as a bad token. A line that makes the
 redaction itself fail is withheld (`residual=redact_error`) instead of stopping
-the run. `rss_mb` is the script's own peak resident set
-(`VmHWM`): `getrusage().ru_maxrss` carried Home Assistant Core's high-water mark
-across the exec.
+the run. `rss_mb` is the script's own peak resident set (`VmHWM`;
+`getrusage().ru_maxrss` carried Home Assistant Core's high-water mark across the
+exec). It does not track the work a run does: each run decompresses every member
+of the three newest day files to find its resume marker, so the largest member
+among them sets the peak. Measured on the first 21 runs (2026-10-03) it read
+73-83 MB while the initial backfill member (13.6 MB of text) was among them, and
+it is expected to fall once that file ages out of the newest three.
 
 **Limits.** Redaction is pattern-based: a new identifier shape that has no key,
 is shorter than the opaque and digit floors, and is not a JWT, IP, UUID or
