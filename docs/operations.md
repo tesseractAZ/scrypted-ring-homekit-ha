@@ -507,7 +507,7 @@ In total that is about 35 MB/day written to `/config` (derived). This is worth k
 | `camera_health` | 120 s | < 720 s | 601 s | 2700 s | 3.75× |
 | `camera_motion_stale` | 1800 s | 1800 s | 1801 s | 5400 s | 3.0× |
 | `camera_visual_activity` | 120 s | < 720 s. The payload changes every poll, so ~120 s in practice | 220 s | 2700 s | 3.75× |
-| `camera_engine_log_archive` | 3600 s | ~3600 s: every run lands in a new hourly bucket, plus up to ~60 s of run time | not yet measured (new) | 10800 s | 3.0× |
+| `camera_engine_log_archive` | 3600 s | ~3600 s: every run lands in a new hourly bucket, plus up to ~60 s of run time | 3605 s (measured separately, 2026-10-04 → 2026-10-10, ~149 h, across one Home Assistant restart and one host reboot) | 10800 s | 3.0× |
 
 **Why a bare age bar could not work without the heartbeat.** The reference fleet's recorder covers 11 days before the heartbeat existed (2026-08-31 → 2026-09-11). Over that period:
 - `camera_health` went up to 7 h 04 m without a new row.
