@@ -1,7 +1,7 @@
 {
   "id": "camera_log_archive_event_cleared",
   "alias": "Cameras - engine log archive events acknowledged",
-  "description": "Dismisses the event card when binary_sensor.camera_log_archive_events turns off - the acknowledge button was pressed or every event aged past 35 days. The sensor keeps its previous verdict while a timeout has wiped the archive sensor's attributes, so a timeout never clears the card.",
+  "description": "Dismisses the event card when binary_sensor.camera_log_archive_events turns off - the acknowledge button was pressed (dismissing the card presses it, see camera_log_archive_event_dismissed) or every event aged past 35 days. The sensor keeps its previous verdict while a timeout has wiped the archive sensor's attributes, so a timeout never clears the card.",
   "triggers": [
     {
       "platform": "state",

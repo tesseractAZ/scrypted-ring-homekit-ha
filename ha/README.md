@@ -379,11 +379,15 @@ shows up here first.
   same pattern), or has seen no engine line for 48 h. One push on the edge: the
   journal holds ~37 h, the deadline for a fix. Cleared by the first run that
   archived.
-- `camera_log_archive_event` / `_event_cleared` — a gap (lines lost), resync
-  (lines may repeat) or withheld line. Card only, restored at boot and every
-  6 h, written only from a payload that carries the counters; cleared by
-  `input_button.camera_log_archive_acknowledge` or after 35 days, never by a good
-  run.
+- `camera_log_archive_event` / `_event_cleared` / `_event_dismissed` — a gap
+  (lines lost), resync (lines may repeat) or withheld line. Card only, restored
+  at boot and every 6 h, written only from a payload that carries the counters;
+  cleared by `input_button.camera_log_archive_acknowledge` or after 35 days,
+  never by a good run. Dismissing the card presses the button (`_event_dismissed`),
+  because a notification card can show only **Dismiss**: only while the events
+  are still raised, and only when the card was drawn at or after the newest
+  event, so an event that arrived after the card was last drawn stays raised.
+  **Dismiss all** counts too.
 - `camera_room_walk_test` — a deliberate walk test for a camera with no
   co-firing partner (see the switch-notes section): double-tap the room's
   switch, walk in, and get PASS or FAILED pushed within 5 minutes.
@@ -886,7 +890,9 @@ as that entry; otherwise the run fails and writes nothing.
 **Redaction, before anything is written.** The `<UTC timestamp> <host>
 <ident>[<pid>]: ` prefix is kept (the log readers anchor on it). Rules on the
 message, in order: JWTs and e-mail addresses; IPv6 including `::ffff:a.b.c.d`
-before IPv4 (classified, never kept); credentials (`Authorization`/`Cookie`,
+and an unbracketed address with its port glued on (Scrypted's startup banner
+prints `https://<v6>:10443/`; the port is kept, and a run that also parses as
+one longer address is redacted whole) before IPv4 (classified, never kept); credentials (`Authorization`/`Cookie`,
 bearer/basic tokens, ICE `ice-pwd`/`ice-ufrag`/`usernameFragment`, quoted
 passphrases, password/username/token/secret/api-key assignments, a credential
 word before an opaque run); RTSP session ids; DTLS fingerprints and MACs; Ring ids by key (pseudonyms for camera, ding, cell and session ids, below), UUIDs, HomeKit codes, coordinates; then runs of 16+ hex and
@@ -1001,7 +1007,8 @@ reports `resync`.
 `error`, `unknown`, `busy` or `clock` - held 75 min, i.e. confirmed by the next
 run); `binary_sensor.camera_log_archive_events` (a gap, resync or withheld event
 younger than 35 days and newer than the last press of
-`input_button.camera_log_archive_acknowledge`). The archive is also the fifth
+`input_button.camera_log_archive_acknowledge`, which dismissing the event card
+also presses). The archive is also the fifth
 member of `camera_monitor_stalled`, with a 3 h bar.
 
 **Measured** in the core container: an hourly increment of 15,000 entries takes

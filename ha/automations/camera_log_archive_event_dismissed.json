@@ -1,0 +1,32 @@
+{
+  "id": "camera_log_archive_event_dismissed",
+  "alias": "Cameras - engine log archive card dismissed (acknowledges)",
+  "description": "Dismissing the engine-log archive card acknowledges the events it showed: presses input_button.camera_log_archive_acknowledge, so binary_sensor.camera_log_archive_events turns off. Only while that sensor is on: camera_log_archive_event_cleared dismisses the card itself once it is off, and that dismissal must not press again. Only when the card was drawn at or after the newest event (created_at, reset by every rewrite, not older than last_event_at): an event that arrived after the card was last drawn was never on screen, so it stays raised and the next re-assert redraws the card. 'Dismiss all' counts as a dismissal. A restart removes no card (they are not kept across it), so a reboot never acknowledges.",
+  "triggers": [
+    {
+      "platform": "persistent_notification",
+      "notification_id": "camera_log_archive_event",
+      "update_type": "removed"
+    }
+  ],
+  "conditions": [
+    {
+      "condition": "state",
+      "entity_id": "binary_sensor.camera_log_archive_events",
+      "state": "on"
+    },
+    {
+      "condition": "template",
+      "value_template": "{{ as_timestamp(trigger.notification.created_at, 0) >= (state_attr('sensor.camera_engine_log_archive', 'last_event_at') | float(0)) }}"
+    }
+  ],
+  "actions": [
+    {
+      "action": "input_button.press",
+      "target": {
+        "entity_id": "input_button.camera_log_archive_acknowledge"
+      }
+    }
+  ],
+  "mode": "single"
+}

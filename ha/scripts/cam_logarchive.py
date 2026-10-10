@@ -325,6 +325,12 @@ R_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Z
 # candidate that stops before the dotted tail leaked '.0.2.77' (mutant M9).
 R_IP6 = re.compile(r"(?<![0-9A-Fa-f:.])[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*")
 _PORT_TAIL = re.compile(r"^(.*\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$")
+# An UNBRACKETED address with its port glued on, as Scrypted's startup banner
+# prints it ('Scrypted Server (Remote) : https://<v6>:10443/'): nine ':'-groups,
+# so the whole run is no address and the residual withheld the line on every
+# cold boot. Tried only after the whole run failed, so a run that parses whole
+# (a 1-4 digit port after a compressed address) is redacted whole, port and all.
+_PORT_TAIL6 = re.compile(r"^([0-9A-Fa-f:]*[0-9A-Fa-f]):(\d{1,5})$")
 # R3 IPv4.
 R_IP4 = re.compile(r"(?<![0-9A-Za-z_.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![0-9]|\.\d)")
 # R4 credential values: ICE (SDP 'a=ice-pwd:' / 'a=ice-ufrag:', JS
@@ -645,7 +651,7 @@ def _ip6_repl(m, hits, ctx=None):
 
 
 def _port_split(core):
-    pm = _PORT_TAIL.match(core)
+    pm = _PORT_TAIL.match(core) or _PORT_TAIL6.match(core)
     if pm:
         return pm.group(1), ":" + pm.group(2)
     return "", ""
