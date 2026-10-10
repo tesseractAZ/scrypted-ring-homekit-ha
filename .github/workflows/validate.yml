@@ -17,6 +17,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read-only token: every step only checks out and inspects the tree.
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
