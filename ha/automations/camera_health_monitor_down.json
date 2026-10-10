@@ -1,6 +1,6 @@
 {
   "alias": "Cameras - health monitor down",
-  "description": "Dead-man for the snapshot-probe watchdog (sensor.camera_health) itself. Its alert automation's four template triggers all read state_attr(...)|int(0), so a dead/unknown sensor - or the script's own error path, which publishes healthy=-1 with zeroed counts - evaluates as 'no fault' on every one of them: the primary liveness monitor could die and be reported as a clean fleet (observed: 10 recorder rows of 'unknown' with all json_attributes wiped). 30 min clears restart windows. RE-ASSERTS hourly (:53) while dead (restart-wipe guard). Added 2026-08-17.",
+  "description": "Dead-man for the snapshot-probe watchdog (sensor.camera_health) itself. Its alert automation's four template triggers all read state_attr(...)|int(0), so a dead/unknown sensor - or the script's own error path, which publishes healthy=-1 with zeroed counts - evaluates as 'no fault' on every one of them: the primary liveness monitor could die and be reported as a clean fleet (observed: 10 recorder rows of 'unknown' with all json_attributes wiped). 30 min clears restart windows. RE-ASSERTS hourly (:53) while dead (restart-wipe guard). Added 2026-08-17. (2026-10-10: the unavailable/unknown hold is an OR of single-state conditions with for:, because HA 2026.10 rejects for: with a list of states.)",
   "triggers": [
     {
       "platform": "state",
@@ -30,16 +30,33 @@
           "value_template": "{{ trigger.id == 'dead' }}"
         },
         {
-          "condition": "state",
-          "entity_id": "sensor.camera_health",
-          "state": [
-            "unavailable",
-            "unknown",
-            "-1"
-          ],
-          "for": {
-            "minutes": 30
-          }
+          "condition": "or",
+          "conditions": [
+            {
+              "condition": "state",
+              "entity_id": "sensor.camera_health",
+              "for": {
+                "minutes": 30
+              },
+              "state": "unavailable"
+            },
+            {
+              "condition": "state",
+              "entity_id": "sensor.camera_health",
+              "for": {
+                "minutes": 30
+              },
+              "state": "unknown"
+            },
+            {
+              "condition": "state",
+              "entity_id": "sensor.camera_health",
+              "for": {
+                "minutes": 30
+              },
+              "state": "-1"
+            }
+          ]
         }
       ]
     }

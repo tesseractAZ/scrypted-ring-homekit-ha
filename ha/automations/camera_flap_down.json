@@ -1,6 +1,6 @@
 {
   "alias": "Cameras - flap monitor down",
-  "description": "Dead-man's switch for the flap monitor itself. The monitor's error path (script failure, SUPERVISOR_TOKEN loss, log-fetch failure) lands binary_sensor.cameras_flapping in 'unavailable'; without this automation that state is terminal-silent. 60 min clears benign windows (HA/Scrypted restarts recover in 5-15 min). NOTE (corrected 2026-08-17): a cam_health death does NOT trip this - cam_vision.py probes the same 9 endpoints at the same cadence, so the probe stream merely halves; cam_health's own dead-man is camera_health_monitor_down. RE-ASSERTS hourly (:47) while the sensor stays dead (restart-wipe guard).",
+  "description": "Dead-man's switch for the flap monitor itself. The monitor's error path (script failure, SUPERVISOR_TOKEN loss, log-fetch failure) lands binary_sensor.cameras_flapping in 'unavailable'; without this automation that state is terminal-silent. 60 min clears benign windows (HA/Scrypted restarts recover in 5-15 min). NOTE (corrected 2026-08-17): a cam_health death does NOT trip this - cam_vision.py probes the same 9 endpoints at the same cadence, so the probe stream merely halves; cam_health's own dead-man is camera_health_monitor_down. RE-ASSERTS hourly (:47) while the sensor stays dead (restart-wipe guard). (2026-10-10: the unavailable/unknown hold is an OR of single-state conditions with for:, because HA 2026.10 rejects for: with a list of states.)",
   "triggers": [
     {
       "platform": "state",
@@ -29,15 +29,25 @@
           "value_template": "{{ trigger.id == 'dead' }}"
         },
         {
-          "condition": "state",
-          "entity_id": "binary_sensor.cameras_flapping",
-          "state": [
-            "unavailable",
-            "unknown"
-          ],
-          "for": {
-            "minutes": 60
-          }
+          "condition": "or",
+          "conditions": [
+            {
+              "condition": "state",
+              "entity_id": "binary_sensor.cameras_flapping",
+              "for": {
+                "minutes": 60
+              },
+              "state": "unavailable"
+            },
+            {
+              "condition": "state",
+              "entity_id": "binary_sensor.cameras_flapping",
+              "for": {
+                "minutes": 60
+              },
+              "state": "unknown"
+            }
+          ]
         }
       ]
     }

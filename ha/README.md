@@ -81,6 +81,13 @@ before deploying (grep for `<` to find them).
    before calling a change done.
 3. **Copy** the script and package file to `/config/` (SSH add-on or Samba).
    Ensure `configuration.yaml` includes the `packages:` directive above.
+   **Home Assistant 2026.10 and later** reject a state condition that combines
+   `for:` with a list of states ("Cannot use 'for' with a list of states"); an
+   automation written that way is disabled at load. The dead-man automations here
+   therefore hold "unavailable or unknown for N minutes" as an OR of single-state
+   conditions, each with the same `for:` - identical behaviour, since `for:` counts
+   from the entity's last state change either way. Check for disabled automations
+   after every HA update.
 4. **Restart HA fully.** The `command_line` integration only loads on a full
    restart — `reload_all` leaves the sensor `unavailable`. Once it is loaded, a
    changed package (a new sensor or new `json_attributes`) applies with

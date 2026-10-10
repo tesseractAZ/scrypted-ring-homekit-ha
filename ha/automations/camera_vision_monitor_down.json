@@ -1,6 +1,6 @@
 {
   "alias": "Cameras - vision monitor down",
-  "description": "Dead-man for the frame-differencing visual monitor (sensor.camera_visual_activity). Added 2026-08-30. Until now this was the ONLY monitor of the four with no dead-man, no derived binary_sensor and no availability guard - grep for camera_visual_activity across all 35 automations returned zero. That mattered because its most likely failure is not a crash but going BLIND while still running: cam_vision.py rewrites its state file every cycle regardless, and cam_motion.py used that file's mtime as its only freshness gate, so a camera nobody could actually see read as a camera that was quiet - the reassuring branch. The one signal that might have caught the monitor stopping (cam_flap's probe_shortfall) was calibrated for a single prober while two sensors probe the same endpoints, so cam_vision dying merely halved the probe stream to a level still above the bar. Fires on death OR on any camera going unseen for 15+ min; re-asserts hourly (:29) as a restart-wipe guard.",
+  "description": "Dead-man for the frame-differencing visual monitor (sensor.camera_visual_activity). Added 2026-08-30. Until now this was the ONLY monitor of the four with no dead-man, no derived binary_sensor and no availability guard - grep for camera_visual_activity across all 35 automations returned zero. That mattered because its most likely failure is not a crash but going BLIND while still running: cam_vision.py rewrites its state file every cycle regardless, and cam_motion.py used that file's mtime as its only freshness gate, so a camera nobody could actually see read as a camera that was quiet - the reassuring branch. The one signal that might have caught the monitor stopping (cam_flap's probe_shortfall) was calibrated for a single prober while two sensors probe the same endpoints, so cam_vision dying merely halved the probe stream to a level still above the bar. Fires on death OR on any camera going unseen for 15+ min; re-asserts hourly (:29) as a restart-wipe guard. (2026-10-10: the unavailable/unknown hold is an OR of single-state conditions with for:, because HA 2026.10 rejects for: with a list of states.)",
   "triggers": [
     {
       "platform": "state",
@@ -35,16 +35,33 @@
           }
         },
         {
-          "condition": "state",
-          "entity_id": "sensor.camera_visual_activity",
-          "state": [
-            "unavailable",
-            "unknown",
-            "-1"
-          ],
-          "for": {
-            "minutes": 30
-          }
+          "condition": "or",
+          "conditions": [
+            {
+              "condition": "state",
+              "entity_id": "sensor.camera_visual_activity",
+              "for": {
+                "minutes": 30
+              },
+              "state": "unavailable"
+            },
+            {
+              "condition": "state",
+              "entity_id": "sensor.camera_visual_activity",
+              "for": {
+                "minutes": 30
+              },
+              "state": "unknown"
+            },
+            {
+              "condition": "state",
+              "entity_id": "sensor.camera_visual_activity",
+              "for": {
+                "minutes": 30
+              },
+              "state": "-1"
+            }
+          ]
         }
       ]
     }

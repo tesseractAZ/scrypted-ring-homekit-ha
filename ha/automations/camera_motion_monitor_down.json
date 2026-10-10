@@ -1,6 +1,6 @@
 {
   "alias": "Cameras - motion monitor down",
-  "description": "Dead-man for the per-camera motion-staleness monitor (binary_sensor.camera_motion_stale / sensor.camera_motion_stale, the recorder-query script). Both its alert and the fleet-wide pipeline check read this sensor's attributes and silently evaluate 'no fault' when it dies. 60 min clears restart windows. RE-ASSERTS hourly (:59) while dead (restart-wipe guard). Covers BOTH death modes: command-level death (state unavailable/unknown) AND the script's fail() path, which emits valid JSON with exit 0 - the sensor stays numeric but its 'error' attribute goes non-null (the binary reads 'off', so a state trigger alone would miss the likeliest death mode: a recorder-DB failure). Added 2026-08-17.",
+  "description": "Dead-man for the per-camera motion-staleness monitor (binary_sensor.camera_motion_stale / sensor.camera_motion_stale, the recorder-query script). Both its alert and the fleet-wide pipeline check read this sensor's attributes and silently evaluate 'no fault' when it dies. 60 min clears restart windows. RE-ASSERTS hourly (:59) while dead (restart-wipe guard). Covers BOTH death modes: command-level death (state unavailable/unknown) AND the script's fail() path, which emits valid JSON with exit 0 - the sensor stays numeric but its 'error' attribute goes non-null (the binary reads 'off', so a state trigger alone would miss the likeliest death mode: a recorder-DB failure). Added 2026-08-17. (2026-10-10: the unavailable/unknown hold is an OR of single-state conditions with for:, because HA 2026.10 rejects for: with a list of states.)",
   "triggers": [
     {
       "platform": "state",
@@ -37,15 +37,25 @@
           "value_template": "{{ trigger.id in ['dead','dead_err'] }}"
         },
         {
-          "condition": "state",
-          "entity_id": "binary_sensor.camera_motion_stale",
-          "state": [
-            "unavailable",
-            "unknown"
-          ],
-          "for": {
-            "minutes": 60
-          }
+          "condition": "or",
+          "conditions": [
+            {
+              "condition": "state",
+              "entity_id": "binary_sensor.camera_motion_stale",
+              "for": {
+                "minutes": 60
+              },
+              "state": "unavailable"
+            },
+            {
+              "condition": "state",
+              "entity_id": "binary_sensor.camera_motion_stale",
+              "for": {
+                "minutes": 60
+              },
+              "state": "unknown"
+            }
+          ]
         },
         {
           "condition": "template",
