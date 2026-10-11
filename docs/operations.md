@@ -1,6 +1,6 @@
 # Operations guide — running the single-Scrypted-engine camera stack
 
-Everything that runs *after* the [migration](migration-runbook.md) is done: making live view instant, getting motion and doorbell presses back into Home Assistant, watching for silently‑dead cameras, announcing the doorbell, keeping it all healthy, and what the monitoring itself costs (§9). Addresses/tokens/credentials are placeholders — substitute your own.
+Everything that runs *after* the [migration](migration-runbook.md) is done: keeping live view working (and why prebuffer is not the way to make it instant), getting motion and doorbell presses back into Home Assistant, watching for silently‑dead cameras, announcing the doorbell, keeping it all healthy, and what the monitoring itself costs (§9). Addresses/tokens/credentials are placeholders — substitute your own.
 
 Conventions used below:
 - `<HA_HOST_IP>` — the IP where HA (and the Scrypted add‑on) is reachable on your LAN.
@@ -39,7 +39,7 @@ HA's built‑in **go2rtc** serves the Generic Cameras' WebRTC live view, and the
 POST /api/config/config_entries/entry/<go2rtc_config_entry_id>/reload
 ```
 
-(the equivalent WS `config_entries/reload` command is not available; use the REST endpoint). Within seconds all cameras answer WebRTC again at ~0.1 s warm.
+(the equivalent WS `config_entries/reload` command is not available; use the REST endpoint). Within seconds all cameras answer WebRTC again: ~3 s to first frame on demand, ~0.1 s only for a camera deliberately prebuffered (§1).
 
 **Fix (durable):** add an automation so it self‑heals after every restart. Trigger on HA `start`, wait a couple of minutes for Scrypted's rebroadcast to warm, then reload the go2rtc entry:
 
@@ -103,7 +103,7 @@ You can tell it's working by sampling a camera's snapshot hash over time: a came
 A small `command_line` sensor runs a script that fetches every camera's `http://<HA_HOST_IP>:11080/endpoint/@scrypted/webhook/public/<cid>/<token>/takePicture` concurrently and classifies each:
 
 - **down** — non‑200 / tiny body for **N consecutive** probes (tolerate a single transient miss).
-- **frozen** — the **byte‑identical** JPEG returned for several consecutive probes (a healthy camera returns a *distinct* frame every probe, so an identical hash is a reliable stuck‑source signal). This catches a camera that returns a stale‑but‑valid 200 — the failure a proxy‑based check is blind to.
+- **frozen** — the **byte‑identical** JPEG returned for several consecutive probes (a healthy camera returns a *distinct* frame every probe, but an identical hash means a **stale snapshot**, not proof of a wedged camera: on a snapshot timeout the webhook serves Scrypted's cached last-good JPEG as a full-size HTTP 200, so only the hash betrays it, and the tier is bursty, rotates across cameras and falls hardest on the busiest ones - a snapshot-pipeline signal, not a per-camera hardware verdict). This catches a camera that returns a stale‑but‑valid 200 — the failure a proxy‑based check is blind to.
 - **fleet‑stale** — *multiple* cameras byte‑identical to their previous probe in the same cycle. Per‑camera freeze needs several consecutive probes to be trustworthy, but a healthy camera re‑frames on every probe at this cadence — so several cameras simultaneously stale is near‑impossible unless the snapshot pipeline is wedged fleet‑wide. That makes it the *fastest* page tier (~5 min sustained) with a near‑zero false‑positive rate. Two validity caveats: it only holds at the production probe cadence (probes seconds apart legitimately read identical cloud‑cached frames), and the camera cloud's snapshot‑capture interval must stay well below the probe interval.
 - **slow** — `takePicture` latency above a threshold for a couple of consecutive probes.
 
@@ -111,7 +111,7 @@ It emits one JSON object; the `command_line` sensor exposes `healthy` (0–N) pl
 
 **Tuning that matters (learned the hard way):**
 - The probe fires all cameras **concurrently**, so a healthy camera can transiently spike to several seconds from contention — set the "slow" threshold *above* that contention band (near the request timeout), or it false‑flags healthy cameras.
-- **Separate what pages from what's merely visible.** A camera actually *down* should alert fast (minutes). *slow/frozen* blips are usually transient stream jitter that self‑recovers in a few‑to‑tens of minutes — alert on those only if **sustained** past that window, or you'll page several times a night on nothing. Concretely: two alert triggers — `down_count>0` for ~8 min, and `(frozen_count>0 or slow_count>0)` for ~30 min. Recovery should silently dismiss, not post a "recovered" message per blip.
+- **Separate what pages from what's merely visible.** A camera actually *down* should alert fast (minutes). *slow/frozen* blips are usually transient stream jitter that self‑recovers in a few‑to‑tens of minutes — alert on those only if **sustained** past that window, or you'll page several times a night on nothing. Concretely, the shipped `camera_health_alert` pages on four tiers: two fleet tiers held 5 min each, `fleet_stale` (above) and `fleet_miss` (at least `FLEET_MISS_MIN` = 5 cameras failing the same probe cycle, reported before the `DOWN_AFTER` tolerance), and two per-camera triggers — `down_count>0` for ~8 min, and `(frozen_count>0 or slow_count>0)` for ~30 min. Recovery should silently dismiss, not post a "recovered" message per blip.
 
 **Early‑warning for a systemic motion failure:** a companion automation flags **zero motion across *all* cameras**, checked hourly, 24/7, against a flat bar (9 h on this fleet). One quiet camera is normal; a silent fleet means the motion pipeline (Ring → Scrypted → MQTT → HA) is down. Fit the bar by simulating the checks the automation actually makes — not from gap *durations*, which is not what an hourly sampler ever sees — and avoid a day/night split: it classifies a gap by its start hour while the automation picks a bar at check time, so the two disagree whenever a gap crosses the boundary.
 
@@ -191,7 +191,7 @@ action:
 
 ## 9. Performance, load, and resource cost
 
-Four `command_line` sensors run the monitoring stack on three poll intervals (120 s, 600 s and 1800 s). Two of them probe the same nine snapshot endpoints on the same 120 s interval. On the reference host every script finishes well inside its `command_timeout` (§9.3). This section writes the load down so that it is *known*. A change that doubles it then becomes visible, and the constants that depend on it, `PROBERS` above all, have a stated reason.
+Five `command_line` sensors run the monitoring stack on four poll intervals (120 s, 600 s, 1800 s and 3600 s): the four camera monitors and the hourly engine-log archive (`cam_logarchive.py`). Two of them probe the same nine snapshot endpoints on the same 120 s interval. On the reference host every script finishes well inside its `command_timeout` (§9.3). This section writes the load down so that it is *known*. A change that doubles it then becomes visible, and the constants that depend on it, `PROBERS` above all, have a stated reason.
 
 Figures are labelled as follows:
 - **(derived)**: arithmetic from the shipped constants, or from measured figures quoted beside it.
@@ -203,12 +203,13 @@ Figures are labelled as follows:
 
 | Sensor | `scan_interval` | `command_timeout` | Polls/day (derived) | What one completed run does |
 |---|---|---|---|---|
+| `sensor.camera_engine_log_archive` | 3600 s | 600 s | 24 | Fetches the engine-log journal entries after its stored cursor from the Supervisor (`HTTP_TIMEOUT_S = 60` per socket operation) and stops at the 60 s work budget (`RUN_BUDGET_S`); collapses and redacts them, appends one gzip member per touched UTC day under `/config/cam_engine.log.d/`, applies retention, then atomically rewrites its `state.json`. Defers without fetching while Home Assistant is under 5 min old, unless the archive is over 24 h behind; it then runs with a 20 s budget (`STARTUP_BUDGET_S`) instead |
 | `sensor.camera_flap_rate` | 600 s | 90 s | 144 | Fetches the last 60,000 lines of the engine add-on log from the Supervisor (`timeout=45`), parses them, judges door trips, then atomically rewrites `/config/.cam_flap_door_state.json` (a rolling 7-day trip record) |
 | `sensor.camera_health` | 120 s | 30 s | 720 | 9 concurrent `takePicture` fetches (`max_workers=9`) and a SHA-256 of each body, then rewrites `/config/.cam_health_state.json` |
-| `sensor.camera_motion_stale` | 1800 s | 60 s | 48 | 3 read-only recorder queries and the corroboration maths; reads the vision and door state files, then rewrites `/config/.cam_motion_state.json` |
+| `sensor.camera_motion_stale` | 1800 s | 60 s | 48 | 3 read-only recorder queries, then the partial-loss recorder-gap scan (3 more, incremental from a cache; §9.5); the corroboration and partial-loss maths; reads the vision and door state files, then atomically rewrites `/config/.cam_motion_state.json` |
 | `sensor.camera_visual_activity` | 120 s | 60 s | 720 | 9 concurrent `takePicture` fetches (`max_workers=len(CAMS)`), then a PIL decode, thumbnail and block-diff of each frame, one at a time in the main loop; then rewrites `/config/.cam_vision_state.json` |
 
-**1,632 script launches per day** (derived: 720 + 720 + 144 + 48). Each poll runs the configured `python3 /config/scripts/…` command as a new process. There is no long-lived worker, so every run pays interpreter start-up and its imports again. That includes `cam_vision.py`'s `PIL` import, 720 times a day.
+**1,656 script launches per day** (derived: 720 + 720 + 144 + 48 + 24). Each poll runs the configured `python3 /config/scripts/…` command as a new process. There is no long-lived worker, so every run pays interpreter start-up and its imports again. That includes `cam_vision.py`'s `PIL` import, 720 times a day.
 
 The polls/day column is a ceiling, not a guarantee. In current Home Assistant core source (`command_line` sensor, read 2026-09-14), each sensor runs once when it is added at Home Assistant start and then on its interval. A scheduled update is skipped, with a warning, while the same sensor's previous update is still in progress.
 
@@ -216,7 +217,7 @@ The polls/day column is a ceiling, not a guarantee. In current Home Assistant co
 - A bare interpreter start took about 17 ms wall-clock.
 - A start that imports `json`, `urllib.request` and `sqlite3` took about 80 ms.
 
-At 1,632 launches that is about 28 s/day of bare start-up. If every launch paid the import figure, it would be about 2.2 min/day, not counting PIL (derived). The SSH add-on's interpreter has no PIL, and import cost depends on the interpreter and its bytecode cache. Measure from a shell where `python3` is the interpreter the sensors use (measure on your box):
+At 1,656 launches that is about 28 s/day of bare start-up. If every launch paid the import figure, it would be about 2.2 min/day, not counting PIL (derived). The SSH add-on's interpreter has no PIL, and import cost depends on the interpreter and its bytecode cache. Measure from a shell where `python3` is the interpreter the sensors use (measure on your box):
 
 ```sh
 python3 -m timeit -n 1 -r 20 -s "import subprocess" \
@@ -280,7 +281,7 @@ So the headroom ratios below cover the common failure, a peer that does not answ
 | `cam_health.py` | 30 s | `TIMEOUT = 15` per socket operation; 9 fetches in parallel (`max_workers=9`) | The nine webhook fetches. In one healthy sample every camera answered in under 1 s: all nine `detail` entries read `ok`, which the script prints only below 1 s (measured on the reference fleet, 2026-09-14). | **2.0×** against a fetch that never answers (derived: 30 ÷ 15) |
 | `cam_vision.py` | 60 s | `TIMEOUT = 12` per socket operation; fetches in parallel (`max_workers=len(CAMS)`) | First the fetches, then nine PIL decodes run **one after another** in the main loop. After that come `block_diffs` (3.0 ms for all nine) and the state-file rewrite (0.8 ms JSON round-trip of the ~44 KB state), both measured on the reference host. | 5.0× before decode and the PIL import (derived: 60 ÷ 12). Decode time not measured (measure on your box). |
 | `cam_flap.py` | 90 s | `timeout=45` per socket operation on the Supervisor log fetch | The fetch: 8.41–8.45 s for 60,000 lines (5.6 MB) across four samples. Everything after it takes about 0.14 s. Both measured on the reference host. The 0.14 s excludes the door-record rewrite, which was not run there (~2 ms on a laptop). | **2.0×** against the socket timeout (derived: 90 ÷ 45); ~10× against the measured run (derived: 90 ÷ ~8.7 s) |
-| `cam_motion.py` | 60 s | `QUERY_TIMEOUT_S = 20`, passed to `sqlite3.connect(timeout=…)`. This is a lock wait, not a limit on statement time. | Three recorder statements, 0.125–0.127 s together (§9.5). The largest is the all-entity 24 h gap query, 0.092–0.099 s. The co-change loop took about 2 ms, with 1–28 vision-log entries per camera that day. All measured on the reference host. | No ceiling of its own. About 0.13 s was measured, so headroom was ample that day (derived). See §9.5 for the query plans and §9.8 for the loop's worst case. |
+| `cam_motion.py` | 60 s | `QUERY_TIMEOUT_S = 20`, passed to `sqlite3.connect(timeout=…)`. This is a lock wait, not a limit on statement time. | Three recorder statements, 0.125–0.127 s together, then the partial-loss recorder-gap scan, which that figure does not include (§9.5). The largest is the all-entity 24 h gap query, 0.092–0.099 s. The co-change loop took about 2 ms, with 1–28 vision-log entries per camera that day. All measured on the reference host. | No ceiling of its own. About 0.13 s was measured, so headroom was ample that day (derived). See §9.5 for the query plans and §9.8 for the loop's worst case. |
 
 Interpreter start-up is small against every timeout: about 17 ms bare and 80 ms with the standard-library imports (§9.1). `cam_vision.py` also imports PIL, which was not measured (measure on your box).
 
@@ -304,7 +305,7 @@ Two results worth stating, so that optimisation effort goes to the right place:
 
 Each poll is a fresh process, so every figure here is a short-lived per-poll peak, not steady-state usage.
 
-- **`cam_flap.py` has the largest measured peak.**
+- **`cam_flap.py` has the largest measured peak of the four camera monitors.** (The engine-log archive's own peak resident set, `rss_mb` from `VmHWM`, read 73-83 MB on its first 21 runs on 2026-10-03. Each run decompresses every member of the three newest day files, so the largest member among them sets the peak; those runs had the initial 13.6 MB backfill member among them, and the figure is expected to fall once that file ages out. See `ha/README.md`.)
   - **Peak size.** `raw.decode("utf-8", "replace").splitlines()` briefly holds three things at once: the raw bytes, the decoded string and the 60,000-element list. `del raw` follows. Peak Python-heap allocation was **3.51–3.53× the payload** (tracemalloc). A 5.6 MB live payload peaked at 19.8 MB on the reference host (2026-09-14), and 5.5 MB redacted slices gave the same ratio on a laptop.
   - **After the split.** Once `del raw` runs, the list alone is about 1.5× the payload (8.5 MB). Nothing later in `main()` raised the peak.
   - **RSS and frequency.** Process RSS rose about 20 MB over an import-only baseline (24 → 44 MB, measured on a laptop). This happens 144 times a day.
@@ -314,9 +315,9 @@ Each poll is a fresh process, so every figure here is a short-lived per-poll pea
 - **`cam_vision.py` keeps all nine JPEG bodies in `results` for the whole of `main()`.** The list is never released, so the bodies are still in memory while the state file is written.
   - **Compared with `cam_health.py`.** `cam_health.py` hashes each body inside its worker and returns only the digest, so each body is freed when its probe returns. With nine fetches in flight, both scripts can briefly hold nine bodies; the difference is how long they are kept, not how many.
   - **Unmeasured parts.** Snapshot size depends on the camera, and so do the PIL import and the decode buffers (measure on your box).
-  - **The state file.** It is loaded and rewritten as a dict: 43,965 bytes on the reference fleet, of which **17,397 bytes (40 %) are the per-camera `frame` key** (measured, 2026-09-14). On 9 of 9 cameras that key held a copy of `frames[mode][0]`, the current mode's baseline. Nothing reads it in normal operation. `cam_motion.py` reads only `probe_ts` and `log`. `cam_vision.py`'s legacy migration reads `frame` only when `frames` is empty or missing.
+  - **The state file.** It is loaded and rewritten as a dict: 43,965 bytes on the reference fleet, of which **17,397 bytes (40 %) are the per-camera `frame` key** (measured, 2026-09-14). On 9 of 9 cameras that key held a copy of `frames[mode][0]`, the current mode's baseline. Nothing reads it in normal operation. `cam_motion.py` reads only `probe_ts`, `fresh_ts`, `log` and `merged`. `cam_vision.py`'s legacy migration reads `frame` only when `frames` is empty or missing.
   - **Known open issue in the shipped code.** The duplicate costs about 12.5 MB/day of redundant writes (derived: 17.4 KB × 720).
-- **`cam_motion.py`** holds the 30-day motion `on` rows as (timestamp, name) tuples: about 1,450 rows on the reference fleet (measured, 2026-09-14). The count depends on motion activity and on recorder retention (§9.5). It also loads the ~44 KB vision state, the door record and its latch file. All small.
+- **`cam_motion.py`** holds the motion `on` rows of its whole fetch window as (timestamp, name) tuples, plus a second list of the 30-day corroboration subset. With `partial_loss.py` deployed that window is about 62 days (§9.5); the 30-day subset was about 1,450 rows on the reference fleet (measured, 2026-09-14). The count depends on motion activity and on recorder retention (§9.5). It also loads the ~44 KB vision state, the door record and its own state file, which besides the proof latches now carries the background firing rates, vision-recall outcomes, partial-loss state, the recorder-gap cache and the room-switch visit log (size not re-measured, §9.6).
 - **`cam_health.py`** holds nine digests and a 1,160-byte state file (measured). Negligible.
 
 Measure the log payload yourself, since it is the figure that varies most with how chatty the engine is. Run this from a shell with `$SUPERVISOR_TOKEN` in its environment and Supervisor API access. The snippet prints only sizes and timing, because the add-on log can contain credentials; never print its content.
@@ -341,9 +342,9 @@ On the reference fleet, 60,000 lines came to 5.62–5.64 MB (93.7–93.9 B/line)
 
 `WINDOW_MIN = 360` trims *after* the fetch. According to the in-code note, the 60,000-line span has ranged from about 106 to about 727 min (measured on the reference fleet; date not recorded). At 727 min, about half of each fetch is thrown away as soon as it arrives (derived: 1 − 360 ÷ 727). On 2026-09-14 the span was 338–348 min, so nothing was thrown away (measured). The request asks for a fixed number of lines (`Range: entries=:-60000:60000`), so it costs the same even when less time is needed. Whether a time-bounded request could replace it has not been evaluated.
 
-### 9.5 The three SQL queries
+### 9.5 The recorder queries
 
-`cam_motion.py` opens the recorder database read-only (`file:/config/home-assistant_v2.db?mode=ro`) once per poll (`scan_interval: 1800`). It runs three `SELECT` statements on one connection, in the order below.
+`cam_motion.py` opens the recorder database read-only (`file:/config/home-assistant_v2.db?mode=ro`) once per poll (`scan_interval: 1800`). It runs the three `SELECT` statements below on one connection, in that order. With `partial_loss.py` deployed, the same connection then runs the partial-loss recorder-gap scan (`scan_host_gaps`: three more statements over the ~62-day lookback, incremental from a cache kept in `/config/.cam_motion_state.json`; a missing or unusable cache costs one full scan, recorded in the code as 5.1 s over 4.0 M rows on the reference host, 2026-10-02). Last, whether or not `partial_loss.py` is deployed, it runs one switch-row query per `WITNESS` camera when that map is filled (it ships empty).
 
 **Measurement setup** (measured on the reference fleet, 2026-09-14):
 - Raspberry Pi 5, Home Assistant 2026.9.2, recorder schema 53.
@@ -355,15 +356,15 @@ On the reference fleet, 60,000 lines came to 5.62–5.64 MB (93.7–93.9 B/line)
 | Statement | Scope | Observed plan | Rows | Time |
 |---|---|---|---|---|
 | `sql`: latest `on` per camera | The nine `binary_sensor.<cam>_motion` entities. **No time bound.** | `SEARCH m USING COVERING INDEX ix_states_meta_entity_id (entity_id=?)`, then `SEARCH s USING INDEX ix_states_metadata_id_last_updated_ts (metadata_id=?)`. `state` is not in that index, so every retained row of the nine entities is fetched to test `state = 'on'`. `GROUP BY` runs in `entity_id` order and needs no temp B-tree. | 10,906 examined, 4,983 `on`, 9 returned | 0.023–0.027 s |
-| `ev_sql`: motion `on` rows for corroboration | The same nine entities, newer than `now − CORROBORATE_LOOKBACK_D` (30 d) | The same two searches, with the time range inside the index (`metadata_id=? AND last_updated_ts>?`). Then `USE TEMP B-TREE FOR ORDER BY` merges the nine entities by time. | 1,446 returned | 0.009–0.010 s |
+| `ev_sql`: motion `on` rows for corroboration and the partial-loss test | The same nine entities, newer than `now − partial_loss.lookback_s()` (48 h + 60 d + 1 h, about 62 d) when `partial_loss.py` is deployed, else `now − CORROBORATE_LOOKBACK_D` (30 d) | The same two searches, with the time range inside the index (`metadata_id=? AND last_updated_ts>?`). Then `USE TEMP B-TREE FOR ORDER BY` merges the nine entities by time. | 1,446 returned (30-day bound, measured before the partial-loss test) | 0.009–0.010 s |
 | `gap_sql`: largest recorder hole across all entities | **Every entity**, newer than `now − HOST_GAP_LOOKBACK_H` (24 h) | `SEARCH states USING COVERING INDEX ix_states_last_updated_ts (last_updated_ts>?)`, inside two co-routines. The index already returns rows in `last_updated_ts` order, so the `LAG() OVER (ORDER BY last_updated_ts)` window needs no sort. | 76,066 examined (317 entities), 1 returned | 0.092–0.099 s |
 
-All three statements together take **0.125–0.127 s** over three consecutive in-container runs (measured on the reference fleet, 2026-09-14). That is about 0.2 % of `command_timeout: 60` (derived). The code comment "Measured cost ~0.1 s" for `gap_sql` agrees with this. The figure depends on the instance's write volume over 24 hours, so it will differ on other installs.
+The three statements above together take **0.125–0.127 s** over three consecutive in-container runs (measured on the reference fleet, 2026-09-14). That is about 0.2 % of `command_timeout: 60` (derived). The partial-loss recorder-gap scan that follows on the same connection is not included and has not been timed separately. The code comment "Measured cost ~0.1 s" for `gap_sql` agrees with this. The figure depends on the instance's write volume over 24 hours, so it will differ on other installs.
 
 How each statement scales (derived):
 
 - **`sql` reads the full retained history of the nine motion entities.** It has no time bound, so its cost grows with retention, up to the `purge_keep_days` limit. The reference fleet writes about 187 rows/day for these entities. After a year that would be about 68,000 rows, roughly 6× the 2026-09-14 read, or about 0.15 s if cost stays linear. That is no timeout risk, but it is the only one of the three statements whose cost keeps growing. This is a known open issue in the shipped code (§9.9).
-- **`ev_sql`** is limited by its 30-day window. Its cost scales with motion activity.
+- **`ev_sql`** is limited by its window: about 62 days with `partial_loss.py` deployed, 30 days without. Its cost scales with motion activity.
 - **`gap_sql`** is limited by its 24-hour window. Its cost scales with the write rate of **every** entity in the instance, not with retention.
 
 **The standalone index is part of the current recorder schema.** `ix_states_last_updated_ts` is declared on `States.last_updated_ts` (`index=True`). The schema-31 migration creates it, and no later migration drops it (checked in the Home Assistant 2026.9.2 source). A recorder at schema 31 or newer therefore has it, unless someone removed it by hand. The script does not check for it.
@@ -397,7 +398,7 @@ gap_sql = ("SELECT MAX(gap) FROM (SELECT last_updated_ts - "
 c = sqlite3.connect("file:/config/home-assistant_v2.db?mode=ro", uri=True)
 now = time.time()
 for name, q, p in (("sql", sql, ents),
-                   ("ev_sql", ev_sql, ents + [now - 30 * 86400]),
+                   ("ev_sql", ev_sql, ents + [now - (48 * 3600 + 60 * 86400 + 3600)]),
                    ("gap_sql", gap_sql, [now - 24 * 3600] * 2)):
     plan = " | ".join(r[3] for r in c.execute("EXPLAIN QUERY PLAN " + q, p))
     t = time.perf_counter()
@@ -429,6 +430,7 @@ Two related traps:
   - The cluster and co-fire counts checked by `CORROBORATE_MIN_PRE` (20) and `CORROBORATE_MIN_HITS` (8) scale roughly with the window. A 10-day history therefore supplies about a third of what the 30-day fit expects (derived). Whether a given partner camera then falls below a gate depends on its event rate (measure on your box).
   - The reference fleet is configured with `purge_keep_days: 548` and held 58.4 days of history, so its 30-day window is fully populated (measured on the reference fleet, 2026-09-14).
   - If you rely on the corroboration verdict, set `recorder: purge_keep_days:` to at least 30. At a steady write rate, that gives about 3× the default's row count and database size (derived). It also makes `sql`'s unbounded history read about 3× longer (derived).
+  - The partial-loss test reads further back than corroboration: its reference is the latest 27 days of usable time before its 48 h recent window, searched back as far as about 62 days (`BASE_D`, `RECENT_H`, `MAX_LOOKBACK_D` in `partial_loss.py`), and `ev_sql` fetches that whole span. Like corroboration, it does not check the recorder's retention.
 
 ### 9.6 Recorder growth: the heartbeat, `ages_min`, and the vision attributes
 
@@ -481,18 +483,19 @@ Three writers matter:
 
 **The door-coverage attributes make the flap sensor's rows larger.** `door_rolling`, `door_deferred` and `door_coverage_failing` are in its attribute allowlist, and the 24 h figures above predate them. `door_rolling` alone is about 0.6 KB of compact JSON for four door-covering cameras (measured on the prepared door record, 2026-09-14). This sensor writes a row on every poll, so the attributes add roughly 90 KB/day of attribute JSON (derived; measure on your box).
 
+**The partial-loss attributes make the motion sensor's rows larger too.** `partial_loss` and `partial_detail` are in `sensor.camera_motion_stale`'s attribute allowlist, and the 24 h figures above predate them. The comment on `PAYLOAD_BUDGET_B` in `cam_motion.py` records a peak of 8.1 KB for the whole attribute set over a 56-day replay (measured 2026-10-03); the evidence lists are trimmed once the payload would pass 12,000 bytes. At 48 rows a day that peak is about 0.39 MB/day of attribute JSON, against the 80 KB in the table (derived; measure on your box).
+
 **Disk writes outside the recorder.** Each script below rewrites a state file under `/config` on its own schedule:
 
 | File | Written by | Size | Writes/day | Bytes/day |
 |---|---|---|---|---|
 | `.cam_flap_door_state.json` | `cam_flap.py` | 3,886 B for 23 judged trips over 2.2 days (measured on the prepared door record, 2026-09-14). Grows by ~130 B per judged trip until the 7-day horizon | up to 144: every poll that gets past the log fetch and the timestamp checks. Written to a temp file, then renamed | ~0.56 MB at that size; ~1.5 MB with a full 7-day record at the same trip rate (derived) |
 | `.cam_health_state.json` | `cam_health.py` | 1,160 B (measured on the reference fleet, 2026-09-14) | 720 | ~0.8 MB (derived) |
-| `.cam_motion_state.json` | `cam_motion.py` | 14 B (measured on the reference fleet, 2026-09-14) | 48 | negligible |
+| `.cam_motion_state.json` | `cam_motion.py` | 9,202 B (measured on the reference fleet, 2026-10-11; 14 B on 2026-09-14, when it held only the proof latches). It now also holds the background firing rates, vision-recall outcomes, partial-loss state, the recorder-gap cache and the room-switch visit log. Written to a temp file, then renamed | 48 | ~0.44 MB (derived) |
 | `.cam_vision_state.json` | `cam_vision.py` | 43,965 B (measured on the reference fleet, 2026-09-14) | 720 | ~32 MB (derived) |
-
 | `cam_engine.log.d/` | `cam_logarchive.py` | one gzip file per UTC day, ~1.4 MiB/day after the request-dump collapse; 35 days kept (~50 MB), plus a small `state.json` and the 32-byte pseudonym key `.pseudonym.key` (written once; again only after a REKEY) | 24 appends + 24 `state.json` renames | ~1.4 MiB (measured on the reference fleet's journal, 2026-10-02) |
 
-In total that is about 35 MB/day written to `/config` (derived). This is worth knowing on SD-card storage.
+In total that is about 36 MB/day written to `/config` (derived), almost all of it the vision state. This is worth knowing on SD-card storage.
 
 ### 9.7 Freshness bars vs poll intervals
 
@@ -584,7 +587,7 @@ None of these is fixed in the shipped code. Figures are the ones established abo
 5. **No runtime bound in `cam_motion.py`** (§9.5). `QUERY_TIMEOUT_S` is only a SQLite lock wait. No progress handler or other statement bound exists, so `command_timeout: 60` is the only ceiling, and Home Assistant does not stop an over-limit run. The measured total was about 0.13 s, so the risk is latent on the reference fleet.
 6. **Quadratic co-change loop** (`cam_motion.py`; §9.8). Each entry rescans every other camera's full vision log. That was about 2 ms on 2026-09-14, but 7.6–7.7 s on the reference host at the reachable 1,440-entry cap. A `bisect` window test over the already-sorted logs gives identical output.
 7. **Unbounded `sql` history read** (`cam_motion.py`; §9.5). Every poll fetches every retained row of the nine motion entities to compute nine maxima. On 2026-09-14 that was 10,906 rows in 0.023–0.027 s; after a year of retention it would be about 6× that (derived).
-8. **Full vision-state rewrite with a duplicate key** (`cam_vision.py`; §9.4, §9.6). The ~44 KB state file is rewritten in place, not atomically, on every 120 s run: about 32 MB/day (derived). 40 % of it is the per-camera `frame` key, which duplicates `frames[mode][0]`: about 12.5 MB/day (derived).
+8. **Full vision-state rewrite with a duplicate key** (`cam_vision.py`; §9.4, §9.6). The ~44 KB state file is rewritten in full (to a temp file, then renamed) on every 120 s run: about 32 MB/day (derived). 40 % of it is the per-camera `frame` key, which duplicates `frames[mode][0]`: about 12.5 MB/day (derived).
 9. **Door record rewritten on every poll** (`cam_flap.py`; §9.8, minor). The whole record is rewritten even when no new trip was judged, about 0.56 MB/day at the measured size (derived). Any fix must keep the file's modification time fresh for `cam_motion.py`.
 10. **`ages_min` recorder rows** (`ha/packages/cam_health.yaml`; §9.6). The `now()`-derived attribute on `binary_sensor.camera_monitor_stalled` wrote 1,869 rows in 24 h, 59 % of the stack's 3,158. The entity is not recorder-excluded, and nothing reads its history.
 11. **Unread per-poll vision attributes** (`cam_vision.py`, `ha/packages/cam_vision.yaml`; §9.6). `max_norm_diff` and `hours_since_visual` change on every poll and nothing reads them. They force 720 rows and 1.09 MB/day of attribute JSON, 71 % of the stack's attribute bytes.
@@ -611,14 +614,14 @@ None of these is fixed in the shipped code. Figures are the ones established abo
    GROUP BY m.entity_id;
    ```
 5. **Prober alignment.** The two 120 s sensors should write within a fraction of a second of each other on every cycle (median 0.06 s on the reference fleet, §9.2). This is normal and survives restarts, so the engine's burst each cycle is `cameras × PROBERS` (§9.8). Alignment is not a fault. Re-check `slow` counts after adding a camera or a prober.
-6. **Retention vs corroboration.** `CORROBORATE_LOOKBACK_D = 30` in `cam_motion.py` reads 30 days of motion rows. Home Assistant's default `purge_keep_days` is 10, which silently cuts that window to 10 days, and the script does not check (§9.5). Check your `recorder:` block. The reference fleet is configured for 548 days, held 58.4, and is not affected (measured on the reference fleet, 2026-09-14).
+6. **Retention vs corroboration.** `CORROBORATE_LOOKBACK_D = 30` in `cam_motion.py` reads 30 days of motion rows, and the partial-loss test about 62 (48 h + 60 d + 1 h). Home Assistant's default `purge_keep_days` is 10, which silently cuts both windows to 10 days, and the script does not check (§9.5). Check your `recorder:` block. The reference fleet is configured for 548 days, held 58.4, and is not affected (measured on the reference fleet, 2026-09-14).
 
 ---
 
 ## Quick health checklist
 
 1. **Snapshots** — every camera's webhook `takePicture` returns a fresh JPEG fast; the watchdog reads all healthy.
-2. **Live view** — wired cams answer WebRTC in ~0.1 s (warm); the on‑demand cam(s) ~3 s.
+2. **Live view** — every camera answers WebRTC: ~3 s to first frame on demand (prebuffer off, the default in §1), ~0.1 s only for a camera deliberately prebuffered.
 3. **Motion/doorbell** — a real motion event and a doorbell press both land on their HA `binary_sensor`s.
 4. **HomeKit** — each camera once in Apple Home; HKSV recording within your iCloud+ tier.
 5. **Single client** — the Ring app's Control Center lists only the Scrypted device.

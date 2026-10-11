@@ -40,6 +40,9 @@ before deploying (grep for `<` to find them).
    `scripts/cam_flap.py` needs: `<scrypted_addon_slug>` (visible in the add-on's
    URL in the HA UI, e.g. `xxxxxxxx_scrypted`); its `CAMS` dict keys must
    byte-match the camera names Scrypted prints in log brackets (e.g. `[Kitchen Cam]`);
+   its `DEVICE_IDS` dict maps each camera's Scrypted device id (the ids in
+   `cam_health.py`) to the same stem - a probe whose id is not listed is not
+   counted, so an unfilled map puts every camera in `probe_shortfall`;
    `PROBE_INTERVAL_MIN` = the scan_interval of ONE probing sensor in minutes,
    and `PROBERS` = how many sensors probe those endpoints on that interval
    (2 as shipped: `cam_health.yaml` and `cam_vision.yaml` both run
@@ -95,21 +98,27 @@ before deploying (grep for `<` to find them).
    sensors (including the two delayed dead-man binaries) first render against
    the new attributes, and check every camera `binary_sensor` is off just
    before `template.reload` (an `on` one re-fires its onset automation).
+   `cam_logarchive.yaml` also defines `input_button.camera_log_archive_acknowledge`,
+   which needs `input_button.reload` (or the full restart).
 5. **Create the automations** — for each JSON file:
    **Prerequisite:** the motion-stale pair and the doorbell announce presuppose
    the MQTT motion/doorbell `binary_sensor`s from
    [`docs/operations.md`](../docs/operations.md) §3 — deploy those three only
    after MQTT discovery is live, and replace their camera entity lists with
-   your own (on an install where the sensors don't exist yet, the stale-motion
-   check reads as "no motion" and false-alarms at the next hourly check).
+   your own (on an install where the sensors don't exist yet, `cam_motion.py`
+   finds no motion history and publishes an error, so the fleet check cannot
+   evaluate and `camera_motion_monitor_down` reports the error instead).
    For each JSON file:
    `POST /api/config/automation/config/<filename-without-extension>` with the
    file body. They take effect immediately, no restart.
 6. **API calls**: all REST endpoints above are `http://<HA_HOST_IP>:8123/...`
    with an HA long-lived access token (`Authorization: Bearer <token>`).
-   Note the flap monitor requires an HAOS/Supervised install — it reads the
-   add-on log through the Supervisor API using the `SUPERVISOR_TOKEN` available
-   inside the Core container; on Container/Core installs, adapt the fetch.
+   Note the flap monitor and the engine-log archive require an HAOS/Supervised
+   install — both read the add-on log through the Supervisor API using the
+   `SUPERVISOR_TOKEN` available inside the Core container; on Container/Core
+   installs, adapt the fetch. The motion monitor reads the default SQLite
+   recorder (`/config/home-assistant_v2.db`, read-only); with MariaDB or
+   PostgreSQL, adapt its queries.
 7. **Verify**: `sensor.camera_health` reads the camera count (all healthy),
    `binary_sensor.cameras_problem` is `off`, and a test notification fires when
    a camera URL is deliberately broken.
@@ -121,7 +130,8 @@ before deploying (grep for `<` to find them).
   blips self-heal in under ~22 min and paging on them is pure noise;
   fleet-stale 5 min (fastest) — multiple cameras returning byte-identical
   frames simultaneously means a fleet-level snapshot-pipeline wedge; and
-  fleet-miss 5 min — every camera failing the same probe cycle, which is the
+  fleet-miss 5 min — five or more of the nine probes failing the same cycle
+  (`FLEET_MISS_MIN`), which is the
   snapshot path being down rather than any camera being down.
   Re-asserts hourly while the problem binary has been on 30+ min (the longest
   tier's window, so a re-assert can never page a blip the tiers absorb):
@@ -150,9 +160,10 @@ before deploying (grep for `<` to find them).
   recorder-DB failure).
 - `camera_health_heartbeat` — daily proactive status card (plus a boot trigger, so
   a restart cannot erase the only proactive positive signal for the rest of the
-  day), sourced from ALL FOUR monitors — snapshot probes, motion staleness, the
-  visual monitor and stream faults — with an honest "not reporting" fallback per
-  line, and it leads with any proven event-path failure. "Probes OK" is the deliberate
+  day), sourced from four monitors — snapshot probes, motion staleness, the
+  visual monitor and stream faults (the engine-log archive is not on the card) —
+  with an honest "not reporting" fallback per line, then a line naming any
+  proven event-path failure. "Probes OK" is the deliberate
   wording: the probe measures the snapshot path, not motion-event delivery,
   and a card that says "healthy" from one monitor while another is latched is
   a false all-clear.
@@ -190,8 +201,9 @@ before deploying (grep for `<` to find them).
   2.5 days) and every firing observed resolved itself with no intervention.
   Note two structural limits: it tests the **minimum** staleness across the
   fleet, so any one healthy camera suppresses it entirely — it can only ever
-  catch a *total* pipeline outage, never a single camera — and the active-hours
-  bar applies around the clock. Per-camera failure is
+  catch a *total* pipeline outage, never a single camera — and its one flat
+  9 h bar applies around the clock, so a daytime outage waits as long to page as
+  a nighttime one. Per-camera failure is
   `camera_motion_dead_alert`'s job. Catches the silent event-listener
   wedge described in `docs/operations.md` §3. The condition reads the
   staleness sensor's **recorder-derived** `hours_since` map, NOT entity
@@ -315,8 +327,9 @@ shows up here first.
   stream-fault monitor (see `docs/operations.md` §6): pages on a sustained
   per-camera **recording-error** rate, dismisses on recovery, and pages
   separately if the monitor itself sits in an error state for an hour
-  (dead-man's switch - covers the watchdog dying too, since that starves
-  the monitor's clock). Also carries a tripwire on UNDECRYPTABLE cloud push
+  (dead-man's switch for the monitor itself; a snapshot-watchdog death does
+  not trip it - `cam_vision.py` probes the same endpoints and the window is
+  measured from log timestamps - and `camera_health_monitor_down` covers that). Also carries a tripwire on UNDECRYPTABLE cloud push
   messages (`push_undecryptable`). The push receiver either drops a message it
   cannot decrypt and logs one line (`Message dropped as it could not be
   decrypted: <reason>`, e.g. a missing crypto-key) or rethrows the error as a
@@ -470,8 +483,12 @@ shows up here first.
   monitor recovers. The fleet summary and any walk-test hint follow unchanged.
   Without this lead, a page for a newly stale camera opened with a summary that
   still listed a camera paged earlier, and it read like a repeat of that page.
-  The staleness page carries TWO automated discriminators, printed strongest
-  first. **Cross-camera corroboration** is the decisive one: cameras that share
+The staleness page carries TWO automated discriminators, printed strongest
+  first. Ahead of them, a DOOR COVERAGE block (`door_evidence`) lists any camera
+  failing its door and any stale camera with door trips; a line marked FAILING is
+  direct evidence at the camera's own door, which the card ranks above both, and
+  the block reads `door record not reporting` when that record is missing, stale
+  or unreadable. **Cross-camera corroboration** is the decisive one: cameras that share
   a sight-line co-fire at a stable rate, and that rate is a real test of one
   camera's event path, computable from motion rows already in the recorder — no
   walk test, no new hardware, no physical access. For a stale camera it measures
@@ -603,7 +620,9 @@ persistent notifications are in-memory, so a restart erases every card with the
 fault still latched — which is why each alert also carries a re-assert trigger —
 and they are only visible to someone with the HA UI open, which is no use to an
 operator who is away from the property. The push steps are gated to fire on new
-information only, never on a re-assert.
+information only, never on a re-assert - except `cameras_motion_stale_alert`,
+which pushes on every hourly check and at boot for as long as the whole fleet
+stays past its 9-hour bar: during a total outage an hourly page is intended.
 
 ## Partial motion loss (`cam_motion.py` + `partial_loss.py`)
 
@@ -995,6 +1014,8 @@ placeholder, is not a probe: the engine logs the url before rejecting it with
 `today - 34 d` and `newest archived day - 34 d`, is not among the newest 35
 files, was not written this run and was not modified within 35 days; with the
 clock more than 2 days past the newest archived line nothing is deleted. A
+runaway cap, under the same clock guard, also removes the oldest day files while
+the archive exceeds 800 MiB, stopping at a file written this run. A
 half-written gzip tail (a killed run) is truncated before the next append. An
 undecodable member with intact members after it is on-disk corruption, not a
 tail: the whole file is moved aside as `*.corrupt-<epoch>` (outside the day-file

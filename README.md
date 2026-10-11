@@ -21,6 +21,11 @@ This is the field reference from building and running the setup: a stage‑by‑
 | **Doorbell announcements** | HA automation on the doorbell sensor → TTS / multi‑room announcement |
 | **Self‑probing health watchdog** | Active snapshot probe catches down / frozen / slow cameras a cached proxy would miss |
 | **Door‑coverage check** | Ring door contacts are cross-checked against the camera covering each door; a camera that keeps missing people at its own door pages, even while it still fires often enough never to look stale |
+| **Per-camera motion dead-man** | `cam_motion.py` reads recorder history every 30 min and pages for a camera silent past its window (72 h by default) while the rest of the fleet is active; cross-camera co-firing statistics can prove its event path broken without a walk test |
+| **Partial-loss and fleet-silence checks** | Pages for a camera that still fires but has dropped out of most of the motion its partner cameras record, and for a whole fleet with no motion for 9 h (checked hourly) |
+| **Stream-fault and visual monitors** | Per-camera HKSV recording-error rate parsed from the engine log; snapshot frame differencing reports whether a silent camera's scene changed without motion events |
+| **Engine-log archive** | The engine log, redacted and pseudonymised, archived hourly under `/config` for 35 days (the journal keeps about 37 h) |
+| **Dead-men for the monitors** | Each monitor pages when it errors or stops updating; a recorder-gap check reports a host outage after the fact |
 
 ---
 
@@ -53,6 +58,7 @@ The one idea worth keeping in your head: **Scrypted owns the Ring session; every
 
 - **Home Assistant** with the built‑in go2rtc (2024.11+), ideally HAOS/Supervised so Scrypted can run as an add‑on.
 - **Scrypted** (add‑on or standalone) with the Ring, HomeKit, Rebroadcast (prebuffer‑mixin), Webhook, and MQTT plugins.
+- **For the monitors in `ha/`:** Scrypted as an add-on on HAOS/Supervised (`cam_flap.py` and `cam_logarchive.py` read its log through the Supervisor API) and the default SQLite recorder (`cam_motion.py` opens `/config/home-assistant_v2.db` read-only). Other installs need those reads adapted.
 - **An MQTT broker** reachable by both Scrypted and HA (e.g. the Mosquitto add‑on) — for motion and doorbell events.
 - **Apple HKSV** (optional): a Home Hub (Apple TV / HomePod) on the **same subnet** as Scrypted, plus an iCloud+ plan sized to your camera count.
 - A **Ring account with 2FA** — you log Scrypted in interactively once.
@@ -64,8 +70,8 @@ The one idea worth keeping in your head: **Scrypted owns the Ring session; every
 Read in order:
 
 1. **[`docs/migration-runbook.md`](docs/migration-runbook.md)** — the cutover from a stock‑Ring setup to the single‑Scrypted engine, with **zero camera downtime** and a rollback checkpoint at every stage.
-2. **[`docs/operations.md`](docs/operations.md)** — everything that runs afterward: instant live view, motion/doorbell into HA, the health watchdog, doorbell announcements, snapshot freshness, diagnosing stream flapping, backups, and (§9) what the monitoring stack itself costs in probe load, runtime, memory, and recorder and disk writes.
-3. **[`ha/`](ha/)** — the deployable artifacts themselves: the watchdog script, package YAML, and every automation as sanitized, placeholder-ready files. Rebuilding on fresh hardware starts here.
+2. **[`docs/operations.md`](docs/operations.md)** — everything that runs afterward: live view (and why prebuffer is not the way to make it instant), motion/doorbell into HA, the health watchdog, doorbell announcements, snapshot freshness, diagnosing stream flapping, backups, and (§9) what the monitoring stack itself costs in probe load, runtime, memory, and recorder and disk writes.
+3. **[`ha/`](ha/)** — the deployable artifacts themselves: the five monitor scripts (plus `partial_loss.py`, which `cam_motion.py` imports), their package YAML, and every automation as sanitized, placeholder-ready files. Rebuilding on fresh hardware starts here.
 
 ---
 
@@ -102,8 +108,9 @@ The condensed version of what actually bites in practice. Full detail lives in t
 This is a personal home‑automation setup, published as a reference. Before adapting it:
 
 - Every address, port‑path token, device id, pairing code, and credential in these docs is a **placeholder** (`<HA_HOST_IP>`, `<device_id>`, `<token>`, `<mqtt_user>`, …). Never commit real tokens, Ring credentials, HomeKit pairing codes, or rebroadcast path tokens.
+- Deploying `ha/` creates `/config/cam_engine.log.d/`, a redacted 35-day archive of the engine log. It is still personal data (camera and door names with times show when people come and go): it is kept out of backups by design, must not be attached to issues, and its `.pseudonym.key` must never leave the host.
 - The Scrypted↔Ring session is bound to your account — treat the Scrypted admin login and its stored Ring refresh token as secrets.
-- The local snapshot/RTSP endpoints are unauthenticated on the LAN by design (they carry per‑stream tokens). Keep them off untrusted networks and reach them remotely over a VPN, not a port‑forward.
+- The local snapshot/RTSP endpoints are unauthenticated on the LAN by design (they carry per‑stream tokens). Keep them off untrusted networks and reach them remotely over a VPN, not a port‑forward. Over IPv6 no port‑forward is needed to expose them: the Scrypted add‑on runs on the host network, its server listens on every interface, and its startup banner prints a Remote URL on the host's global IPv6 address, so confirm the router drops unsolicited inbound IPv6 to the host (at least ports `10443`, `11080` and the pinned rebroadcast port). See [`SECURITY.md`](SECURITY.md).
 
 ---
 

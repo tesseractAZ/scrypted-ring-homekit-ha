@@ -68,12 +68,12 @@ Scrypted → Settings/Users → create a **new admin user** (your own username/p
 
 **Battery / motion‑event trap (from the Ring plugin guidance):**
 - On **battery** cameras: **do not enable Prebuffer**, PAM‑DIFF, or OpenCV — a persistent stream *stops motion‑event delivery* and *drains the battery faster than it charges*, and clutters the Ring app with Live‑View recordings. An always‑open RTSP pull has the same effect; prefer **snapshot‑only** Generic Cameras for battery cams.
-- On **wired / hardline** cameras the battery cost disappears but **the event suppression does not**. Ring progressively stops delivering motion events for *any* persistently‑streamed camera, wired included. Leave Prebuffer **off** on every camera whose motion events or HKSV clips matter — which, if you are reading this guide, is all of them. Instant live view is achieved instead by the on‑demand WebRTC path in [operations.md §1](operations.md#1-instant-live-view-and-why-prebuffer-is-not-how-you-get-it).
+- On **wired / hardline** cameras the battery cost disappears but **the event suppression does not**. Ring progressively stops delivering motion events for *any* persistently‑streamed camera, wired included. Leave Prebuffer **off** on every camera whose motion events or HKSV clips matter — which, if you are reading this guide, is all of them. Live view then stays on‑demand, about 3 s to first frame; [operations.md §1](operations.md#1-instant-live-view-and-why-prebuffer-is-not-how-you-get-it) explains the trade‑off: prebuffer opens it in about 0.1 s but costs that camera's motion events.
 - **Codec must be H.264** (H.265/MJPEG break WebRTC).
 
 > ⚠️ **An earlier version of this runbook said prebuffer was "safe and desirable" on wired cameras. That was wrong and is retracted.** Battery drain is the battery‑specific cost; **event suppression is universal**. The failure is gradual and silent — events thin out over days rather than stopping outright — so it is easy to enable prebuffer, see live view improve, and not connect the motion loss that follows. Classify wired‑vs‑battery for the *battery* trade‑off only, never for event delivery.
 
-**VERIFY:** on battery cams, Prebuffer/PAM‑DIFF/OpenCV are off; snapshots + live still work in the console for all cameras.
+**VERIFY:** Prebuffer is off on every camera whose motion events or HKSV clips matter; on battery cams, PAM‑DIFF/OpenCV are off too; snapshots + live still work in the console for all cameras.
 
 ---
 
@@ -176,14 +176,14 @@ Delete the obsolete automations; remove the custom snapshot component + its pack
 1. Settings → Devices & Services → **Ring → ⋮ → Delete** → confirm. **Restart HA.**
 2. **Ring app → Account → Control Center → Authorized Client Devices:** confirm only the **Scrypted** device remains and the old Home Assistant client is gone (a stale HA client could later invalidate Scrypted's refresh token).
 
-**Now proceed to [operations.md](operations.md)** to enable instant live view, restore motion/doorbell to HA, and stand up the health watchdog.
+**Now proceed to [operations.md](operations.md)** to restore motion/doorbell to HA, make go2rtc live view survive restarts, and stand up the monitors (deployable files in [`ha/`](../ha/)).
 
 ---
 
 ## Single-client proof checklist (after Stage 11)
 1. **Ring app:** Control Center → Authorized Client Devices = only the Scrypted device.
 2. **HA:** no Ring integration; no leftover still entities; no snapshot‑component log errors.
-3. **Scrypted:** all cameras online; on battery cams, Prebuffer/PAM‑DIFF/OpenCV off; motion events arriving.
+3. **Scrypted:** all cameras online; Prebuffer off wherever motion or HKSV matters, and PAM‑DIFF/OpenCV off on battery cams; motion events arriving.
 4. **HomeKit:** each camera once in Apple Home; HKSV recording within tier; the HA bridge exposes no Ring camera.
 5. **Battery cams (if any):** the Ring app is not accumulating stray Live‑View recordings.
 
