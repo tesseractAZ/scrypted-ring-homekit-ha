@@ -22,6 +22,14 @@ custom_components/
 *.tar
 backups/
 
+# Engine-log archive pulls and monitor state: personal data, and gzip hides
+# their content from the hygiene sweep
+*.log.gz
+cam_engine.log.d/
+.pseudonym.key*
+*.corrupt-*
+.cam_*_state.json
+
 # Editor / OS cruft
 .DS_Store
 *.swp

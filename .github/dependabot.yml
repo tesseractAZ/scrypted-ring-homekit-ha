@@ -1,0 +1,14 @@
+# Version updates for the CI's pinned dependencies: the actions (pinned to
+# commit SHAs in .github/workflows/) and the hash-pinned PyYAML in
+# .github/requirements-ci.txt. Security updates are enabled separately in the
+# repository settings.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /.github
+    schedule:
+      interval: weekly

@@ -25,6 +25,9 @@
 #    so the sweep can scan its own file instead of excluding it.
 #  - -a on BOTH greps: without it a match in a file holding a NUL byte prints no
 #    content (BSD grep) or goes to stderr (GNU grep) and the hit is lost.
+#  - a pinned action SHA ('uses: owner/repo@<40 hex>') and a pip hash
+#    ('--hash=sha256:<64 hex>') are public by construction; only those exact
+#    shapes are stripped, and the line is re-checked for any other hex run.
 #  - hits are reported as file:line only, never the matched text, so a CI log
 #    cannot republish what the sweep found.
 set -u
@@ -62,8 +65,10 @@ scan() {
   if [ "$n" -gt 0 ]; then printf '%s\n' "$out" | cut -d: -f1,2 | head -5 | sed 's/^/      /'; rc=1; fi
 }
 scan "private IPs"            '(^|[^0-9])(192\.168|10\.[0-9]+\.|172\.(1[6-9]|2[0-9]|3[01])\.)[0-9]'
-scan "16+ hex tokens"         '[a-f0-9]{16,}'
-scan "addon slug 8hex_name"   '\b[a-f0-9]{8}_[a-z_]+'
+scan "16+ hex tokens"         '[a-f0-9]{16,}' \
+     'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[a-f0-9]{40}|--hash=sha256:[a-f0-9]{64}'
+scan "addon slug 8hex_name"   '(^|[^a-f0-9])[a-f0-9]{8}_[a-z_]+'
+scan "IPv6 addresses"         '(^|[^0-9a-f])[0-9a-f]{1,4}(:[0-9a-f]{0,4}){2,7}:[0-9a-f]{1,4}'
 scan "home-directory paths"    '/Use''rs/'
 scan "real notify target"     'mobile_app_''iphone'
 scan "config-entry ULIDs"     '01K[A-Z0-9]{23}'

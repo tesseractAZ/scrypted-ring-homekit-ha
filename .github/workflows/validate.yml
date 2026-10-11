@@ -21,22 +21,29 @@ on:
 permissions:
   contents: read
 
+# Every action is pinned to a full commit SHA (its tag in the comment) and PyYAML
+# by version and hash; .github/dependabot.yml keeps the pins current. No step
+# pushes, so checkout keeps no credentials.
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.12'
+
+      - name: Install the pinned CI dependency
+        run: pip install --quiet --require-hashes -r .github/requirements-ci.txt
 
       - name: Python compiles
         run: python -m compileall -q ha/scripts
 
       - name: YAML parses
         run: |
-          pip install --quiet pyyaml
           python - <<'PY'
           import glob, yaml
           for f in sorted(glob.glob('ha/packages/*.yaml')):
@@ -63,7 +70,6 @@ jobs:
 
       - name: json_attributes allowlist parity
         run: |
-          pip install --quiet pyyaml
           python - <<'PY'
           import re, yaml, sys
           fail = False
@@ -89,6 +95,17 @@ jobs:
               fail |= bool(dead or unused)
           sys.exit(1 if fail else 0)
           PY
+
+  # The sweep is the only step that sees a secret (the instance names and ids
+  # this public repository exists to hide), so it runs in its own job on a fresh
+  # runner with no third-party code but the pinned checkout: nothing an earlier
+  # step installed can rewrite the script or read its environment.
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Public-repo hygiene sweep
         env:
