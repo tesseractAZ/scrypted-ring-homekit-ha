@@ -791,7 +791,10 @@ def main():
     for ln in lines:
         # Door and motion lines are their own shapes and are collected BEFORE
         # the fault chain below; they must not disturb its if/elif ordering.
-        dm = DOOR_RE.search(ln)
+        # The suffix test is a necessary condition for DOOR_RE (it ends
+        # ' entryOpen: true\s*$'); without it the lazy name class, which takes
+        # spaces, went quadratic on a line full of ' i '.
+        dm = DOOR_RE.search(ln) if ln.rstrip().endswith(" entryOpen: true") else None
         if dm:
             tsm = TS_RE.match(ln)
             if tsm:

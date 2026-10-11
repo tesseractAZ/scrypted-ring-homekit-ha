@@ -316,8 +316,9 @@ _OPAQUE12C = (r"(?=%s{12,})(?![A-Z]?[a-z]+(?:-[a-z]+)*(?!%s))%s{11,}[A-Za-z0-9_~
 # R1 JWT (Ring signalling sessions): header.payload.signature, or a bare
 # base64url run that starts like a JSON header.
 R_JWT = re.compile(r"eyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]*){0,2}")
-# R1b e-mail (defensive; 0 seen).
-R_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+# R1b e-mail (defensive; 0 seen). The lookbehind starts a match only at the head of
+# a local-part run: without it a long run with no '@' after it was quadratic.
+R_EMAIL = re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
 # R2 IPv6, BEFORE IPv4. LINEAR candidate: a maximal run of [hex : .] that begins
 # after a character outside that class; the callback validates it with
 # ipaddress, so a DTLS fingerprint (32 colon pairs), a time (03:14:27) or a MAC
@@ -386,12 +387,14 @@ T_MAX_MS = 86400 * 1000
 # value. One line: the object's '{', then anything but a brace, then its 'id'.
 # ASCII case folding here and in R6f: the prefilters are then necessary
 # conditions, and an object name spelled with a folded letter is no object.
+# '\\' in both lookbehinds: a start inside a backslash run re-scanned the rest of
+# the run in _Q, quadratic on a hostile line (16,000 backslashes: 3.5 s).
 _OBJ_CLASS = {"location": None, "device": "DEV", "doorbot": "DEV", "ding": "DING"}   # None: <RID>
 _RING_NUM = re.compile(r"[0-9]{6,}")     # a doorbot id (9 digits) or a ding id (19)
 _OBJ_NAMES = r"(location|device|doorbot|ding)"
 _OBJ_BRACE = r"\s*[:=]\s*(?:\[Object: null prototype\]\s*)?\{"
 R_OBJ_ID = re.compile(
-    r"(?ia)(?<![\w-])(" + _Q + _OBJ_NAMES + _Q + _OBJ_BRACE + r"[^{}\n]*?(?<![\w-])" + _Q + r"id" + _Q
+    r"(?ia)(?<![\w\\-])(" + _Q + _OBJ_NAMES + _Q + _OBJ_BRACE + r"[^{}\n]*?(?<![\w\\-])" + _Q + r"id" + _Q
     + r"\s*[:=]\s*" + _Q + r")(?!(?:undefined|null|true|false)\b)([0-9A-Za-z_.:-]+)")
 # ... and across lines: an opener that ends its line, then 'id' as a DIRECT member
 # (Nest decides which object a line belongs to; the rule acts only on such a line).
