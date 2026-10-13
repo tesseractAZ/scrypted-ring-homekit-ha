@@ -24,9 +24,14 @@ permissions:
 # Every action is pinned to a full commit SHA (its tag in the comment) and PyYAML
 # by version and hash; .github/dependabot.yml keeps the pins current. No step
 # pushes, so checkout keeps no credentials.
+#
+# Both jobs run on ubuntu-26.04, pinned rather than ubuntu-latest, and the
+# scripts compile under Python 3.14, the version Home Assistant Core runs them
+# with. Code scanning (CodeQL default setup) stays on GitHub's standard runner,
+# ubuntu-24.04: CodeQL's system requirements list Ubuntu 22.04 and 24.04 only.
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -34,7 +39,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: '3.12'
+          python-version: '3.14'
 
       - name: Install the pinned CI dependency
         run: pip install --quiet --require-hashes -r .github/requirements-ci.txt
@@ -101,7 +106,7 @@ jobs:
   # runner with no third-party code but the pinned checkout: nothing an earlier
   # step installed can rewrite the script or read its environment.
   hygiene:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
