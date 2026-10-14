@@ -851,9 +851,11 @@ def process_line(raw, hits, ps=None, nest=None):
 
 
 # ---------------------------------------------------------------------------
-# PROBE-DUMP COLLAPSE. cam_health and cam_vision each fetch the same nine
-# takePicture webhooks every 120 s, and the engine logs every request as a
-# 15-line object dump ('received webhook {' .. '}'). Measured 2026-10-02: the
+# PROBE-DUMP COLLAPSE. cam_health fetches the nine takePicture webhooks every
+# 120 s (cam_vision analyses those frames and fetches for itself only while
+# they are missing or stale; both fetched until 2026-10-14), and the engine
+# logs every request as a 15-line object dump ('received webhook {' .. '}').
+# Measured 2026-10-02, while both fetched: the
 # same-millisecond groups holding these dumps were 291,878 of 591,537 lines
 # (49.3 %) and 32.9 % of the gzip bytes, and they are where the webhook tokens
 # live. A dump is collapsed to its url line plus a note of what was dropped:

@@ -22,12 +22,12 @@ This is a reference repository maintained on a best-effort basis, with no respon
 
 The repository ships **no add-on, no container image, no Scrypted plugin and no AppArmor profile**. Scrypted runs as a third-party Home Assistant add-on whose code, configuration and confinement belong to its maintainers; the documentation configures it through Scrypted's own UI, and the scripts read its log.
 
-The scripts use the Python standard library, plus Pillow from the Core container in `cam_vision.py`. None of them opens a listening socket, spawns a shell or a subprocess, or deserialises anything but JSON (no `pickle`, `yaml.load` or `eval`). Every network call is plain HTTP to one of two local endpoints: the Supervisor (`http://supervisor`) and the host's own Scrypted HTTP port (`http://<HA_HOST_IP>:11080`). Files are written only under `/config`: each monitor's own dotfile state and the engine-log archive directory.
+The scripts use the Python standard library, plus Pillow from the Core container in `cam_vision.py`. None of them opens a listening socket, spawns a shell or a subprocess, or deserialises anything but JSON (no `pickle`, `yaml.load` or `eval`). Every network call is plain HTTP to one of two local endpoints: the Supervisor (`http://supervisor`) and the host's own Scrypted HTTP port (`http://<HA_HOST_IP>:11080`). Files are written under `/config` (each monitor's own dotfile state and the engine-log archive directory) and under `/dev/shm/cam_snap/` in the Core container's tmpfs, a directory created with mode `0700` where `cam_health.py` leaves the latest good snapshot of each camera and a cycle marker for `cam_vision.py`.
 
 ## Trust boundaries and untrusted input
 
 - **Scrypted engine log**, read by `cam_flap.py` and `cam_logarchive.py` through the Supervisor log API. Its text comes from the Ring cloud (push-notification and signalling dumps), from Scrypted plugins, and from any client that can reach Scrypted's webhook endpoint: the endpoint logs each request, URL and headers included, before it checks the token. Every line is treated as untrusted. `cam_flap.py` only matches fixed patterns and publishes counts, camera and door names and times. `cam_logarchive.py` redacts before writing and withholds what still looks like an identifier (below); a line whose redaction raises is withheld rather than archived and does not stop the run; the archive's own marker lines are written by the script, never copied from the log. Each archive run stops at a 60 s work budget, checked between journal entries.
-- **Snapshots** from the Scrypted webhooks: `cam_health.py` hashes the body and `cam_vision.py` decodes a thumbnail with Pillow. Bodies are read whole from the host's own Scrypted port.
+- **Snapshots** from the Scrypted webhooks: `cam_health.py` hashes the body and writes each good one to `/dev/shm/cam_snap/<cam>.jpg` (a temporary file, then a rename); `cam_vision.py` decodes a thumbnail of that file with Pillow, and fetches from the webhook itself only while those frames are missing or stale. Bodies are read whole from the host's own Scrypted port.
 - **Recorder database**: `cam_motion.py` opens it read-only (`mode=ro`) with bound query parameters.
 - **State files** under `/config`: written and read back as JSON by the monitors themselves.
 
@@ -63,6 +63,8 @@ It is **not redacted**. It holds Ring session JWTs, webhook tokens and request U
 ### Other monitor state
 
 `/config/.cam_health_state.json` (frame hashes), `/config/.cam_vision_state.json` (per-camera 48 x 30 grayscale baseline frames, base64, and change times), `/config/.cam_motion_state.json` (motion statistics, verdict latches and recorder-gap history) and `/config/.cam_flap_door_state.json` (door-trip verdicts with times) are ordinary `/config` files and are included in Home Assistant backups.
+
+`/dev/shm/cam_snap/` in the Home Assistant Core container holds the latest good snapshot of every camera (`<cam>.jpg`) and a `CYCLE` marker. It is tmpfs (memory), outside `/config`, not in any backup, and emptied when Home Assistant restarts. Until then it is the current picture of every view, readable by anything with root access to the Core container.
 
 ### What leaves the host
 

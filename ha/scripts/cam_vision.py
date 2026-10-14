@@ -301,6 +301,30 @@ SPIKE_RETURN = 3.0
 SPIKE_SEEN = "%s (luma %.1f -> %.1f -> %.1f, vs before: d %.1f/%.1f, %d hot)"
 KEEP_HOURS = 48.0
 TIMEOUT = 12
+# SHARED FRAMES (2026-10-14). cam_health.py fetches every camera on the same
+# 120 s cycle, leaves each good frame in SPOOL_DIR (mtime = when it was fetched)
+# and then writes the CYCLE marker. This monitor analyses those frames instead
+# of requesting its own, which halves the takePicture requests: each one is a
+# ~25-line request dump in the Scrypted log, and two probers made that log the
+# largest writer in the host journal (540 dumps/h, measured 2026-10-13). The two
+# sensors run on the same interval a fraction of a second apart, so a run that
+# finds the marker older than SPOOL_WAIT_IF_OLDER_S waits up to SPOOL_WAIT_S for
+# cam_health.py to finish this cycle. A frame is used once - the frame whose
+# mtime EQUALS the stored `spool_t` is the one already used; every rewrite has a
+# new mtime, and comparing for equality rather than order means a backward clock
+# step cannot make new frames look old - and only while it is at most
+# SPOOL_FRESH_S old; otherwise that camera has no sample this cycle, exactly as
+# when a fetch failed. A marker that is missing or older than
+# SPOOL_STALE_S means cam_health.py is not running: this monitor then fetches
+# for itself, as it always did, and says so in the summary.
+SPOOL_DIR = "/dev/shm/cam_snap"
+SPOOL_CYCLE = SPOOL_DIR + "/CYCLE"
+SPOOL_WAIT_IF_OLDER_S = 90.0
+SPOOL_WAIT_S = 32.0            # this sensor's timer can run up to ~15 s ahead of
+                               # cam_health.py's (a reload during a slow probe), and
+                               # a burst can last up to its 15 s probe timeout
+SPOOL_FRESH_S = 150.0
+SPOOL_STALE_S = 300.0
 # HEARTBEAT. Home Assistant rewrites last_updated only when the state or an
 # attribute CHANGES, and a healthy fleet emits a byte-identical payload for hours
 # - so a sensor whose update loop has STOPPED is indistinguishable from one that
@@ -370,6 +394,49 @@ def fetch(cam):
             return name, r.read() if r.status == 200 else None
     except Exception:
         return name, None
+
+
+def spool_age():
+    try:
+        return time.time() - os.stat(SPOOL_CYCLE).st_mtime
+    except OSError:
+        return None
+
+
+def read_spool(name, used_t, now):
+    """(body, mtime) of cam_health.py's frame for this camera, or (None, None)
+    when there is none, it is already used, or it is too old to be this cycle's."""
+    try:
+        with open("%s/%s.jpg" % (SPOOL_DIR, name), "rb") as f:
+            t = os.fstat(f.fileno()).st_mtime
+            used = _finite(used_t)          # bad or non-finite state: treat as unused
+            if (used is not None and t == used) or now - t > SPOOL_FRESH_S:
+                return None, None
+            return f.read(), t
+    except OSError:
+        return None, None
+
+
+def gather(st):
+    """(results, now, source): (name, body, spool_t) per camera, read from
+    cam_health.py's shared frames, or fetched here when it is not running."""
+    age = spool_age()
+    if age is not None and SPOOL_WAIT_IF_OLDER_S < age <= SPOOL_STALE_S:
+        deadline = time.time() + SPOOL_WAIT_S
+        while time.time() < deadline:
+            time.sleep(0.5)
+            age = spool_age()
+            if age is not None and age <= SPOOL_WAIT_IF_OLDER_S:
+                break
+    now = time.time()
+    if age is None or age > SPOOL_STALE_S:
+        with ThreadPoolExecutor(max_workers=len(CAMS)) as ex:
+            return [(n, b, None) for n, b in ex.map(fetch, CAMS)], now, "fetch"
+    results = []
+    for name, _cid, _token in CAMS:
+        body, t = read_spool(name, (st.get(name) or {}).get("spool_t"), now)
+        results.append((name, body, t))
+    return results, now, "spool"
 
 
 def analyze(body):
@@ -555,9 +622,7 @@ def main():
     except Exception:
         st = {}
 
-    now = time.time()
-    with ThreadPoolExecutor(max_workers=len(CAMS)) as ex:
-        results = list(ex.map(fetch, CAMS))
+    results, now, source = gather(st)
 
     hours, changes, irs, maxdiff = {}, {}, {}, {}
     day_events = ir_events = dark_events = 0
@@ -568,7 +633,7 @@ def main():
     # repaired state is written back).
     repaired, faults = [], []
     unlit_skips, spike_pairs, spike_kept = [], [], []
-    for name, body in results:
+    for name, body, spool_t in results:
         prev = st.get(name, {})
         log = [t for t in prev.get("log", []) if now - t < KEEP_HOURS * 3600]
         events = [e for e in prev.get("events", []) if now - e[0] < KEEP_HOURS * 3600]
@@ -613,9 +678,11 @@ def main():
         # looked and the scene was quiet" from "we could not look at all".
         if prev.get("probe_ts") is not None:
             entry["probe_ts"] = prev["probe_ts"]
-        for k in ("fresh_ts", "body_hash"):
+        for k in ("fresh_ts", "body_hash", "spool_t"):
             if prev.get(k) is not None:
                 entry[k] = prev[k]
+        if spool_t is not None:
+            entry["spool_t"] = spool_t      # this shared frame is used: never again
         body_hash = hashlib.sha1(body).hexdigest() if body else None
         if body and body_hash in ring:
             # Byte-identical to one of the last BODY_RING_N distinct samples: the
@@ -842,6 +909,8 @@ def main():
         if items:
             summary += "; %s: %s%s" % (label, ", ".join(items[:6]),
                                        " (+%d more)" % (len(items) - 6) if len(items) > 6 else "")
+    if source == "fetch":
+        summary += "; own snapshot requests (cam_health.py shared frames missing or stale)"
     emit({
         "hours_since_visual": hours, "changes_24h": changes, "ir_mode": irs,
         "max_norm_diff": maxdiff, "active_count": active,

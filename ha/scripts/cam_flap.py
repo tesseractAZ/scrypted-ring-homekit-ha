@@ -69,19 +69,20 @@ MIN_SPAN_MIN = 10.0     # below this the rates are too noisy to publish
 ALERT_HR = 2.0          # per-camera recording failures/hour -> flagged
 MIN_EVENTS = 3          # ...and at least this many absolute failures
 PROBE_INTERVAL_MIN = 2.0  # scan_interval of ONE probing sensor, in minutes
-PROBERS = 2               # ...and this many sensors probe the SAME nine webhook
-                          # endpoints on that interval: cam_health.yaml and
-                          # cam_vision.yaml both run scan_interval 120 against
-                          # the identical takePicture URLs. Measured 2026-08-30:
-                          # 34,807 takePicture requests in 62.7 h = 2.06x a
-                          # single prober, and probe_counts read 362 against an
-                          # `expected` of 180. Omitting this factor halved the
-                          # denominator, so the shortfall bar sat at 37% of the
-                          # real rate: a camera had to lose 63% of its probes to
-                          # trip it rather than the intended 25%, and cam_vision
-                          # dying outright (probes halve to ~181) stayed ABOVE
-                          # the bar - which is exactly the failure this signal is
-                          # relied on to catch, since cam_vision has no dead-man.
+PROBERS = 1               # ...and this many sensors probe the SAME nine webhook
+                          # endpoints on that interval. Since 2026-10-14 only
+                          # cam_health.yaml does: cam_vision.py analyses the
+                          # frames cam_health.py leaves in /dev/shm/cam_snap and
+                          # requests its own only while that spool is stale, so
+                          # its fallback can only ADD probes. The factor was 2
+                          # while both probed (measured 2026-08-30: 34,807
+                          # takePicture requests in 62.7 h = 2.06x a single
+                          # prober, probe_counts 362 against an `expected` of
+                          # 180); leaving it out then halved the denominator, so
+                          # a camera had to lose 63% of its probes to trip the
+                          # shortfall rather than the intended 25%. A dying
+                          # cam_vision no longer shows here at all: its own
+                          # dead-man (camera_vision_monitor_down) covers it.
 PROBE_SHORTFALL = 0.75    # camera probed < this fraction of EXPECTED cycles
 
 ALERT_HR_OVERRIDES = {}  # e.g. "<chronic_cam>": 6.0

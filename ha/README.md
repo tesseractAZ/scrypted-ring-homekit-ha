@@ -24,8 +24,12 @@ before deploying (grep for `<` to find them).
    has none) — grep each for `<`.
    `scripts/cam_health.py` and `scripts/cam_vision.py` each need the HA host IP
    plus every camera's Scrypted device id and webhook token (how to obtain them:
-   [`docs/migration-runbook.md`](../docs/migration-runbook.md)); they probe the
-   same nine endpoints, so the two lists must match.
+   [`docs/migration-runbook.md`](../docs/migration-runbook.md)). The two lists
+   must match, names included: `cam_vision.py` analyses the frame `cam_health.py`
+   leaves for each camera in `/dev/shm/cam_snap/<name>.jpg`, and requests the
+   same endpoints itself only while those frames are missing or stale, so while
+   `cam_health.py` runs, a camera whose name differs between the two lists is
+   never seen by the visual monitor.
    `scripts/cam_motion.py` needs the nine camera entity stems (it queries
    `binary_sensor.<stem>_motion`) and, optionally, per-camera staleness
    overrides. (There is deliberately no recorder-outage exclusion knob — see
@@ -45,10 +49,13 @@ before deploying (grep for `<` to find them).
    counted, so an unfilled map puts every camera in `probe_shortfall`;
    `PROBE_INTERVAL_MIN` = the scan_interval of ONE probing sensor in minutes,
    and `PROBERS` = how many sensors probe those endpoints on that interval
-   (2 as shipped: `cam_health.yaml` and `cam_vision.yaml` both run
-   `scan_interval: 120` against the identical URLs). Getting `PROBERS` wrong
-   halves the expected-probe denominator and silently detunes the
-   probe-shortfall detector by that factor; and
+   (1 as shipped: only `cam_health.yaml` requests the snapshots; `cam_vision.py`
+   analyses the frames `cam_health.py` leaves in `/dev/shm/cam_snap/` and
+   requests its own only while those are missing or stale, which can only add
+   probes). Getting `PROBERS` wrong scales the expected-probe denominator by
+   the same factor: set to 2 with one prober, every camera sits at about half
+   the expected count and stays in `probe_shortfall`; left at 1 after adding a
+   second prober, the probe-shortfall detector is silently detuned; and
    `ALERT_HR_OVERRIDES` ships empty — add a raised threshold per known-chronic
    camera if you have one. `automations/front_door_doorbell_announce.json`
    needs your speaker and TTS entity ids.
@@ -120,8 +127,13 @@ before deploying (grep for `<` to find them).
    recorder (`/config/home-assistant_v2.db`, read-only); with MariaDB or
    PostgreSQL, adapt its queries.
 7. **Verify**: `sensor.camera_health` reads the camera count (all healthy),
-   `binary_sensor.cameras_problem` is `off`, and a test notification fires when
-   a camera URL is deliberately broken.
+   `binary_sensor.cameras_problem` is `off`, a test notification fires when
+   a camera URL is deliberately broken, and `sensor.camera_visual_activity`'s
+   `summary` does not include `own snapshot requests` (the first poll after a
+   restart may, because `/dev/shm` starts empty): that note means
+   `cam_vision.py` found no fresh frames from `cam_health.py` in
+   `/dev/shm/cam_snap/` and is requesting the snapshots itself, doubling the
+   probe load.
 
 ## What each automation does
 
@@ -328,8 +340,9 @@ shows up here first.
   per-camera **recording-error** rate, dismisses on recovery, and pages
   separately if the monitor itself sits in an error state for an hour
   (dead-man's switch for the monitor itself; a snapshot-watchdog death does
-  not trip it - `cam_vision.py` probes the same endpoints and the window is
-  measured from log timestamps - and `camera_health_monitor_down` covers that). Also carries a tripwire on UNDECRYPTABLE cloud push
+  not trip it - the window is measured from log timestamps, and `cam_vision.py`
+  requests the snapshots itself once `cam_health.py`'s shared frames go stale -
+  and `camera_health_monitor_down` covers that). Also carries a tripwire on UNDECRYPTABLE cloud push
   messages (`push_undecryptable`). The push receiver either drops a message it
   cannot decrypt and logs one line (`Message dropped as it could not be
   decrypted: <reason>`, e.g. a missing crypto-key) or rethrows the error as a
@@ -441,9 +454,15 @@ shows up here first.
   withholds its visual verdict once a camera has sent no new frame for 15 min.
   Before this, a camera serving a cached image for days read as "no visual
   change - consistent with a quiet area". Do not rely on the stream-fault monitor to notice the visual monitor
-  dying: both scripts probe the same endpoints, so `PROBERS` must be set to 2 or
-  cam_vision stopping merely halves the probe count to a level still above the
-  shortfall bar.
+  dying: it makes no snapshot requests of its own while the frames
+  `cam_health.py` leaves in `/dev/shm/cam_snap/` are fresh, so its death leaves
+  the probe counts unchanged; this dead-man and `camera_monitor_stalled` cover
+  it. When it reports cameras unseen while `sensor.camera_health` reads them
+  healthy, look at the shared frames first: a missing or stale `CYCLE` marker
+  makes it fetch for itself (its `summary` then says `own snapshot requests`),
+  while a fresh marker with no `<name>.jpg` for a camera (a name that differs
+  between the two scripts' camera lists, or a frame that could not be written)
+  leaves that camera without a sample.
 - `camera_host_down_alert` / `_recovered` — reports an outage of the HOST, after
   the fact. Every monitor here is a process inside the thing it monitors, so a
   host-down event raises nothing at all while it is happening: the monitor
@@ -999,9 +1018,10 @@ key, a URL path other than the Ring paths above) is still out of reach. A rule
 fix applies to new lines only: day files written before it keep what they hold
 until they are re-redacted.
 
-**Request-dump collapse.** The two probing monitors fetch the same `takePicture`
-webhooks every 120 s, and the engine logs each request as a 15-line object
-dump. Each dump that matches a strict grammar is replaced by its url line and a
+**Request-dump collapse.** The snapshot watchdog fetches every camera's
+`takePicture` webhook every 120 s (the visual monitor analyses those frames and
+fetches for itself only while they are missing or stale), and the engine logs
+each request as a 15-line object dump. Each dump that matches a strict grammar is replaced by its url line and a
 note of what was removed (about half the lines; gzip size -33 %); anything else
 is archived verbatim. `cam_flap.py` counts probes by device id
 (`public/<id>/<token>/takePicture`, the token lower-case hex in the live journal or

@@ -26,9 +26,10 @@ Detects (v3 hardening, after the <cam_3> wedge the old logic missed):
              source (the wedge ran ~10s / near the 15s timeout) trips it. FREEZE is
              the primary wedge catcher; SLOW is a conservative near-death backstop.
 
-Emits ONE JSON object to stdout (parsed by the command_line sensor).
+Emits ONE JSON object to stdout (parsed by the command_line sensor), and leaves
+each good frame in SPOOL_DIR for cam_vision.py (see SHARED FRAMES).
 """
-import json, hashlib, time, urllib.request, urllib.error
+import json, hashlib, os, time, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
 HOST = "<HA_HOST_IP>:11080"
@@ -51,6 +52,19 @@ SLOW_SECS = 9.0         # >this = degraded/near-timeout. Above the 4-7s concurre
                         # contention band so healthy cameras aren't false-flagged.
 SLOW_AFTER = 2          # ...for this many consecutive probes (tolerate one-off spikes)
 TIMEOUT = 15
+# SHARED FRAMES (2026-10-14). cam_vision.py analyses the frame this probe just
+# fetched instead of requesting its own. Every takePicture request makes the
+# Scrypted webhook plugin log a ~25-line request dump, and with two probers that
+# was the largest writer in the host journal (measured 2026-10-13: 540 dumps/h,
+# about 14k of Scrypted's 14-23k entries/h; HAOS caps the journal at 500 MB, so
+# the noisiest writer sets every service's retention). Frames go to tmpfs, not
+# /config, so they cost no disk writes. Each is written to a temp name and
+# renamed, so a reader never sees half a frame, and its mtime is the time it was
+# fetched; the CYCLE marker is written once all nine probes are done. Best
+# effort: a spool failure never changes this sensor's result, and cam_vision.py
+# fetches for itself when the marker goes stale.
+SPOOL_DIR = "/dev/shm/cam_snap"
+SPOOL_CYCLE = SPOOL_DIR + "/CYCLE"
 # HEARTBEAT. Home Assistant rewrites last_updated only when the state or an
 # attribute CHANGES, and a healthy fleet emits a byte-identical payload for hours
 # - so a sensor whose update loop has STOPPED is indistinguishable from one that
@@ -67,6 +81,17 @@ FLEET_MISS_MIN = 5      # majority of cams failing THIS cycle => fleet-level out
                         # reported immediately instead of waiting out DOWN_AFTER
 
 
+def spool_write(path, data, mode):
+    try:
+        os.makedirs(SPOOL_DIR, mode=0o700, exist_ok=True)
+        tmp = "%s/.%s.tmp" % (SPOOL_DIR, os.path.basename(path))
+        with open(tmp, mode) as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
 def probe(cam):
     name, cid, token = cam
     url = f"http://{HOST}/endpoint/@scrypted/webhook/public/{cid}/{token}/takePicture"
@@ -74,11 +99,15 @@ def probe(cam):
     try:
         with urllib.request.urlopen(urllib.request.Request(url), timeout=TIMEOUT) as r:
             body = r.read()
-            return name, r.status, len(body), hashlib.sha256(body).hexdigest(), time.time() - t0
+            status = r.status
     except urllib.error.HTTPError as e:
         return name, e.code, 0, "", time.time() - t0
     except Exception:
         return name, 0, 0, "", time.time() - t0
+    latency = time.time() - t0          # before the spool write: SLOW measures the camera
+    if status == 200 and len(body) >= MIN_BYTES:
+        spool_write("%s/%s.jpg" % (SPOOL_DIR, name), body, "wb")
+    return name, status, len(body), hashlib.sha256(body).hexdigest(), latency
 
 
 def main():
@@ -89,6 +118,7 @@ def main():
 
     with ThreadPoolExecutor(max_workers=9) as ex:
         results = list(ex.map(probe, CAMS))
+    spool_write(SPOOL_CYCLE, "%.3f\n" % time.time(), "w")
 
     down, frozen, slow, detail, healthy = [], [], [], {}, 0
     stale_now = 0   # cams whose frame is byte-identical to the PREVIOUS probe
