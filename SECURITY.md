@@ -93,7 +93,7 @@ Scrypted holds the account's Ring refresh token, and every Scrypted plugin runs 
 
 ## Repository controls
 
-- **CodeQL** code scanning (default setup) for Python and GitHub Actions workflows.
+- **CodeQL** code scanning (`.github/workflows/codeql.yml`, `security-extended` queries) for Python and the GitHub Actions workflows, on push, pull request and weekly.
 - **Secret scanning** with **push protection**.
 - **Dependabot security updates.**
 - **Private vulnerability reporting** (see above).

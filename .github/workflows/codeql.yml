@@ -1,0 +1,52 @@
+name: CodeQL
+
+# Code scanning in advanced setup (replaced GitHub's default setup on
+# 2026-10-14) so that it runs on ubuntu-26.04 like every other job here. Default
+# setup offers no choice of runner image. CodeQL's published system requirements
+# name Ubuntu 22.04 and 24.04; it runs on 26.04 without a platform warning.
+# Python and the workflows themselves are interpreted, so no build step is
+# needed. Every action is pinned to a full commit SHA (its tag in the comment);
+# .github/dependabot.yml keeps the pins current.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '27 5 * * 1'   # weekly, Monday 05:27 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read            # CodeQL reads the workflow run for its analysis summary
+  security-events: write   # required to upload the results to code scanning
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, python]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d  # v4.38.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d  # v4.38.3
+        with:
+          category: /language:${{ matrix.language }}

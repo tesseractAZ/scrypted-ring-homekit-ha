@@ -27,8 +27,7 @@ permissions:
 #
 # Both jobs run on ubuntu-26.04, pinned rather than ubuntu-latest, and the
 # scripts compile under Python 3.14, the version Home Assistant Core runs them
-# with. Code scanning (CodeQL default setup) stays on GitHub's standard runner,
-# ubuntu-24.04: CodeQL's system requirements list Ubuntu 22.04 and 24.04 only.
+# with. Code scanning runs on ubuntu-26.04 too (.github/workflows/codeql.yml).
 jobs:
   validate:
     runs-on: ubuntu-26.04
