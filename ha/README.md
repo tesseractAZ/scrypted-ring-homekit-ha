@@ -356,7 +356,14 @@ shows up here first.
   signalling session that actually delivers motion. Do **not** re-authenticate the
   camera-source plugin on this signal alone — confirm a real motion-delivery gap
   first. The rate is also confounded by push volume, which tracks motion, so
-  normalise before calling a trend.
+  normalise before calling a trend. The `ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY`
+  failures are a known push-receiver defect: it is fixed in
+  `@eneris/push-receiver` 4.3.1, but `ring-client-api` 14.3.0 (its latest release
+  as of 2026-10) still depends on an earlier version (upstream issue
+  [dgreif/ring#1709](https://github.com/dgreif/ring/issues/1709)), so bursts recur
+  until the camera-source plugin ships the newer dependency. A burst on
+  2026-10-14/15 (about 27 failures in five hours, against 2–3 a day before it)
+  again cost no motion: 42 of 42 engine-side detections reached HA within 5 s.
   Error-coded HKSV closes (`closed_with_error`, unchanged) are also split by HAP
   close reason (HAP-NodeJS `HDSProtocolSpecificErrorReason`): `closed_cancelled`
   (3, how a clip ends: HAP closes 12 s after the fragment generator stops),
