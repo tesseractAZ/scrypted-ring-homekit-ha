@@ -8,6 +8,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # One PR for every action update: github/codeql-action/init and /analyze
+    # are separate dependencies to Dependabot, and a PR that moves only one of
+    # them fails CodeQL ("all steps ... must use the same version").
+    groups:
+      actions:
+        patterns: ["*"]
   - package-ecosystem: pip
     directory: /.github
     schedule:
