@@ -164,6 +164,107 @@ STREAM_FAULTS = (
     "camera_unexpected_close",
 )
 TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.\d+ ")
+# JOURNAL STAMPS (2026-10-26). The Supervisor formats each journal entry's time
+# when it serves the log, so the form belongs to the running Supervisor, not to
+# the entry: a naive UTC stamp before 2026.10.3; a naive stamp in the host time
+# zone from 2026.10.3 (#7372: the host zone is now synced from Core); host time
+# WITH its UTC offset from 2026.10.4 ('2026-10-26 08:38:28.750-07:00', #7397).
+# Read as UTC, the 2026.10.3 form put every line 7 h in the past on a UTC-7 host,
+# and the offset form matches no stamp pattern at all. Every line is therefore
+# rewritten to the naive UTC form as it is read (stamp_utc), and the rest of the
+# script keeps one format. CAMFLAP_STAMP_ZONE (utc, local or an IANA zone) overrides the
+# Supervisor-derived reading.
+_STAMP_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?(?= )")
+_STAMP_CACHE = {}
+
+
+class StampFormUnknown(RuntimeError):
+    """A naive stamp whose reading cannot be determined: fail closed, never guess."""
+
+
+def stamp_zone(token, default_utc=False):
+    """(naive_is_local, tzinfo or None, note) for this run's stamps. naive_is_local is
+    None when the Supervisor's version could not be read: a stamp that carries its own
+    offset is still exact, a naive one raises StampFormUnknown (a wrong guess would
+    shift every line by the host offset, duplicate door trips and fake a resync)."""
+    forced = os.environ.get("CAMFLAP_STAMP_ZONE") or ("utc" if default_utc else "")
+    if forced:
+        if forced == "utc":
+            return False, None, None
+        if forced == "local":
+            return True, None, None
+        try:
+            from zoneinfo import ZoneInfo
+            return True, ZoneInfo(forced), None
+        except Exception as exc:  # noqa: BLE001
+            return True, None, "stamp zone %r unusable (%s): local time" % (forced, type(exc).__name__)
+
+    def get(path):
+        req = urllib.request.Request("http://supervisor" + path,
+                                     headers={"Authorization": "Bearer " + (token or "")})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))["data"]
+    try:
+        ver = tuple(int(x) for x in re.findall(r"\d+", str(get("/supervisor/info")["version"]))[:3])
+    except Exception as exc:  # noqa: BLE001
+        return None, None, "journal stamp form unknown (%s); set %s_STAMP_ZONE" % (type(exc).__name__, "CAMFLAP")
+    if ver < (2026, 10, 3):
+        return False, None, None
+    try:
+        from zoneinfo import ZoneInfo
+        return True, ZoneInfo(str(get("/host/info")["timezone"])), None
+    except Exception as exc:  # noqa: BLE001
+        return True, None, "host time zone unknown (%s): stamps read in local time" % type(exc).__name__
+
+
+def _naive_epoch(y, mo, d, h, mi, s, tz):
+    if tz is not None:
+        return datetime(y, mo, d, h, mi, s, tzinfo=tz).timestamp()
+    return time.mktime((y, mo, d, h, mi, s, 0, 0, -1))
+
+
+def stamp_utc(line, zone):
+    """line with its journal stamp rewritten to naive UTC, fraction kept."""
+    m = _STAMP_RE.match(line)
+    if not m:
+        return line
+    if not m.group(8):
+        if zone[0] is None:
+            raise StampFormUnknown(zone[2] or "journal stamp form unknown")
+        if not zone[0]:
+            return line
+    key = (line[:19], m.group(8))
+    utc = _STAMP_CACHE.get(key)
+    if utc is None:
+        y, mo, d, h, mi, s = (int(m.group(i)) for i in range(1, 7))
+        off = m.group(8)
+        if off:
+            e = calendar.timegm((y, mo, d, h, mi, s, 0, 0, 0))
+            if off != "Z":
+                dd = off[1:].replace(":", "")
+                sec = int(dd[:2]) * 3600 + int(dd[2:4]) * 60
+                e -= sec if off[0] == "+" else -sec
+        else:
+            e = _naive_epoch(y, mo, d, h, mi, s, zone[1])
+        if len(_STAMP_CACHE) > 20000:
+            _STAMP_CACHE.clear()
+        utc = _STAMP_CACHE[key] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(e))
+    return utc + (m.group(7) or "") + line[m.end():]
+
+
+def local_naive(utc_text, zone):
+    """'YYYY-MM-DD HH:MM:SS[.f]' UTC -> the same instant as a naive host-local
+    stamp, or None (used only to recognise records written in 2026.10.3's form)."""
+    try:
+        e = calendar.timegm(time.strptime(utc_text[:19], "%Y-%m-%d %H:%M:%S"))
+        if zone[1] is not None:
+            t = datetime.fromtimestamp(e, zone[1]).strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e))
+        return t + utc_text[19:]
+    except Exception:  # noqa: BLE001
+        return None
+_ZONE = (False, None, None)   # set in main() (see JOURNAL STAMPS)
 # ---------------------------------------------------------------------------
 # DOOR CONTACTS. The Ring door/contact sensors reach this engine but are NOT
 # published to Home Assistant - there is no binary_sensor for any of them, so
@@ -629,7 +730,13 @@ def update_rolling(trips, now, covered_from=None):
             key = "%s|%s" % (t, name)
             try:
                 if key not in kept and _utc(t) >= horizon:
-                    kept[key] = {"cam": cam, "v": verdict, "near": near}
+                    # a trip first judged under 2026.10.3's host-time stamp: re-key, never count twice
+                    lt = local_naive(t, _ZONE) if _ZONE[0] else None
+                    lk = "%s|%s" % (lt, name) if lt else None
+                    if lk and lk != key and lk in kept and not kept[lk].get("u"):
+                        kept[key] = dict(kept.pop(lk), u=1)
+                    else:
+                        kept[key] = {"cam": cam, "v": verdict, "near": near, "u": 1}
             except Exception:  # noqa: BLE001
                 pass
         days = round(max(0.0, now - max(since if since is not None else now, horizon)) / 86400.0, 1)
@@ -722,6 +829,8 @@ def main():
     if not token:
         fail("SUPERVISOR_TOKEN unavailable")
 
+    global _ZONE
+    _ZONE = stamp_zone(token)     # before the fetch: the version that serves the response
     req = urllib.request.Request(
         "http://supervisor/addons/%s/logs?verbose=true" % ADDON,
         headers={"Authorization": "Bearer " + token,
@@ -732,7 +841,10 @@ def main():
             raw = resp.read()
     except Exception as exc:  # noqa: BLE001
         fail("log fetch: %s" % exc)
-    lines = raw.decode("utf-8", "replace").splitlines()
+    try:
+        lines = [stamp_utc(ln, _ZONE) for ln in raw.decode("utf-8", "replace").splitlines()]
+    except StampFormUnknown as exc:
+        fail(str(exc))
     del raw
 
     # --- real wall-clock span from the verbose timestamps ---
@@ -959,6 +1071,8 @@ def main():
                     "unreliable until CAMS is updated" % ",".join(sorted(unknown_motion)))
     if door_note:
         summary += "; " + door_note
+    if _ZONE[2]:
+        summary += "; " + _ZONE[2]
     if door_failing:
         summary += "; DOOR COVERAGE FAILING: " + ", ".join(
             "%s saw %d of %d door trips in %.1f days (%d strong + %d weak corroborated misses, %d nobody "

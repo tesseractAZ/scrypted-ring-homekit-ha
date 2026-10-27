@@ -108,6 +108,7 @@ import time  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 import zlib  # noqa: E402
+from datetime import datetime  # noqa: E402
 
 ADDON = "<scrypted_addon_slug>"
 LOG_URL = os.environ.get("CAMLOG_URL", "http://supervisor/addons/%s/logs?verbose" % ADDON)
@@ -161,6 +162,107 @@ TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+) ")
 # '<UTC ts> host ident[pid]: ' as the Supervisor's journal_verbose_formatter
 # writes it (the [pid] is absent when the entry has no _PID).
 PREFIX_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+) (\S* [\w.-]+(?:\[\d+\])?: )?")
+# JOURNAL STAMPS (2026-10-26). The Supervisor formats each journal entry's time
+# when it serves the log, so the form belongs to the running Supervisor, not to
+# the entry: a naive UTC stamp before 2026.10.3; a naive stamp in the host time
+# zone from 2026.10.3 (#7372: the host zone is now synced from Core); host time
+# WITH its UTC offset from 2026.10.4 ('2026-10-26 08:38:28.750-07:00', #7397).
+# Read as UTC, the 2026.10.3 form put every line 7 h in the past on a UTC-7 host,
+# and the offset form matches no stamp pattern at all. Every line is therefore
+# rewritten to the naive UTC form as it is read (stamp_utc), and the rest of the
+# script keeps one format. CAMLOG_STAMP_ZONE (utc, local or an IANA zone) overrides the
+# Supervisor-derived reading.
+_STAMP_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?(?= )")
+_STAMP_CACHE = {}
+
+
+class StampFormUnknown(RuntimeError):
+    """A naive stamp whose reading cannot be determined: fail closed, never guess."""
+
+
+def stamp_zone(token, default_utc=False):
+    """(naive_is_local, tzinfo or None, note) for this run's stamps. naive_is_local is
+    None when the Supervisor's version could not be read: a stamp that carries its own
+    offset is still exact, a naive one raises StampFormUnknown (a wrong guess would
+    shift every line by the host offset, duplicate door trips and fake a resync)."""
+    forced = os.environ.get("CAMLOG_STAMP_ZONE") or ("utc" if default_utc else "")
+    if forced:
+        if forced == "utc":
+            return False, None, None
+        if forced == "local":
+            return True, None, None
+        try:
+            from zoneinfo import ZoneInfo
+            return True, ZoneInfo(forced), None
+        except Exception as exc:  # noqa: BLE001
+            return True, None, "stamp zone %r unusable (%s): local time" % (forced, type(exc).__name__)
+
+    def get(path):
+        req = urllib.request.Request("http://supervisor" + path,
+                                     headers={"Authorization": "Bearer " + (token or "")})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))["data"]
+    try:
+        ver = tuple(int(x) for x in re.findall(r"\d+", str(get("/supervisor/info")["version"]))[:3])
+    except Exception as exc:  # noqa: BLE001
+        return None, None, "journal stamp form unknown (%s); set %s_STAMP_ZONE" % (type(exc).__name__, "CAMLOG")
+    if ver < (2026, 10, 3):
+        return False, None, None
+    try:
+        from zoneinfo import ZoneInfo
+        return True, ZoneInfo(str(get("/host/info")["timezone"])), None
+    except Exception as exc:  # noqa: BLE001
+        return True, None, "host time zone unknown (%s): stamps read in local time" % type(exc).__name__
+
+
+def _naive_epoch(y, mo, d, h, mi, s, tz):
+    if tz is not None:
+        return datetime(y, mo, d, h, mi, s, tzinfo=tz).timestamp()
+    return time.mktime((y, mo, d, h, mi, s, 0, 0, -1))
+
+
+def stamp_utc(line, zone):
+    """line with its journal stamp rewritten to naive UTC, fraction kept."""
+    m = _STAMP_RE.match(line)
+    if not m:
+        return line
+    if not m.group(8):
+        if zone[0] is None:
+            raise StampFormUnknown(zone[2] or "journal stamp form unknown")
+        if not zone[0]:
+            return line
+    key = (line[:19], m.group(8))
+    utc = _STAMP_CACHE.get(key)
+    if utc is None:
+        y, mo, d, h, mi, s = (int(m.group(i)) for i in range(1, 7))
+        off = m.group(8)
+        if off:
+            e = calendar.timegm((y, mo, d, h, mi, s, 0, 0, 0))
+            if off != "Z":
+                dd = off[1:].replace(":", "")
+                sec = int(dd[:2]) * 3600 + int(dd[2:4]) * 60
+                e -= sec if off[0] == "+" else -sec
+        else:
+            e = _naive_epoch(y, mo, d, h, mi, s, zone[1])
+        if len(_STAMP_CACHE) > 20000:
+            _STAMP_CACHE.clear()
+        utc = _STAMP_CACHE[key] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(e))
+    return utc + (m.group(7) or "") + line[m.end():]
+
+
+def local_naive(utc_text, zone):
+    """'YYYY-MM-DD HH:MM:SS[.f]' UTC -> the same instant as a naive host-local
+    stamp, or None (used only to recognise records written in 2026.10.3's form)."""
+    try:
+        e = calendar.timegm(time.strptime(utc_text[:19], "%Y-%m-%d %H:%M:%S"))
+        if zone[1] is not None:
+            t = datetime.fromtimestamp(e, zone[1]).strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e))
+        return t + utc_text[19:]
+    except Exception:  # noqa: BLE001
+        return None
+_ZONE = None   # resolved by the first Stream of a run (see JOURNAL STAMPS)
 CURSOR_LINE_RE = re.compile(r"^#~camlog~ CURSOR seq=(\d+) ts=(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+|-) c=(\S+)$")
 # A journal cursor is 's=..;i=..;b=..;m=..;t=..;x=..' with hex values (127 chars
 # measured). --scan checks every CURSOR line against this, so a marker line can
@@ -1178,6 +1280,11 @@ class Stream:
     'entries=<first_cursor>:<k>:1' returns."""
 
     def __init__(self, rng):
+        global _ZONE
+        if _ZONE is None:
+            # CAMLOG_URL (a test log source) serves UTC stamps unless CAMLOG_STAMP_ZONE says otherwise
+            _ZONE = stamp_zone(os.environ.get("CAMLOG_TOKEN") or os.environ.get("SUPERVISOR_TOKEN"),
+                               default_utc=bool(os.environ.get("CAMLOG_URL")))
         self.resp = open_log(rng)
         self.first_cursor = self.resp.headers.get("X-First-Cursor")
         self.lines = 0
@@ -1185,7 +1292,7 @@ class Stream:
     def entries(self):
         cur = None
         for b in self.resp:
-            ln = b.decode("utf-8", "replace").rstrip("\n")
+            ln = stamp_utc(b.decode("utf-8", "replace").rstrip("\n"), _ZONE)
             self.lines += 1
             if TS_RE.match(ln) or cur is None:
                 if cur is not None:
@@ -1698,8 +1805,15 @@ def run(dry=False, now=None):
                 if mode == "cursor":
                     # the anchor itself: already archived, never written again
                     if ts != marker["ts"]:
-                        anchor = "ts_mismatch"
-                        why = "the cursor's entry carries %s, the archive says %s" % (ts, marker["ts"])
+                        if ts and local_naive(ts, _ZONE) == marker["ts"]:
+                            # the anchor was archived in 2026.10.3's host-time form
+                            notes.append("anchor archived in host time; matched as %s UTC" % ts)
+                            put(MARK + "STAMPS journal stamps are UTC again from here; lines archived "
+                                "while the Supervisor served host-time stamps carry host time (the "
+                                "anchor was archived as %s, %s UTC)" % (marker["ts"], ts), ts)
+                        else:
+                            anchor = "ts_mismatch"
+                            why = "the cursor's entry carries %s, the archive says %s" % (ts, marker["ts"])
                     if ts:
                         prev_e = hi_e = utc_epoch(ts)
                         hi_ts = ts
@@ -1965,6 +2079,8 @@ def run(dry=False, now=None):
         summary += "; GAP %s -> %s" % gap
     if resync:
         summary += "; RESYNC: %s" % why
+    if _ZONE and _ZONE[2]:
+        warns.append(_ZONE[2])
     if warns:
         summary += "; WARN " + "; ".join(warns)
     if notes:

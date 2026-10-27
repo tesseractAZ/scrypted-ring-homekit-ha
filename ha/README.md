@@ -932,6 +932,19 @@ as that entry; otherwise the run fails and writes nothing.
 | `error` | the run failed and wrote nothing - including a journal line format the parser does not recognise, so a Supervisor format change cannot silently archive nothing |
 | `unknown` | `command_timeout` passed; Home Assistant 2026.9.4 publishes `unknown` with attributes `{}` and does not kill the process |
 
+**Journal timestamps.** The Supervisor formats each line's timestamp when it
+serves the log, so the form depends on the running Supervisor: naive UTC before
+2026.10.3, naive host time in 2026.10.3 (the host time zone is synced from Core),
+and host time with its UTC offset from 2026.10.4 (`2026-10-26 08:38:28.750-07:00`).
+`cam_logarchive.py` and `cam_flap.py` rewrite every stamp to naive UTC as lines
+are read: an offset is exact, a naive stamp is read as host time when the
+Supervisor reports 2026.10.3 or later (zone from `/host/info`), and if the version
+cannot be read a naive stamp fails the run instead of being guessed.
+`CAMLOG_STAMP_ZONE` / `CAMFLAP_STAMP_ZONE` (`utc`, `local` or an IANA zone)
+override the reading. Lines archived while the deployed scripts read 2026.10.3's
+host-time stamps as UTC carry host time; a `#~camlog~ STAMPS` line marks where UTC
+resumes.
+
 **Redaction, before anything is written.** The `<UTC timestamp> <host>
 <ident>[<pid>]: ` prefix is kept (the log readers anchor on it). Rules on the
 message, in order: JWTs and e-mail addresses; IPv6 including `::ffff:a.b.c.d`
