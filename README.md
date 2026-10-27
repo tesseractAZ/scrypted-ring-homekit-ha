@@ -1,31 +1,123 @@
-# Scrypted as the Single Ring Engine — HomeKit (HKSV) + Home Assistant
+# Ring → Scrypted → HomeKit + Home Assistant: a single-session camera engine with a statistical observability stack
 
-Run **one** Ring cloud client and share its cameras with everything else. [Scrypted](https://github.com/koush/scrypted) holds the only session logged into Ring, then re‑exposes each camera locally to both Apple HomeKit — with HomeKit Secure Video — and Home Assistant. Nothing else talks to Ring directly.
+One [Scrypted](https://github.com/koush/scrypted) session is the only Ring cloud client on the automation side. It serves every camera to Apple HomeKit (with HomeKit Secure Video) and to Home Assistant. Around it runs a purpose-built monitoring and log-forensics stack:
 
-> **The problem this solves.** Every independent Ring client — Home Assistant's Ring integration, a HomeKit bridge, the Ring app, a second hub — opens its own cloud session, and they contend for the same account. You feel it as rate‑limited snapshots, stale thumbnails, and live views that drop. Consolidate to a single Scrypted session and the contention disappears; HKSV and fast local snapshots come along for free.
+- **six Python scripts:** five monitors plus the partial-loss detector module that `cam_motion.py` imports, ≈6,800 lines, standard library plus Pillow;
+- **34 Home Assistant automations;**
+- **5 command-line sensors.**
 
-This is the field reference from building and running the setup: a stage‑by‑stage migration runbook and an operations guide for everything that comes after. Every address, token, device id, and credential in it is a placeholder — substitute your own.
+Together they detect the failures a camera system usually hides: a dead camera behind a cached snapshot, an event path that has gone silent while every probe stays green, streams that flap without missing a snapshot, and a camera that slowly stops seeing people at its own door.
+
+> **Why the monitoring exists.** Standard health checks pass while these systems are broken.
+> - A failed snapshot is served as HTTP 200 with the last cached JPEG.
+> - On a standard (non-24/7) Ring plan, Ring stops delivering motion events for a camera that is persistently streamed. The loss builds over a week or more (about 10 days to fully manifest), while streams, snapshots and probes all stay healthy.
+> - A stream can restart dozens of times an hour and still pass every snapshot probe.
+>
+> Most of the monitors here were added after a failure like these went unnoticed by everything else, and each measures its failure directly, with statistics where a fixed threshold would mislead. The engine-log archive exists because the host journal keeps only about 37 hours of the log those faults are judged from.
+
+The repository holds the deployable monitors, packages and automations as sanitized, placeholder-ready files ([`ha/`](ha/)), a zero-downtime migration runbook, and an operations reference that includes a measured cost model of the monitoring itself.
 
 ---
 
-## What you get
+## What it does
 
-| Capability | How |
-|---|---|
-| **Single Ring session** | Scrypted is the only client logged into Ring; HomeKit and HA both read from Scrypted |
-| **HomeKit Secure Video** | Each camera is exposed to Apple Home in accessory mode; HKSV records to iCloud |
-| **Home Assistant cameras** | HA *Generic Camera* entities fed by Scrypted's local snapshot endpoint + RTSP rebroadcast |
-| **Fast snapshots** | Local webhook snapshot (~0.1–0.5 s) instead of a per‑request Ring cloud round‑trip |
-| **Instant live view** (optional, costly) | Prebuffer opens live view in ~0.1 s instead of ~3 s — but Ring progressively stops delivering that camera's motion events (see Hard-won lessons); avoid it where motion/HKSV matters |
-| **Motion + doorbell in HA** | Scrypted's MQTT bridge publishes motion / doorbell‑press as HA `binary_sensor`s via MQTT discovery |
-| **Doorbell announcements** | HA automation on the doorbell sensor → TTS / multi‑room announcement |
-| **Self‑probing health watchdog** | Active snapshot probe catches down / frozen / slow cameras a cached proxy would miss |
-| **Door‑coverage check** | Ring door contacts are cross-checked against the camera covering each door; a camera that keeps missing people at its own door pages, even while it still fires often enough never to look stale |
-| **Per-camera motion dead-man** | `cam_motion.py` reads recorder history every 30 min and pages for a camera silent past its window (72 h by default) while the rest of the fleet is active; cross-camera co-firing statistics can prove its event path broken without a walk test |
-| **Partial-loss and fleet-silence checks** | Pages for a camera that still fires but has dropped out of most of the motion its partner cameras record, and for a whole fleet with no motion for 9 h (checked hourly) |
-| **Stream-fault and visual monitors** | Per-camera HKSV recording-error rate parsed from the engine log; snapshot frame differencing reports whether a silent camera's scene changed without motion events |
-| **Engine-log archive** | The engine log, redacted and pseudonymised, archived hourly under `/config` for 35 days (the journal keeps about 37 h) |
-| **Dead-men for the monitors** | Each monitor pages when it errors or stops updating; a recorder-gap check reports a host outage after the fact |
+### Single Ring session, two ecosystems
+- **One cloud client for automation.** Scrypted holds the only Ring login on the automation side. HomeKit and Home Assistant read from Scrypted locally and open no Ring sessions of their own, so they cannot contend for the account. The Ring mobile app remains a separate client.
+- **HomeKit Secure Video** per camera in accessory mode, plus Home Assistant *Generic Camera* entities on Scrypted's local snapshot endpoint and RTSP rebroadcast.
+- **Events and announcements:** motion and doorbell presses arrive over MQTT discovery, and doorbell announcements run on error-isolated parallel branches.
+
+### Snapshot health: `cam_health.py`
+- **Probes the real source, not Home Assistant's camera proxy,** which answers HTTP 200 with a stale cached frame when a camera is dead. All cameras are fetched concurrently every 120 s straight from Scrypted's webhook, each with its status, size, SHA-256 and latency.
+- **Four per-camera tiers.**
+  - *Down:* 2 consecutive hard failures.
+  - *Pending:* a first miss. It is never counted as healthy, so a total probe blackout cannot publish "all OK".
+  - *Stale snapshot:* 6 byte-identical frames in a row, which is how a timed-out snapshot served from cache gives itself away.
+  - *Slow:* 2 consecutive probes over 9 s, a bar set above the 4–7 s contention band of concurrent probing.
+- **Fleet indicators in one cycle.** FLEET-STALE and FLEET-MISS are raised when at least 5 of the 9 cameras repeat their previous frame or fail in a single probe cycle, without waiting for per-camera streaks. They page once that has held for 5 minutes.
+
+### Visual activity: `cam_vision.py`
+- **Block-grid frame differencing.** Each frame becomes a 48×30 luma thumbnail compared in an 8×6 block grid after median lighting normalisation. A change counts only when it is *localized*: at least 2 hot blocks and no more than 70 % of the frame, so a global lighting shift is not motion.
+- **Exposure-aware baselines.** Every frame is classified into one of three regimes (day, infrared, dark), and each regime keeps its own baseline, so a day/IR switch is never read as scene change.
+- **Learned per-camera thresholds.**
+  - The change bar is 5× a per-camera, per-regime noise estimate (EMA), clamped to 12–60.
+  - Only non-event samples feed the estimate, and its growth is capped at 15 % per sample. A single sub-threshold excursion cannot ratchet it upward, though about a dozen one-block excursions in one occupied stretch still can.
+  - Across long absences the bar decays back toward its prior. In a 35-day, nine-camera replay, that decay raised the recall of the one view whose bar had ratcheted from 0.67 to 0.94, at a cost of about 22 extra visual changes fleet-wide (+1.2 %).
+- **Artifact rejection.**
+  - *Cached frames:* a frame matching any of the last 8 distinct body hashes is a cached image and is never analysed.
+  - *Unlit frames:* an unlit-grayscale guard catches lamp-off frames.
+  - *IR spikes:* a one-frame IR luma spike and its return are merged into one event.
+- **One fetch, two analysers.** Vision analyses the frames the health probe just fetched, shared atomically through tmpfs. That halves the snapshot requests to Scrypted, and with them the ~25-line request dump Scrypted logs for each one. If the health probe stops, vision fetches its own frames.
+
+### Motion statistics and corroboration: `cam_motion.py`, `partial_loss.py`
+- **Recorder-derived staleness.** Each camera's motion history is read from Home Assistant's recorder, read-only, against a per-camera window (72 h by default). A camera is flagged only while at least one other camera has fired in the last 24 h.
+- **Cross-camera corroboration: proof without a walk test.**
+  - Motion events are grouped into clusters linked within 300 s, and each camera's historical co-firing rate with each partner is fitted.
+  - A partner qualifies when it co-fires at least 15 % of the time, with at least 20 clusters before the silence and 8 since.
+  - When those partners keep firing and the quiet camera's co-fires stop, the camera is shown broken at α = 10⁻³ (Wilson interval). The proof latches and clears itself on the camera's next real event.
+- **Partial-loss detection.**
+  - A camera can keep firing but drop out of most of the activity its partners record. A binomial tail test with Bonferroni correction (α = 10⁻⁶ per camera-poll) looks for this on a 48-hour window against a 27-day baseline, guarded by a likelihood veto.
+  - In replay it caught 14–18 of 24 losses of 80–100 %, typically 40–50 h after onset. Losses below about 75 %, day-only or night-only losses, and slow declines are mostly missed. The test publishes its own statistical power, so "no flag" is never mistaken for an all-clear.
+  - A flag clears only on recovery evidence held for 6 h, never because time has passed. A camera that goes fully silent passes to the staleness check, and its flag is kept dormant.
+- **Chance and coverage models.**
+  - Per-camera, per-hour background firing rates over 7 days estimate how often motion coincides by chance.
+  - An incremental index of recorder gaps across all entities (over 5 min, ~62-day lookback) keeps unobserved time out of the partial-loss test. The 72 h staleness clock does not exclude it.
+  - A host outage is reported after the fact from those same recorder holes.
+- **Vision cross-checks.** Frame differencing annotates each stale camera's verdict without changing the flag. Two or more localized scene changes with no motion event read "detection/event path suspect". A quiet scene is called consistent with vacancy only when the camera's measured vision recall supports it. That recall is scored with a trailing-miss run test.
+
+### Stream and log forensics: `cam_flap.py`
+- **HKSV recording-failure rate** per camera, parsed from the last 60,000 lines of the Scrypted engine journal and trimmed to at most 6 hours. A camera is flagged at 2 or more failures per hour with at least 3 failures in the window, and pages once that has held for 20 minutes.
+- **HAP close-code split.** Error-coded HomeKit closes are split by reason code into hub TIMEOUT, CANCELLED and every other code, and the three always sum to the lumped count. Measured timing showed what each code means:
+  - every CANCELLED landed 12.0 s after the clip's last fragment, a normal clip end;
+  - every TIMEOUT landed 16–17 s after, a stream that stopped.
+
+  So an error-coded close is not read as a fault on its own.
+- **Mid-session video stalls:** a hub TIMEOUT close after 10 s or more without a fragment, or an ffmpeg failure while the session is up. Each session counts once, and stalls stay out of the paging metric.
+- **A push-decrypt tripwire,** counted once per failure.
+- **Probe-shortfall accounting,** which flags a camera whose logged snapshot requests fall below 75 % of the expected probe cycles.
+
+### Door coverage: `cam_flap.py`
+- **Physical ground truth.** Ring door contacts, read from the engine log, are matched within 180 s against the camera paired with each door in `DOOR_CAMERA`. The operator fills in that mapping, since it ships empty; a door without a pair is not judged.
+- **Four verdicts per trip:** *saw*, *missed*, *weak* (motion that a per-hour background model says could be chance) or *unseen*.
+- **A failing rule grounded in probability.** Verdicts are kept for a rolling 7 days, and two tests decide failure:
+  - *Fraction test:* a camera that sees 79 % of its trips has a 0.2 % chance of seeing none of 4.
+  - *Run test:* 4 strong misses in a row. This was set by replay: the longest run at a working camera was 2, and two real outages ran 6 and 11.
+
+  So a camera that still fires often enough never to look stale is caught when it stops seeing people at its own door.
+
+### Engine-log archive: `cam_logarchive.py`
+- **Cursor-verified incremental capture** of the Scrypted journal every hour.
+  - Seven in-band markers (CURSOR, GAP, RESYNC, START, SILENCE, REKEY, STAMPS) and explicit GAP/RESYNC semantics mean a gap is recorded as a gap and no lost minute is silent.
+  - Storage is crash-safe gzip members, kept for 35 days, with a clock guard and a size cap.
+- **Redaction before anything is written.**
+  - *30 ordered rules run first.* Measured on 593,141 live lines, they removed 7,200 JWTs, 41,091 IPv4 addresses, 9,047 IPv6 addresses, 5,004 ICE credential lines and 3,336 DTLS fingerprints, among others.
+  - *Then a separate 21-pattern residual scan* withholds any line that still matches one of its identifier patterns, so a missed variant of a known shape fails closed. An identifier in a shape no pattern covers (an array element, a map key, free prose) is documented as out of reach.
+- **Keyed HMAC-SHA256 pseudonyms** in four classes keep cameras, dings, media cells and sessions correlatable across lines without exposing a single id. Ding timestamps become offsets from the line's own time. A pseudonym census, run on demand, checks that camera tokens map one-to-one onto cameras; on 2026-10-03 it found 7 tokens for the 7 cameras that held a session.
+- **Engineering under load.**
+  - *Probe dumps collapsed:* repetitive probe request dumps are folded down. Measured while two monitors still probed every camera, that cut the archive by about a third.
+  - *Time budget:* each run stays inside a 60 s work budget.
+  - *Regex safety:* regexes found to go quadratic on hostile lines were rewritten.
+  - *Timestamps:* every run normalises all three Supervisor timestamp formats to UTC, failing closed when the format cannot be determined.
+
+### Alerting discipline
+- **Pushes carry new information.** There are 34 automations with 66 triggers, and 15 of them can push. No re-assert ever pushes; pushes are gated on an onset, a set difference or a freshness stamp. There are two deliberate exceptions:
+  - the fleet-silence alert pages every hour and at boot while the whole fleet stays silent past 9 h;
+  - the per-camera dead-man pages again at boot while a broken-camera proof stands.
+- **Survives restarts.** Persistent notifications do not survive a Home Assistant restart, so 13 staggered re-asserts and boot triggers restore every open fault card.
+- **Every monitor has a dead-man.**
+  - Each monitor pages when it errors, goes unavailable or stops updating, with freshness tracked through bucketed heartbeats and per-sensor age bars from 45 minutes to 3 hours.
+  - The archive and partial-loss dead-men hold in delayed template binaries, so a failure already present at start-up still pages.
+  - Template sensors fail closed, and every script emits the same attribute set on success and on error.
+
+### Engineering and supply chain
+- **Contract-checked in CI.**
+  - All 128 published sensor attributes are checked against each package's allowlist in both directions.
+  - Every automation parses, and each one that carries an `id` is checked against its filename.
+  - A public-repo hygiene sweep runs generic patterns plus instance patterns loaded from a CI secret, in a job that isolates that secret.
+- **Hardened pipeline.**
+  - CodeQL (`security-extended`) on Ubuntu 26.04.
+  - SHA-pinned actions, the CI's one third-party dependency (PyYAML) pinned by version and hash, and Dependabot.
+  - A protected `main` that blocks force-pushes and deletion.
+  - A threat model and security controls documented in [`SECURITY.md`](SECURITY.md).
 
 ---
 
@@ -39,18 +131,27 @@ This is the field reference from building and running the setup: a stage‑by‑
                          │  ├─ @scrypted/prebuffer-mixin ─┼──► RTSP rebroadcast  ┐
                          │  ├─ @scrypted/webhook ────────┼──► HTTP snapshot URL  │
                          │  └─ @scrypted/mqtt ───────────┼──► MQTT (motion/ding) │
-                         └──────────────────────────────┘                       │
-                                                                                ▼
-                         ┌──────────────────────────────────────────────────────────────┐
-                         │                     HOME ASSISTANT                             │
-                         │  Generic Camera (still = webhook URL, stream = RTSP)           │
-                         │    └─ built‑in go2rtc → WebRTC/HLS live view                   │
-                         │  MQTT integration → binary_sensor.<cam>_motion / _doorbell     │
-                         │  Automations: doorbell announce · health watchdog · alerts     │
-                         └──────────────────────────────────────────────────────────────┘
+                         └──────────────┬───────────────┘                       │
+                                        │ engine journal (Supervisor log API)    │
+                                        ▼                                       ▼
+   ┌──────────────────────────────────────────────────────────────────────────────────┐
+   │                                HOME ASSISTANT                                     │
+   │  Generic Camera (still = webhook, stream = RTSP) → go2rtc WebRTC/HLS              │
+   │  MQTT → binary_sensor.<cam>_motion / _doorbell → recorder                         │
+   │                                                                                   │
+   │  MONITORS (command_line)                                                          │
+   │   cam_health  ── webhook snapshots ──┐ shared frames (tmpfs)                       │
+   │   cam_vision  ───────────────────────┘ frame differencing                         │
+   │   cam_motion + partial_loss ── recorder history: staleness, corroboration, loss   │
+   │   cam_flap   ── engine journal: HKSV failures, close codes, stalls, doors         │
+   │   cam_logarchive ── engine journal → redacted, pseudonymised 35-day archive       │
+   │        │                                                                          │
+   │        ▼  sensors + fail-closed template binaries                                 │
+   │   34 automations: gated pushes · cards · re-asserts · dead-men · walk test        │
+   └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The one idea worth keeping in your head: **Scrypted owns the Ring session; everything downstream is a local reader.** Because Scrypted is its own Control Center device with its own persisted login, deleting Home Assistant's Ring integration doesn't log Scrypted out — which is what makes the cutover safe and reversible.
+**Scrypted owns the Ring session, and everything downstream is a local reader.** Because Scrypted is its own Control Center device with its own persisted login, removing Home Assistant's Ring integration does not log Scrypted out. That is what makes the cutover safe and reversible.
 
 ---
 
@@ -105,7 +206,7 @@ The condensed version of what actually bites in practice. Full detail lives in t
 
 ## Security & privacy
 
-This is a personal home‑automation setup, published as a reference. Before adapting it:
+Before adapting it:
 
 - Every address, port‑path token, device id, pairing code, and credential in these docs is a **placeholder** (`<HA_HOST_IP>`, `<device_id>`, `<token>`, `<mqtt_user>`, …). Never commit real tokens, Ring credentials, HomeKit pairing codes, or rebroadcast path tokens.
 - Deploying `ha/` creates `/config/cam_engine.log.d/`, a redacted 35-day archive of the engine log. It is still personal data (camera and door names with times show when people come and go): it is kept out of backups by design, must not be attached to issues, and its `.pseudonym.key` must never leave the host.
@@ -116,7 +217,7 @@ This is a personal home‑automation setup, published as a reference. Before ada
 
 ## Contributing & security
 
-Issues and PRs are welcome, though this is a personal reference repo and response cadence varies. Report suspected security issues via [GitHub Security Advisories](../../security/advisories/new) - see [`SECURITY.md`](SECURITY.md).
+Issues and PRs are welcome. Report suspected security issues via [GitHub Security Advisories](../../security/advisories/new) - see [`SECURITY.md`](SECURITY.md).
 
 ## License / disclaimer
 
