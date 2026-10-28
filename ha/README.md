@@ -178,7 +178,13 @@ before deploying (grep for `<` to find them).
   proven event-path failure. "Probes OK" is the deliberate
   wording: the probe measures the snapshot path, not motion-event delivery,
   and a card that says "healthy" from one monitor while another is latched is
-  a false all-clear.
+  a false all-clear. On the boot trigger the card first waits, up to 7 minutes,
+  for a probe reading with no failed probe and a visual monitor that reports no
+  camera unseen: the Supervisor starts application add-ons, the Scrypted engine
+  among them, only once Core is running, so after a host reboot the first probe
+  runs before the engine has started and fails. The card then posts whatever the
+  monitors read, with "(after a restart)" in its footer; the 08:00 card posts at
+  once.
 - `go2rtc_reload_on_start` — reloads the go2rtc config entry 2 min after HA
   starts, healing the WebRTC live-view regression every restart causes.
 - `front_door_doorbell_announce` — doorbell press → parallel TTS announce on
