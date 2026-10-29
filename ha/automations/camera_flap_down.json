@@ -1,6 +1,6 @@
 {
   "alias": "Cameras - flap monitor down",
-  "description": "Dead-man's switch for the flap monitor itself. The monitor's error path (script failure, SUPERVISOR_TOKEN loss, log-fetch failure) lands binary_sensor.cameras_flapping in 'unavailable'; without this automation that state is terminal-silent. 60 min clears benign windows (HA/Scrypted restarts recover in 5-15 min). NOTE (corrected 2026-08-17, updated 2026-10-14): a cam_health death does NOT trip this - the window is measured from log timestamps, and cam_vision.py fetches the 9 endpoints itself once cam_health's shared frames go stale; cam_health's own dead-man is camera_health_monitor_down. RE-ASSERTS hourly (:47) while the sensor stays dead (restart-wipe guard). (2026-10-10: the unavailable/unknown hold is an OR of single-state conditions with for:, because HA 2026.10 rejects for: with a list of states.)",
+  "description": "Dead-man's switch for the flap monitor itself. The monitor's error path (script failure, SUPERVISOR_TOKEN loss, log-fetch failure) lands binary_sensor.cameras_flapping in 'unavailable'; without this automation that state is terminal-silent. 60 min clears benign windows (HA/Scrypted restarts recover in 5-15 min). NOTE (corrected 2026-08-17, updated 2026-10-14): a cam_health death does NOT trip this - the window is measured from log timestamps, and cam_vision.py fetches the 9 endpoints itself once cam_health's shared frames go stale; cam_health's own dead-man is camera_health_monitor_down. RE-ASSERTS hourly (:47) while the sensor stays dead (restart-wipe guard). (2026-10-10: the unavailable/unknown hold is an OR of single-state conditions with for:, because HA 2026.10 rejects for: with a list of states.) 2026-10-28: START-UP CHECK. A state trigger needs a change after it attaches, so a monitor that was already dead when Home Assistant started (a Core update, or a deploy followed by a restart, that breaks the script) never fired this alert, and the re-assert restores the card without a push. On the start trigger the run now waits up to 60 min for the monitor to be healthy and pages if it is not; its push says the fault has been present since the start, because the check repeats, once per start, a page sent before the restart. The check runs only on a Home Assistant start: an automation reload that re-arms the triggers while the fault is present is not covered. camera_monitor_stalled pushes an unchanging error, or an unknown state, at about the same time (45-min bar plus its 15-min hold).",
   "triggers": [
     {
       "platform": "state",
@@ -15,6 +15,11 @@
       "id": "dead"
     },
     {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
+    },
+    {
       "platform": "time_pattern",
       "minutes": "47",
       "id": "reassert"
@@ -26,7 +31,7 @@
       "conditions": [
         {
           "condition": "template",
-          "value_template": "{{ trigger.id == 'dead' }}"
+          "value_template": "{{ trigger.id in ['dead', 'boot'] }}"
         },
         {
           "condition": "or",
@@ -54,6 +59,34 @@
   ],
   "actions": [
     {
+      "if": [
+        {
+          "condition": "trigger",
+          "id": "boot"
+        }
+      ],
+      "then": [
+        {
+          "wait_template": "{{ not (states('binary_sensor.cameras_flapping') in ['unavailable', 'unknown']) }}",
+          "timeout": "01:00:00",
+          "continue_on_timeout": true
+        },
+        {
+          "if": [
+            {
+              "condition": "template",
+              "value_template": "{{ wait.completed }}"
+            }
+          ],
+          "then": [
+            {
+              "stop": "the monitor was healthy at the start or recovered within the hold"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "data": {
         "notification_id": "camera_flap_down",
         "title": "📹 Flap monitor down",
@@ -75,7 +108,7 @@
               "action": "notify.<your_mobile_app_target>",
               "data": {
                 "title": "📹 Camera stream monitor down",
-                "message": "The stream-fault monitor has been in an error state for an hour."
+                "message": "The stream-fault monitor has been in an error state for an hour.{% if trigger.id == 'boot' %} (present since Home Assistant started){% endif %}"
               }
             }
           ]

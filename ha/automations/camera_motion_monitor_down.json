@@ -1,6 +1,6 @@
 {
   "alias": "Cameras - motion monitor down",
-  "description": "Dead-man for the per-camera motion-staleness monitor (binary_sensor.camera_motion_stale / sensor.camera_motion_stale, the recorder-query script). Both its alert and the fleet-wide pipeline check read this sensor's attributes and silently evaluate 'no fault' when it dies. 60 min clears restart windows. RE-ASSERTS hourly (:59) while dead (restart-wipe guard). Covers BOTH death modes: command-level death (state unavailable/unknown) AND the script's fail() path, which emits valid JSON with exit 0 - the sensor stays numeric but its 'error' attribute goes non-null (the binary reads 'off', so a state trigger alone would miss the likeliest death mode: a recorder-DB failure). Added 2026-08-17. (2026-10-10: the unavailable/unknown hold is an OR of single-state conditions with for:, because HA 2026.10 rejects for: with a list of states.)",
+  "description": "Dead-man for the per-camera motion-staleness monitor (binary_sensor.camera_motion_stale / sensor.camera_motion_stale, the recorder-query script). Both its alert and the fleet-wide pipeline check read this sensor's attributes and silently evaluate 'no fault' when it dies. 60 min clears restart windows. RE-ASSERTS hourly (:59) while dead (restart-wipe guard). Covers BOTH death modes: command-level death (state unavailable/unknown) AND the script's fail() path, which emits valid JSON with exit 0 - the sensor stays numeric but its 'error' attribute goes non-null (the problem binary's availability also requires a null error, so that path turns it unavailable as well; dead_err covers it independently of that template). Added 2026-08-17. (2026-10-10: the unavailable/unknown hold is an OR of single-state conditions with for:, because HA 2026.10 rejects for: with a list of states.) 2026-10-28: START-UP CHECK. A state trigger needs a change after it attaches and the dead_err template trigger arms only from a false render, so a monitor that was already dead when Home Assistant started (a Core update, or a deploy followed by a restart, that breaks the script) never fired this alert, and the re-assert restores the card without a push. On the start trigger the run now waits up to 65 min for the monitor to be healthy and pages if it is not; its push says the fault has been present since the start, because the check repeats, once per start, a page sent before the restart. The check runs only on a Home Assistant start: an automation reload that re-arms the triggers while the fault is present is not covered. The hold is 65 min rather than 60 so that the poll 60 min after the first one (scan_interval 30 min) lands inside it; a recorder migration that holds the database for longer at startup pages as the outage it is. camera_monitor_stalled would push an unchanging error payload, or an unknown state, about 105 min after the start (90-min bar plus its 15-min hold). max_exceeded is silent because the :59 re-assert can fall inside the wait; the card then arrives with the push.",
   "triggers": [
     {
       "platform": "state",
@@ -23,6 +23,11 @@
       }
     },
     {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
+    },
+    {
       "platform": "time_pattern",
       "minutes": "59",
       "id": "reassert"
@@ -34,7 +39,7 @@
       "conditions": [
         {
           "condition": "template",
-          "value_template": "{{ trigger.id in ['dead','dead_err'] }}"
+          "value_template": "{{ trigger.id in ['dead', 'dead_err', 'boot'] }}"
         },
         {
           "condition": "or",
@@ -66,6 +71,34 @@
   ],
   "actions": [
     {
+      "if": [
+        {
+          "condition": "trigger",
+          "id": "boot"
+        }
+      ],
+      "then": [
+        {
+          "wait_template": "{{ not (states('binary_sensor.camera_motion_stale') in ['unavailable', 'unknown'] or state_attr('sensor.camera_motion_stale', 'error') is not none) }}",
+          "timeout": "01:05:00",
+          "continue_on_timeout": true
+        },
+        {
+          "if": [
+            {
+              "condition": "template",
+              "value_template": "{{ wait.completed }}"
+            }
+          ],
+          "then": [
+            {
+              "stop": "the monitor was healthy at the start or recovered within the hold"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "action": "persistent_notification.create",
       "data": {
         "notification_id": "camera_motion_monitor_down",
@@ -87,7 +120,7 @@
               "action": "notify.<your_mobile_app_target>",
               "data": {
                 "title": "📷 Camera motion monitor down",
-                "message": "The motion-staleness monitor is dead or erroring - per-camera staleness is NOT being evaluated."
+                "message": "The motion-staleness monitor is dead or erroring - per-camera staleness is NOT being evaluated.{% if trigger.id == 'boot' %} (present since Home Assistant started){% endif %}"
               }
             }
           ]
@@ -95,5 +128,6 @@
       ]
     }
   ],
-  "mode": "single"
+  "mode": "single",
+  "max_exceeded": "silent"
 }

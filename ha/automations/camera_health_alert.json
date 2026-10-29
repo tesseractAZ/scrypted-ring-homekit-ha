@@ -1,6 +1,6 @@
 {
   "alias": "Cameras - health alert",
-  "description": "Pages on a SUSTAINED camera fault only, four tiers: DOWN (a camera offline) 8 min; SLOW/FROZEN (degraded, still serving frames) 30 min - transient stream blips self-recover well inside that window; FLEET-STALE (multiple cameras byte-identical to their previous probe) 5 min; and FLEET-MISS (multiple probes failing in a single cycle) 5 min - added after a whole-fleet blackout during a brief network outage was absorbed by the per-camera miss tolerance and published as 'all OK'. RE-ASSERTS hourly (:37) while binary_sensor.cameras_problem has been on 30+ min (the longest tier's window, so a re-assert can never page a blip the tiers absorb): persistent notifications are in-memory, so a restart wipes the page with the fault still latched and the edge trigger can never re-fire (the exact failure the motion-dead alert already guards against).",
+  "description": "Pages on a SUSTAINED camera fault only, four tiers: DOWN (a camera offline) 8 min; SLOW/FROZEN (degraded, still serving frames) 30 min - transient stream blips self-recover well inside that window; FLEET-STALE (multiple cameras byte-identical to their previous probe) 5 min; and FLEET-MISS (multiple probes failing in a single cycle) 5 min - added after a whole-fleet blackout during a brief network outage was absorbed by the per-camera miss tolerance and published as 'all OK'. RE-ASSERTS hourly (:37) while binary_sensor.cameras_problem has been on 30+ min (the longest tier's window, so a re-assert can never page a blip the tiers absorb): persistent notifications are in-memory, so a restart wipes the page with the fault still latched and the edge trigger can never re-fire (the exact failure the motion-dead alert already guards against). 2026-10-28: START-UP CHECK. A template trigger arms only from a false render, so a tier that is already true when the triggers arm cannot fire while it lasts, and the re-assert restores the card without a push. After every host reboot fleet_miss is true at arming, because the first probe runs during setup and the Supervisor starts the camera engine only once Core is running; a probe that lands while the engine stops latches down as well. On the start trigger the alert records the true tiers (latched) and waits until none of them is true, for at most 8 min, or 30 min when degraded is among them; if one is still true it pages, the card lists the tiers still present, and the push says the fault has been present since the start. The 8-min floor gives the engine at least three probe cycles after an ordinary reboot; 5 min covered two, so an engine start slower than about 3.7 min would have paged FLEET-MISS for a reboot. A tier that turns true after the start was armed and pages itself. Mode is parallel so the wait cannot drop another tier's page. Limits: a down or fleet tier latched together with degraded is judged at 30 min; a latched tier that clears and returns within the hold can be paged twice; the check repeats, once per start, a page sent before the restart. The check runs only on a Home Assistant start: an automation reload that re-arms the triggers while the fault is present is not covered.",
   "triggers": [
     {
       "platform": "template",
@@ -35,6 +35,11 @@
       }
     },
     {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
+    },
+    {
       "platform": "time_pattern",
       "minutes": "37",
       "id": "reassert"
@@ -61,10 +66,43 @@
   ],
   "actions": [
     {
+      "variables": {
+        "latched": "{% set h = 'sensor.camera_health' %}{{ [('down', state_attr(h, 'down_count') | int(0) > 0), ('degraded', (state_attr(h, 'frozen_count') | int(0) > 0) or (state_attr(h, 'slow_count') | int(0) > 0)), ('fleet_frozen', state_attr(h, 'fleet_stale') == true), ('fleet_miss', state_attr(h, 'fleet_miss') == true)] | selectattr('1') | map(attribute='0') | list }}"
+      }
+    },
+    {
+      "if": [
+        {
+          "condition": "trigger",
+          "id": "boot"
+        }
+      ],
+      "then": [
+        {
+          "wait_template": "{% set h = 'sensor.camera_health' %}{% set now_true = [('down', state_attr(h, 'down_count') | int(0) > 0), ('degraded', (state_attr(h, 'frozen_count') | int(0) > 0) or (state_attr(h, 'slow_count') | int(0) > 0)), ('fleet_frozen', state_attr(h, 'fleet_stale') == true), ('fleet_miss', state_attr(h, 'fleet_miss') == true)] | selectattr('1') | map(attribute='0') | list %}{{ latched | select('in', now_true) | list | count == 0 }}",
+          "timeout": "{{ '00:30:00' if 'degraded' in latched else '00:08:00' }}",
+          "continue_on_timeout": true
+        },
+        {
+          "if": [
+            {
+              "condition": "template",
+              "value_template": "{{ wait.completed }}"
+            }
+          ],
+          "then": [
+            {
+              "stop": "no fault from before the start outlasted its hold"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "data": {
         "notification_id": "camera_health",
         "title": "⚠️ Camera issue",
-        "message": "{{ state_attr('sensor.camera_health','summary') }}\n\n{% if trigger.id == 'fleet_frozen' %}{{ state_attr('sensor.camera_health','stale_count') }} of 9 cameras have returned byte-identical frames for 5+ min - the snapshot pipeline is serving stale frames fleet-wide (Scrypted stream wedge or Ring cloud outage). Live view and HKSV are likely affected. Usual fix: reload the Ring plugin in Scrypted; if snapshots stay stale, restart the Scrypted add-on.{% elif trigger.id == 'fleet_miss' %}{{ state_attr('sensor.camera_health','miss_count') }} camera probes failed in the same cycle - a fleet-level outage (network, engine, or host), not a single camera.{% elif trigger.id == 'reassert' %}Still faulted (hourly re-assert; restarts wipe notifications while the fault persists).{% else %}Sustained {{ trigger.id }} fault.{% endif %} {{ now().strftime('%b %-d %-I:%M %p') }}."
+        "message": "{{ state_attr('sensor.camera_health','summary') }}\n\n{% if trigger.id == 'fleet_frozen' %}{{ state_attr('sensor.camera_health','stale_count') }} of 9 cameras have returned byte-identical frames for 5+ min - the snapshot pipeline is serving stale frames fleet-wide (Scrypted stream wedge or Ring cloud outage). Live view and HKSV are likely affected. Usual fix: reload the Ring plugin in Scrypted; if snapshots stay stale, restart the Scrypted add-on.{% elif trigger.id == 'fleet_miss' %}{{ state_attr('sensor.camera_health','miss_count') }} camera probes failed in the same cycle - a fleet-level outage (network, engine, or host), not a single camera.{% elif trigger.id == 'boot' %}{% set h = 'sensor.camera_health' %}{% set now_true = [('down', state_attr(h, 'down_count') | int(0) > 0), ('degraded', (state_attr(h, 'frozen_count') | int(0) > 0) or (state_attr(h, 'slow_count') | int(0) > 0)), ('fleet_frozen', state_attr(h, 'fleet_stale') == true), ('fleet_miss', state_attr(h, 'fleet_miss') == true)] | selectattr('1') | map(attribute='0') | list %}Present when Home Assistant started: {{ latched | join(', ') }}; still present when the start-up hold ended: {{ latched | select('in', now_true) | join(', ') }}. A fault present at a start cannot fire this alert's own triggers while it lasts, so the start-up check pages it.{% elif trigger.id == 'reassert' %}Still faulted (hourly re-assert; restarts wipe notifications while the fault persists).{% else %}Sustained {{ trigger.id }} fault.{% endif %} {{ now().strftime('%b %-d %-I:%M %p') }}."
       },
       "action": "persistent_notification.create"
     },
@@ -82,7 +120,7 @@
               "action": "notify.<your_mobile_app_target>",
               "data": {
                 "title": "📷 Camera fault",
-                "message": "{{ state_attr('sensor.camera_health','summary') }}"
+                "message": "{{ state_attr('sensor.camera_health','summary') }}{% if trigger.id == 'boot' %} (present since Home Assistant started){% endif %}"
               }
             }
           ]
@@ -90,5 +128,5 @@
       ]
     }
   ],
-  "mode": "single"
+  "mode": "parallel"
 }

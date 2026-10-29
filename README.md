@@ -33,7 +33,7 @@ The repository holds the deployable monitors, packages and automations as saniti
   - *Pending:* a first miss. It is never counted as healthy, so a total probe blackout cannot publish "all OK".
   - *Stale snapshot:* 6 byte-identical frames in a row, which is how a timed-out snapshot served from cache gives itself away.
   - *Slow:* 2 consecutive probes over 9 s, a bar set above the 4–7 s contention band of concurrent probing.
-- **Fleet indicators in one cycle.** FLEET-STALE and FLEET-MISS are raised when at least 5 of the 9 cameras repeat their previous frame or fail in a single probe cycle, without waiting for per-camera streaks. They page once that has held for 5 minutes.
+- **Fleet indicators in one cycle.** FLEET-STALE and FLEET-MISS are raised when at least 5 of the 9 cameras repeat their previous frame or fail in a single probe cycle, without waiting for per-camera streaks. They page once that has held for 5 minutes. A tier already raised when Home Assistant starts cannot fire its own trigger, and after every host reboot FLEET-MISS is raised then, because the first probe runs before the Supervisor starts the engine add-on; a start-up check pages any such tier that is still raised after 8 minutes (30 for slow or stale snapshots).
 
 ### Visual activity: `cam_vision.py`
 - **Block-grid frame differencing.** Each frame becomes a 48×30 luma thumbnail compared in an 8×6 block grid after median lighting normalisation. A change counts only when it is *localized*: at least 2 hot blocks and no more than 70 % of the frame, so a global lighting shift is not motion.
@@ -99,13 +99,14 @@ The repository holds the deployable monitors, packages and automations as saniti
   - *Timestamps:* every run normalises all three Supervisor timestamp formats to UTC, failing closed when the format cannot be determined.
 
 ### Alerting discipline
-- **Pushes carry new information.** There are 34 automations with 66 triggers, and 15 of them can push. No re-assert ever pushes; pushes are gated on an onset, a set difference or a freshness stamp. There are two deliberate exceptions:
+- **Pushes carry new information.** There are 34 automations with 70 triggers, and 15 of them can push. No re-assert ever pushes; pushes are gated on an onset, a set difference or a freshness stamp. There are three deliberate exceptions:
   - the fleet-silence alert pages every hour and at boot while the whole fleet stays silent past 9 h;
-  - the per-camera dead-man pages again at boot while a broken-camera proof stands.
+  - the per-camera dead-man pages again at boot while a broken-camera proof stands;
+  - the camera-health alert and the health, motion, flap and vision dead-men push once per start when a fault already present at the start outlasts its hold, since a fault present when the triggers arm cannot fire them.
 - **Survives restarts.** Persistent notifications do not survive a Home Assistant restart, so 13 staggered re-asserts and boot triggers restore every open fault card.
 - **Every monitor has a dead-man.**
   - Each monitor pages when it errors, goes unavailable or stops updating, with freshness tracked through bucketed heartbeats and per-sensor age bars from 45 minutes to 3 hours.
-  - The archive and partial-loss dead-men hold in delayed template binaries, so a failure already present at start-up still pages.
+  - A failure already present at start-up still pages: the archive and partial-loss dead-men hold in delayed template binaries, and the health, motion, flap and vision dead-men run a start-up check that waits up to their own hold (30, 65, 60 and 30 minutes).
   - Template sensors fail closed, and every script emits the same attribute set on success and on error.
 
 ### Engineering and supply chain

@@ -74,6 +74,14 @@ before deploying (grep for `<` to find them).
    camera is already proven broken. Without that clause a proof raised before the
    automation loaded would never page, and since the cards are in-memory, the
    restart that wiped the card would be the very event guaranteeing the silence.
+   `camera_health_alert`'s four template tiers have the same trap, and the health,
+   motion, flap and vision dead-men have its state-trigger form (a state trigger
+   needs a change after it attaches). Each of those five runs a start-up check on
+   the Home Assistant start trigger: it waits up to its own hold and pushes if the
+   fault is still present, saying the fault has been present since the start. The
+   check can repeat, once per start, a page sent before the restart, and it runs
+   only on a start: an automation reload re-arms the triggers without a start
+   event, so edit these five while the monitors are healthy.
 2. **Snapshot first.** Take a full backup immediately before deploying, so a
    bad change is a restore rather than a reconstruction. Note that manual
    backups are usually **exempt** from the supervisor's automatic-backup
@@ -148,7 +156,14 @@ before deploying (grep for `<` to find them).
   Re-asserts hourly while the problem binary has been on 30+ min (the longest
   tier's window, so a re-assert can never page a blip the tiers absorb):
   persistent notifications are in-memory, so a restart wipes the page with the
-  fault still latched and an edge trigger can never re-fire.
+  fault still latched and an edge trigger can never re-fire. A re-assert restores
+  only the card. A tier already true when the triggers arm cannot fire while it
+  lasts, and after every host reboot fleet-miss is true then: the first probe runs
+  during setup, before the Supervisor starts the Scrypted engine. On the start
+  trigger the alert records the true tiers and waits until none of them is true,
+  for at most 8 min (30 min when degraded is among them); if one is still true it
+  pages. The 8-min floor gives the engine at least three probe cycles after an
+  ordinary reboot. Mode is parallel so that wait cannot drop another tier's page.
 - `camera_health_recovered` — dismisses the alert after **35 min** clear.
   Dismiss-only: no "recovered" notification (avoids churn). The gate must sit
   above the longest raise tier: at 5 min it was 6× *shorter* than the 30-min
@@ -163,13 +178,17 @@ before deploying (grep for `<` to find them).
   dead sensor — or the script's own error path, which publishes `healthy: -1` —
   evaluates as "no fault" on every trigger: without this, the primary liveness
   monitor can die and be reported as a clean fleet. The recovered half
-  dismisses the card once the sensor is back (dismiss-only).
+  dismisses the card once the sensor is back (dismiss-only). It is the only
+  pager for a `-1` that is present from the start: that payload keeps a bucketed
+  `updated_at`, so `camera_monitor_stalled` stays quiet.
 - `camera_motion_monitor_down` / `_recovered` — the same dead-man for the
   motion-staleness monitor. Covers BOTH death modes: command-level death
   (state `unavailable`/`unknown`) and the script's fail() path, which emits
   valid JSON with exit 0 — the sensor stays numeric but its `error` attribute
-  goes non-null, so a state trigger alone would miss the likeliest death (a
-  recorder-DB failure).
+  goes non-null. The problem binary's availability also requires a null `error`,
+  so that path turns it unavailable as well; the `dead_err` trigger covers it
+  independently of that template. Its start-up hold is 65 min, so the poll
+  60 min after the first one (30-min interval) lands inside it.
 - `camera_health_heartbeat` — daily proactive status card (plus a boot trigger, so
   a restart cannot erase the only proactive positive signal for the rest of the
   day), sourced from four monitors — snapshot probes, motion staleness, the
@@ -655,6 +674,9 @@ operator who is away from the property. The push steps are gated to fire on new
 information only, never on a re-assert - except `cameras_motion_stale_alert`,
 which pushes on every hourly check and at boot for as long as the whole fleet
 stays past its 9-hour bar: during a total outage an hourly page is intended.
+The start-up checks in `camera_health_alert` and the four monitor dead-men also
+push once per start for a fault that outlasts its hold, because a fault present
+when the triggers arm can never fire them.
 
 ## Partial motion loss (`cam_motion.py` + `partial_loss.py`)
 

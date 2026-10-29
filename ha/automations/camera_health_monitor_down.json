@@ -1,6 +1,6 @@
 {
   "alias": "Cameras - health monitor down",
-  "description": "Dead-man for the snapshot-probe watchdog (sensor.camera_health) itself. Its alert automation's four template triggers all read state_attr(...)|int(0), so a dead/unknown sensor - or the script's own error path, which publishes healthy=-1 with zeroed counts - evaluates as 'no fault' on every one of them: the primary liveness monitor could die and be reported as a clean fleet (observed: 10 recorder rows of 'unknown' with all json_attributes wiped). 30 min clears restart windows. RE-ASSERTS hourly (:53) while dead (restart-wipe guard). Added 2026-08-17. (2026-10-10: the unavailable/unknown hold is an OR of single-state conditions with for:, because HA 2026.10 rejects for: with a list of states.)",
+  "description": "Dead-man for the snapshot-probe watchdog (sensor.camera_health) itself. Its alert automation's four template triggers all read state_attr(...)|int(0), so a dead/unknown sensor - or the script's own error path, which publishes healthy=-1 with zeroed counts - evaluates as 'no fault' on every one of them: the primary liveness monitor could die and be reported as a clean fleet (observed: 10 recorder rows of 'unknown' with all json_attributes wiped). 30 min clears restart windows. RE-ASSERTS hourly (:53) while dead (restart-wipe guard). Added 2026-08-17. (2026-10-10: the unavailable/unknown hold is an OR of single-state conditions with for:, because HA 2026.10 rejects for: with a list of states.) 2026-10-28: START-UP CHECK. A state trigger needs a change after it attaches, so a monitor that was already dead when Home Assistant started (a Core update, or a deploy followed by a restart, that breaks the script) never fired this alert, and the re-assert restores the card without a push. On the start trigger the run now waits up to 30 min for the monitor to be healthy and pages if it is not; its push says the fault has been present since the start, because the check repeats, once per start, a page sent before the restart. The check runs only on a Home Assistant start: an automation reload that re-arms the triggers while the fault is present is not covered. For the -1 error path no other alert pages: that payload keeps a bucketed updated_at, so camera_monitor_stalled stays quiet. An unknown or unavailable sensor (a script that no longer runs at all) stops last_updated, and camera_monitor_stalled pushes that about 60 min after the start (45-min bar plus its 15-min hold).",
   "triggers": [
     {
       "platform": "state",
@@ -16,6 +16,11 @@
       "id": "dead"
     },
     {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
+    },
+    {
       "platform": "time_pattern",
       "minutes": "53",
       "id": "reassert"
@@ -27,7 +32,7 @@
       "conditions": [
         {
           "condition": "template",
-          "value_template": "{{ trigger.id == 'dead' }}"
+          "value_template": "{{ trigger.id in ['dead', 'boot'] }}"
         },
         {
           "condition": "or",
@@ -63,6 +68,34 @@
   ],
   "actions": [
     {
+      "if": [
+        {
+          "condition": "trigger",
+          "id": "boot"
+        }
+      ],
+      "then": [
+        {
+          "wait_template": "{{ not (states('sensor.camera_health') in ['unavailable', 'unknown', '-1']) }}",
+          "timeout": "00:30:00",
+          "continue_on_timeout": true
+        },
+        {
+          "if": [
+            {
+              "condition": "template",
+              "value_template": "{{ wait.completed }}"
+            }
+          ],
+          "then": [
+            {
+              "stop": "the monitor was healthy at the start or recovered within the hold"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "action": "persistent_notification.create",
       "data": {
         "notification_id": "camera_health_monitor_down",
@@ -84,7 +117,7 @@
               "action": "notify.<your_mobile_app_target>",
               "data": {
                 "title": "📷 Camera health monitor down",
-                "message": "The snapshot-probe watchdog is dead (state {{ states('sensor.camera_health') }}) - the fleet is NOT being probed and its own alert cannot fire."
+                "message": "The snapshot-probe watchdog is dead (state {{ states('sensor.camera_health') }}) - the fleet is NOT being probed and its own alert cannot fire.{% if trigger.id == 'boot' %} (present since Home Assistant started){% endif %}"
               }
             }
           ]
