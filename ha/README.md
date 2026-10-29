@@ -362,7 +362,7 @@ shows up here first.
 
 - `camera_flap_alert` / `camera_flap_recovered` / `camera_flap_down` — the
   stream-fault monitor (see `docs/operations.md` §6): pages on a sustained
-  per-camera **recording-error** rate, dismisses on recovery, and pages
+  per-camera **recording-error** rate, dismisses once both of its tiers are clear, and pages
   separately if the monitor itself sits in an error state for an hour
   (dead-man's switch for the monitor itself; a snapshot-watchdog death does
   not trip it - the window is measured from log timestamps, and `cam_vision.py`
@@ -374,21 +374,28 @@ shows up here first.
   Node dump whose header and `code:` line both name it (e.g.
   `ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY`), never both for one message; the monitor
   counts both shapes, once per failure (a dump's later lines, a nested cause, or
-  a window opening inside a dump are not counted again). These are **not**
-  dropped motion events: across
-  14 such failures, 30 of 30 engine-side motion detections still reached HA in the
-  same second, because the failure sits in the push receiver rather than in the
-  signalling session that actually delivers motion. Do **not** re-authenticate the
-  camera-source plugin on this signal alone — confirm a real motion-delivery gap
-  first. The rate is also confounded by push volume, which tracks motion, so
-  normalise before calling a trend. The `ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY`
-  failures are a known push-receiver defect: it is fixed in
-  `@eneris/push-receiver` 4.3.1, but `ring-client-api` 14.3.0 (its latest release
-  as of 2026-10) still depends on an earlier version (upstream issue
-  [dgreif/ring#1709](https://github.com/dgreif/ring/issues/1709)), so bursts recur
-  until the camera-source plugin ships the newer dependency. A burst on
-  2026-10-14/15 (about 27 failures in five hours, against 2–3 a day before it)
-  again cost no motion: 42 of 42 engine-side detections reached HA within 5 s.
+  a window opening inside a dump are not counted again). Each failure can be a
+  **lost motion or doorbell event**: the camera-source plugin learns of motion only
+  from these pushes (`ring-client-api` builds `onMotionDetected` from push
+  notifications alone). Earlier checks that found no motion lost matched the
+  engine's logged motion detections against HA; a push that fails to decrypt
+  never becomes a detection, so they could not see it. On 2026-10-28 the fleet
+  went silent for 3.8 h (no motion onset from 16:21 to 20:11 local, against 38–89
+  in that window on each of the nine previous evenings) while the rate rose to
+  16/h; motion returned about 2 min after the patched plugin relaunched. The `ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY` failures are a known
+  push-receiver defect: FCM now sends the crypto-key header as
+  `dh=KEY; p256ecdsa=SIG`, and the receiver strips `dh=` with `slice(3)`, which
+  leaves the suffix on the key. It is fixed in `@eneris/push-receiver` 4.3.1, but
+  no released `ring-client-api` or Scrypted Ring plugin carries the fix (upstream
+  issue [dgreif/ring#1709](https://github.com/dgreif/ring/issues/1709)), so the
+  plugin needs the local patch in `docs/operations.md` §3; re-authenticating does
+  not help. The tripwire pages, and its push says motion may be getting lost. The
+  rate is also confounded by push volume, which tracks motion, so normalise
+  before calling a trend. `camera_flap_recovered` dismisses the card only when
+  both tiers are clear (no camera flapping for 30 min, and the rate under 4/h with
+  the monitor reporting; the bar sits below the alert's 5/h so a rate hovering at
+  5/h does not flicker the card), checking when either clears and hourly at :11,
+  so a card raised by the tripwire alone also clears.
   Error-coded HKSV closes (`closed_with_error`, unchanged) are also split by HAP
   close reason (HAP-NodeJS `HDSProtocolSpecificErrorReason`): `closed_cancelled`
   (3, how a clip ends: HAP closes 12 s after the fragment generator stops),

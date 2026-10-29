@@ -104,22 +104,29 @@ DEVICE_IDS = {  # scrypted device id -> short name, for probe accounting
     "<device_id_7>": "<cam_7>", "<device_id_8>": "<cam_8>", "<device_id_9>": "<cam_9>",
 }
 
-# UNDECRYPTABLE PUSH MESSAGES. Deliberately NOT called "dropped pushes": that
-# causal claim was measured and REFUTED - across 14 of these failures, 30 of 30
-# Scrypted-side motion detections reached HA at the same second, zero misses.
-# The stack sits in the FCM push receiver, which is separate from the RMS
-# signalling session that actually delivers motion here. Do NOT re-authenticate
-# the Ring plugin on this signal alone; gate any lost-event claim on an actual
-# motion-delivery gap. Rate is also confounded by push VOLUME (which tracks
-# motion), so normalise before calling a trend.
+# UNDECRYPTABLE PUSH MESSAGES. Each one can be a LOST motion or doorbell event:
+# the Ring plugin learns of motion only from these cloud pushes (ring-client-api
+# builds onMotionDetected from push notifications alone). The earlier "no motion
+# lost" checks matched the engine's logged motion detections against HA; a push
+# that fails to decrypt never becomes a detection, so they could not see it. On
+# 2026-10-28 the fleet went silent for 3.8 h while this rate rose to 16/h. The
+# cause was the plugin's push receiver reading FCM's newer
+# "dh=KEY; p256ecdsa=SIG" crypto-key header with slice(3) (dgreif/ring#1709;
+# fixed in @eneris/push-receiver 4.3.1). A local plugin patch fixes it
+# (docs/operations.md section 3); re-authenticating does not. Rate is also
+# confounded by push VOLUME (which tracks motion), so normalise before calling
+# a trend.
 #
 # ONE COUNT PER FAILURE, whichever shape the engine prints. The push receiver
 # either swallows a decrypt failure or rethrows it, never both, so one failure
 # never prints both shapes. Checked in @eneris/push-receiver 4.3.0 (the version
-# ring-client-api 14.3.0 pins; the copy vendored into the Ring plugin was not
-# read) and on its main branch. 4.3.0 logs the swallowed line with Logger.warn,
-# which is why the engine prints it; main logs it at debug, so the deployed
-# receiver behaves like 4.3.0, not main.
+# ring-client-api 14.3.0 pins) and on its main branch, and on 2026-10-28 in the
+# copy bundled into the Ring plugin 0.0.145, which matches 4.3.0: slice(3) on the
+# crypto-key header, the three reasons below logged with warn, anything else
+# rethrown. main logs the swallowed line at debug, so the deployed receiver
+# behaves like 4.3.0, not main. The local plugin patch makes a header with no
+# dh= or salt= value throw a "crypto-key is missing ..." or "salt is missing ..."
+# message, so it is swallowed and counted here, not rethrown as a TypeError.
 #   swallowed  "Message dropped as it could not be decrypted: <reason>" - ONE
 #              line, no stack, for the reasons it expects ("crypto-key is
 #              missing", "salt is missing", "Unsupported state or unable to
@@ -131,8 +138,9 @@ DEVICE_IDS = {  # scrypted device id -> short name, for probe accounting
 #              frames, the property line "  code: 'ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY'"
 #              and "}" - the code TWICE for one failure. ECDH.computeSecret
 #              prints this shape for an invalid public key on Node 20 (source)
-#              and Node 26 (reproduced). August: ~1.6 matching lines/h; none
-#              since 08-10.
+#              and Node 26 (reproduced). August: ~1.6 matching lines/h; bursts
+#              on 2026-10-14/15 and 2026-10-28 (up to 16/h, until the plugin
+#              patch).
 # A failure is counted at its FIRST matching line. A later matching line of the
 # same failure is skipped when either
 #   - it is an indented or brace line (PUSH_DUMP_CONT_RE) of a dump already
@@ -1061,8 +1069,13 @@ def main():
                        if expected >= 10 and v < expected * PROBE_SHORTFALL)
 
     push_undecryptable_rate = round(push_undecryptable / span_min * 60, 1)
-    summary = "worst %s %.1f/hr over %.0fm; %d cam(s) over threshold" % (
-        worst, rates[worst], span_min, len(flapping))
+    if fails[worst]:
+        summary = "worst %s %.1f/hr over %.0fm; %d cam(s) over threshold" % (
+            worst, rates[worst], span_min, len(flapping))
+    else:
+        # Nothing to rank: a "worst" camera at 0.0/hr reads as a fault, so the
+        # window says so plainly and `worst` is None.
+        summary = "no recording errors over %.0fm" % span_min
     if push_undecryptable_rate >= 1.0:
         summary += "; undecryptable push msgs %.1f/hr" % push_undecryptable_rate
     if unknown_motion:
@@ -1114,7 +1127,7 @@ def main():
         "push_drops": push_undecryptable, "push_drop_rate": push_undecryptable_rate,
         "probe_counts": probes, "probe_shortfall": shortfall,
         "flapping": flapping, "flap_count": len(flapping),
-        "worst": worst, "worst_rate": rates[worst],
+        "worst": worst if fails[worst] else None, "worst_rate": rates[worst],
         "updated_at": int(time.time() // HEARTBEAT_BUCKET_S) * HEARTBEAT_BUCKET_S,
         "door_openings": door_openings, "door_orphans": door_orphans,
         "door_orphan_rate": door_orphan_rate, "doors": door_by_name,

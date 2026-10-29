@@ -72,7 +72,7 @@ The repository holds the deployable monitors, packages and automations as saniti
 
   So an error-coded close is not read as a fault on its own.
 - **Mid-session video stalls:** a hub TIMEOUT close after 10 s or more without a fragment, or an ffmpeg failure while the session is up. Each session counts once, and stalls stay out of the paging metric.
-- **A push-decrypt tripwire,** counted once per failure.
+- **A push-decrypt tripwire,** counted once per failure. Each failure can be a lost motion event, because Ring motion arrives only as these pushes (see [Operations §3](docs/operations.md#3-motion--doorbell-press--home-assistant-mqtt)).
 - **Probe-shortfall accounting,** which flags a camera whose logged snapshot requests fall below 75 % of the expected probe cycles.
 
 ### Door coverage: `cam_flap.py`
@@ -99,7 +99,7 @@ The repository holds the deployable monitors, packages and automations as saniti
   - *Timestamps:* every run normalises all three Supervisor timestamp formats to UTC, failing closed when the format cannot be determined.
 
 ### Alerting discipline
-- **Pushes carry new information.** There are 34 automations with 70 triggers, and 15 of them can push. No re-assert ever pushes; pushes are gated on an onset, a set difference or a freshness stamp. There are three deliberate exceptions:
+- **Pushes carry new information.** There are 34 automations with 72 triggers, and 15 of them can push. No re-assert ever pushes; pushes are gated on an onset, a set difference or a freshness stamp. There are three deliberate exceptions:
   - the fleet-silence alert pages every hour and at boot while the whole fleet stays silent past 9 h;
   - the per-camera dead-man pages again at boot while a broken-camera proof stands;
   - the camera-health alert and the health, motion, flap and vision dead-men push once per start when a fault already present at the start outlasts its hold, since a fault present when the triggers arm cannot fire them.
