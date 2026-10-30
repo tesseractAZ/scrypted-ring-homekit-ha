@@ -2,7 +2,7 @@
 
 One [Scrypted](https://github.com/koush/scrypted) session is the only Ring cloud client on the automation side. It serves every camera to Apple HomeKit (with HomeKit Secure Video) and to Home Assistant. Around it runs a purpose-built monitoring and log-forensics stack:
 
-- **six Python scripts:** five monitors plus the partial-loss detector module that `cam_motion.py` imports, ≈6,800 lines, standard library plus Pillow;
+- **six Python scripts:** five monitors plus the partial-loss detector module that `cam_motion.py` imports, ≈7,200 lines, standard library plus Pillow;
 - **34 Home Assistant automations;**
 - **5 command-line sensors.**
 
@@ -61,7 +61,8 @@ The repository holds the deployable monitors, packages and automations as saniti
 - **Chance and coverage models.**
   - Per-camera, per-hour background firing rates over 7 days estimate how often motion coincides by chance.
   - An incremental index of recorder gaps across all entities (over 5 min, ~62-day lookback) keeps unobserved time out of the partial-loss test. The 72 h staleness clock does not exclude it.
-  - A host outage is reported after the fact from those same recorder holes.
+  - A host outage is reported after the fact from those same recorder holes. Each outage is paged once, on the first poll that sees it, so a second outage inside the same 24 h is paged too.
+- **Fleet-wide motion drop.** A fault upstream of every camera (the Ring plugin's push receiver, the engine, MQTT) silences the whole fleet at once. The last 1.5 h of fleet motion is compared with the same clock window on each of the previous 14 days. With zero onsets at two polls 30 min apart, at an hour when 12 of those days logged 7 or more, the alert pages and stays latched until motion returns. In replay it paged the 2026-10-28 push-decrypt outage 2.1 h after the last onset, where the 9 h fleet-silence check never fired. Over 26 days it produced one false page at 27 of 30 poll phases (none at two, two at one), and it is armed about 40–43 % of the time, mostly by day and in the evening.
 - **Vision cross-checks.** Frame differencing annotates each stale camera's verdict without changing the flag. Two or more localized scene changes with no motion event read "detection/event path suspect". A quiet scene is called consistent with vacancy only when the camera's measured vision recall supports it. That recall is scored with a trailing-miss run test.
 
 ### Stream and log forensics: `cam_flap.py`
@@ -99,11 +100,12 @@ The repository holds the deployable monitors, packages and automations as saniti
   - *Timestamps:* every run normalises all three Supervisor timestamp formats to UTC, failing closed when the format cannot be determined.
 
 ### Alerting discipline
-- **Pushes carry new information.** There are 34 automations with 72 triggers, and 15 of them can push. No re-assert ever pushes; pushes are gated on an onset, a set difference or a freshness stamp. There are three deliberate exceptions:
+- **A second fault pages too.** Tier alerts fire on the edge of a fleet count, so a camera that joined a tier while another was already latched used to move no edge. The health, stream-churn and vision monitors now publish the cameras that joined a tier at least one hold after its episode began, and each newly listed camera is pushed ("Also down: …").
+- **Pushes carry new information.** There are 36 automations with 82 triggers, and 16 of them can push. No re-assert ever pushes; pushes are gated on an onset, a set difference or a freshness stamp. There are three deliberate exceptions:
   - the fleet-silence alert pages every hour and at boot while the whole fleet stays silent past 9 h;
   - the per-camera dead-man pages again at boot while a broken-camera proof stands;
-  - the camera-health alert and the health, motion, flap and vision dead-men push once per start when a fault already present at the start outlasts its hold, since a fault present when the triggers arm cannot fire them.
-- **Survives restarts.** Persistent notifications do not survive a Home Assistant restart, so 13 staggered re-asserts and boot triggers restore every open fault card.
+  - the camera-health and stream-churn alerts and the health, motion, flap and vision dead-men push once per start when a fault already present at the start outlasts its hold, since a fault present when the triggers arm cannot fire them.
+- **Survives restarts.** Persistent notifications do not survive a Home Assistant restart, so 14 staggered re-asserts and boot triggers restore every open fault card.
 - **Every monitor has a dead-man.**
   - Each monitor pages when it errors, goes unavailable or stops updating, with freshness tracked through bucketed heartbeats and per-sensor age bars from 45 minutes to 3 hours.
   - A failure already present at start-up still pages: the archive and partial-loss dead-men hold in delayed template binaries, and the health, motion, flap and vision dead-men run a start-up check that waits up to their own hold (30, 65, 60 and 30 minutes).
@@ -111,7 +113,7 @@ The repository holds the deployable monitors, packages and automations as saniti
 
 ### Engineering and supply chain
 - **Contract-checked in CI.**
-  - All 128 published sensor attributes are checked against each package's allowlist in both directions.
+  - All 137 published sensor attributes are checked against each package's allowlist in both directions.
   - Every automation parses, and each one that carries an `id` is checked against its filename.
   - A public-repo hygiene sweep runs generic patterns plus instance patterns loaded from a CI secret, in a job that isolates that secret.
 - **Hardened pipeline.**
@@ -148,7 +150,7 @@ The repository holds the deployable monitors, packages and automations as saniti
    │   cam_logarchive ── engine journal → redacted, pseudonymised 35-day archive       │
    │        │                                                                          │
    │        ▼  sensors + fail-closed template binaries                                 │
-   │   34 automations: gated pushes · cards · re-asserts · dead-men · walk test        │
+   │   36 automations: gated pushes · cards · re-asserts · dead-men · walk test        │
    └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 

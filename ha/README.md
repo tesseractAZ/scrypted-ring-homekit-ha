@@ -164,6 +164,19 @@ before deploying (grep for `<` to find them).
   for at most 8 min (30 min when degraded is among them); if one is still true it
   pages. The 8-min floor gives the engine at least three probe cycles after an
   ordinary reboot. Mode is parallel so that wait cannot drop another tier's page.
+  **A second camera.** The down and degraded triggers fire on the edge of a
+  fleet count, so a camera that joins a tier while another camera is already
+  latched in it moves no edge. `cam_health.py` keeps each camera's entry time into
+  a tier and the tier's episode start (the probe at which its list last went from
+  empty to non-empty) in its state file, and publishes `down_late` /
+  `degraded_late`: the cameras held in the tier for its hold (8 / 30 min) that
+  joined at least one hold after the episode began, i.e. after the count edge's
+  own page went out (an earlier joiner is in that page's summary). The
+  `down_late` / `degraded_late` state triggers push each camera added to a list
+  ("Also down: X"). A change seen right after a reload or a start does not page,
+  since the start-up check covers it; after an error probe the next good one
+  re-pages any camera still late (a repeat, never a miss). On a script's first run
+  with no tier record, cameras already in a tier count as paged.
 - `camera_health_recovered` — dismisses the alert after **35 min** clear.
   Dismiss-only: no "recovered" notification (avoids churn). The gate must sit
   above the longest raise tier: at 5 min it was 6× *shorter* than the 30-min
@@ -189,6 +202,9 @@ before deploying (grep for `<` to find them).
   so that path turns it unavailable as well; the `dead_err` trigger covers it
   independently of that template. Its start-up hold is 65 min, so the poll
   60 min after the first one (30-min interval) lands inside it.
+  Its re-assert is gated on the `unavailable`/`unknown` state held 60 min; an
+  `error` makes the binary unavailable too, so a single erroring poll at :59 no
+  longer creates a "60+ min" card.
 - `camera_health_heartbeat` — daily proactive status card (plus a boot trigger, so
   a restart cannot erase the only proactive positive signal for the rest of the
   day), sourced from four monitors — snapshot probes, motion staleness, the
@@ -249,6 +265,46 @@ before deploying (grep for `<` to find them).
   forever* — a stuck sensor once pinned the fleet clock to "now" for ~35
   consecutive hourly checks, mathematically disabling the dead-man while it
   claimed to be watching.
+
+  **Host outages are not silence.** After an outage of 9 h or more the start-up
+  check used to page "no motion from ANY camera" when the cause was the outage.
+  The bar now applies to `fleet_drop.silence_net_h` from `cam_motion.py`: the time
+  since the fleet's last onset minus the all-entity recorder holes inside it. The
+  recorder writes nothing until Home Assistant has started, so the poll run while
+  starting sees the outage just ended as an OPEN hole (no row after it yet) and
+  nets that out too. A recorder that stops committing while Home Assistant runs
+  looks the same from the database, but polls keep running through it, so the open
+  hole is netted out only when no poll ran inside it: a recorder stall still pages
+  here on the gross silence, and this is the one alert that sees one. The card and
+  push say how much of the silence Home Assistant was down.
+
+- `camera_motion_fleet_drop_alert` / `_recovered` — a **fleet-wide motion drop**,
+  long before the 9 h check. A fault upstream of every camera (the Ring plugin's
+  push receiver, the engine, MQTT) silences the whole fleet at once; on
+  2026-10-28 the fleet was silent 3.8 h, the decrypt-rate tier paged at 1.8 h and
+  the 9 h check never fired. `cam_motion.py` compares the last 1.5 h of fleet
+  motion with the same clock window on each of the previous 14 days. The window
+  is armed when at least 12 of those days logged 7 or more onsets. A drop is a
+  window with no onset, armed, at this poll and at the one 30 min earlier (both
+  recomputed from recorder rows, so a restart or an extra poll cannot stitch
+  them). More than 15 min of recorder hole in the window gives no verdict. Once
+  raised, the drop is latched in `/config/.cam_motion_state.json` until a newer
+  onset arrives, because the window disarms at quieter hours (about 10:30–12:00
+  and 22:30–06:30 here), and an unlatched verdict would read as an all-clear in
+  mid-outage and page again when it re-armed. `binary_sensor.camera_motion_fleet_drop`
+  is a trigger-based template entity: it changes only on a valid reading,
+  restores across a template reload or a restart, and re-renders at the start,
+  because the start-up poll lands before its state trigger attaches. The alert
+  pushes its off->on edge; a drop still latched across a restart gets back only
+  its card. The `:43` re-assert restores the card, and the recovered half
+  dismisses it when the binary turns off. Replayed every 30 min over
+  2026-10-04..10-29, it paged 10-28 2.1 h after the last onset (2.0–2.5 h across
+  poll phases), and 10-16's 18.2 h decrypt loss at 07:30, after the decrypt-rate
+  tier (06:35) and the 9 h check (07:11) had paged it. It made one false page on an
+  ordinary quiet morning (10-11 07:30), plus one more (10-05 11:43) at one poll
+  phase in 30, and it is armed about 40–43 % of the time. Its gain is over the
+  9 h check, for a cause with no detector of its own. An empty, still property
+  can be this quiet too.
 
 The stream-fault monitor also records **door contacts**. The Ring door/contact
 sensors reach the engine but are not published to Home Assistant — no
@@ -408,6 +464,16 @@ shows up here first.
   the latest 20 episodes and the summary names stalls only when present. Stalls
   are informational and do not page: each stalled recording also ends in a
   `motion recording error`, which already is the paging metric.
+  **A second camera, and the start.** `binary_sensor.cameras_flapping` is on while
+  any camera flaps, so a camera that starts flapping while another already is
+  moves no edge: `cam_flap.py` publishes `flapping_late` (state in
+  `/config/.cam_flap_flapping_state.json`, the same rule as `down_late` above with
+  a 20 min hold) and the `flapping_late` trigger pushes "Also flapping: X". A
+  fault already present when the triggers attach cannot fire them, so a boot
+  trigger notes which tiers are present, waits up to the tier's hold (20 min
+  flapping, 30 min push-decrypt) and pages those still present, with "(present
+  since Home Assistant started)"; mode is parallel so that wait cannot drop a
+  live trigger.
 - `camera_door_coverage_alert` / `_recovered` — per-camera door coverage (see the
   door-contact section above): pages when a camera keeps failing to report motion
   at its own door while other cameras see the activity. The push is gated on the
@@ -470,6 +536,9 @@ shows up here first.
   loop actually runs, at roughly one extra recorder row per bucket rather than one
   per poll. Bars are per sensor because the poll intervals differ 30× (3 h for the
   hourly engine-log archive).
+  It has no boot trigger: a start resets every monitor's `last_updated`, so a stall
+  cannot be latched when the triggers attach, and its condition (on for 15 min)
+  could never pass at a start anyway.
 - `camera_vision_monitor_down` / `_recovered` — dead-man for the visual monitor.
   It was the only one of the four without one, which mattered because its most
   likely failure is not a crash but going **blind while still running**:
@@ -502,6 +571,19 @@ shows up here first.
   while a fresh marker with no `<name>.jpg` for a camera (a name that differs
   between the two scripts' camera lists, or a frame that could not be written)
   leaves that camera without a sample.
+  **A second blind camera.** The problem binary is on for any blind camera or a
+  script error, so a camera that goes blind while it is already on moves no edge.
+  `cam_vision.py` publishes `blind_late` (same rule, 30 min hold; an error run
+  starts an episode when none is running, matching the binary) and the
+  `blind_late` trigger pushes "Also not seen: X". Unlike the health and flap late
+  triggers it also pages after an unknown reading, because this binary stays on
+  through one. Home Assistant 2026.10 does not kill a command that passes
+  `command_timeout`; it publishes `unknown` and the script runs on. A run still
+  going at 55 s therefore leaves the blind episode as it was and exits without
+  output. When the last published run is more than 6 min old while runs were
+  still being made, the episode is dated one poll after it, so a camera found
+  blind after a slow spell is still named. After a host outage nothing ran, and
+  the start-up check pages what is blind.
 - `camera_host_down_alert` / `_recovered` — reports an outage of the HOST, after
   the fact. Every monitor here is a process inside the thing it monitors, so a
   host-down event raises nothing at all while it is happening: the monitor
@@ -516,6 +598,20 @@ shows up here first.
   first-poll-before-attach is already above the threshold and never arms), so it
   would have been structurally incapable of reporting the very outage it exists
   for.
+  **Each outage once, a second one too.** The first version's template trigger on
+  `host_gap_min > 15` stayed true while an earlier outage was inside the 24 h
+  window, so a second outage never paged. `cam_motion.py` now also publishes
+  `host_gap_last_end` / `host_gap_last_min` (the most recent hole over 15 min; a
+  hole straddling the 24 h edge takes its true start from the long gap scan) and
+  `host_gap_new_end`, set only on the first poll that sees a newer outage (the end
+  last seen is kept in `/config/.cam_motion_state.json`). The gap trigger pages on
+  `host_gap_new_end`, so an error poll, a reload or a restart cannot page the same
+  outage again, and a run that outlasts `command_timeout` keeps the old end and
+  prints nothing, so the next published poll carries it. The recorder writes
+  nothing until Home Assistant has started, so the poll run while starting never
+  sees the outage that preceded the start; the first poll after it does, about
+  30 min later. A boot trigger covers a restart made after the outage was recorded
+  but before that poll.
 - `camera_motion_dead_alert` / `_recovered` — per-camera motion staleness:
   pages when **one** camera has produced no motion EVENTS beyond its window
   (default 72 h; naturally-quiet or rarely-visited cameras take longer
@@ -528,6 +624,11 @@ shows up here first.
   section), the push ends with how to run that camera's walk test, because the
   push is the only part of the page that reliably reaches a phone; the card's
   corroboration header says the check reads recorder rows only.
+  A camera that turns stale at the poll Home Assistant runs while starting is set
+  before any trigger attaches, so no change of `stale` can page it:
+  `cam_motion.py` publishes `stale_added` (cameras stale now that were not at the
+  previous poll that wrote its state file) and the boot push also fires when it is
+  non-empty ("HA restarted. New: X.").
   The push opens with what caused it. `New: <cameras>.` names the cameras that a
   stale-set change added. It is the same set difference the push gate computes from
   the trigger's old and new stale lists. When that change fires as the motion

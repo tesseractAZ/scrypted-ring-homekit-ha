@@ -1,0 +1,91 @@
+{
+  "id": "camera_motion_fleet_drop_alert",
+  "alias": "Cameras - fleet-wide motion drop",
+  "description": "Pages when NO camera has logged a motion onset for 2 h at a time of day that is normally busy: binary_sensor.camera_motion_fleet_drop, which follows fleet_drop.active from cam_motion.py (zero onsets in the last 1.5 h, at this poll and the one 30 min earlier, while at least 12 of the previous 14 days logged 7 or more onsets in the same clock window; more than 15 min of recorder hole in the window gives no verdict) and is trigger-based: it changes only on a valid reading and restores its state across a template reload or a restart, so a failed poll or a reload can neither page the same drop again nor clear it. cam_motion.py latches the drop until a newer onset arrives, so a window that disarms at a quieter hour cannot read as an all-clear mid-outage and a re-armed window cannot page the same outage twice. Added 2026-10-29 after the 10-28 Ring push-decrypt outage (the fleet was silent 3.8 h; the decrypt-rate tier paged at 1.8 h, the 9 h fleet-silence check never fired): its gain is over the 9 h check, for a cause with no detector of its own. Replayed every 30 min over 2026-10-04..10-29 it pages 10-28 2.1 h after the last onset (2.0-2.5 h across poll phases), the 18.2 h decrypt loss of 10-16 at 07:30 (after the decrypt-rate tier at 06:35 and the 9 h check at 07:11 had paged it), and one ordinary quiet morning (10-11 07:30), plus a second quiet late morning (10-05 11:43) at one poll phase in 30; armed 40-43% of the time. The poll run while Home Assistant starts sees a just-ended host outage as an open recorder hole, so it gives no verdict instead of reading the outage as fleet silence. The card and push give the silence since the last onset and how much of it Home Assistant was down. The binary re-renders at the start (a homeassistant start trigger: the start-up poll lands before its state trigger attaches), so a drop the start-up poll raises pages on its off->on edge; a drop still latched across a restart was paged when it was raised, and the boot trigger restores only its card (30 s after the start, when the binary is on and the reading says active). The not_from guard keeps a template reload from paging. The :43 re-assert restores the card without a push. Downtime in the text is the poll-time silence minus silence_net_h, so a reading's age is not reported as downtime.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.camera_motion_fleet_drop",
+      "to": "on",
+      "not_from": [
+        "unavailable",
+        "unknown"
+      ],
+      "id": "drop"
+    },
+    {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
+    },
+    {
+      "platform": "time_pattern",
+      "minutes": "43",
+      "id": "reassert"
+    }
+  ],
+  "conditions": [
+    {
+      "condition": "template",
+      "value_template": "{{ trigger.id == 'boot' or is_state('binary_sensor.camera_motion_fleet_drop', 'on') }}"
+    }
+  ],
+  "actions": [
+    {
+      "if": [
+        {
+          "condition": "trigger",
+          "id": "boot"
+        }
+      ],
+      "then": [
+        {
+          "delay": "00:00:30"
+        },
+        {
+          "if": [
+            {
+              "condition": "template",
+              "value_template": "{{ not (is_state('binary_sensor.camera_motion_fleet_drop', 'on') and (state_attr('sensor.camera_motion_stale','fleet_drop') or {}).get('active') == true) }}"
+            }
+          ],
+          "then": [
+            {
+              "stop": "no drop present at the start"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "action": "persistent_notification.create",
+      "data": {
+        "notification_id": "camera_motion_fleet_drop",
+        "title": "⚠️ Cameras: motion stopped fleet-wide",
+        "message": "{% set fd = state_attr('sensor.camera_motion_stale','fleet_drop') or {} %}{% set lo = fd.get('last_onset') if fd is mapping else none %}{% set gross = ((as_timestamp(now()) - lo | float(0)) / 3600) | round(1) if lo else none %}{% set net = fd.get('silence_net_h') if fd is mapping else none %}{% set pu = states.sensor.camera_motion_stale.last_updated if states.sensor.camera_motion_stale is not none else none %}{% set down = (((as_timestamp(pu) - lo | float(0)) / 3600) - net | float(0)) | round(1) if (lo and pu and net is not none) else 0 %}No motion onset from any camera for {{ gross if gross is not none else 'at least 2' }} h{% if lo %} (last one {{ lo | timestamp_custom('%b %-d %-I:%M %p') }}){% endif %}{% if down > 0.25 %}; Home Assistant was down for {{ down }} h of that{% endif %}. The drop was raised {{ fd.get('since') | timestamp_custom('%b %-d %-I:%M %p') if fd.get('since') else 'at an earlier poll' }}, at a time of day when at least 12 of the previous 14 days logged 7 or more onsets in the same 1.5 h window, and it stays raised until any camera reports motion again. Every camera going quiet at once points upstream of the cameras: the Ring plugin's push receiver (check push_undecryptable_rate on sensor.camera_flap_rate and docs/operations.md section 3), the Scrypted engine, or MQTT. Check the Ring app: motion events listed there that Home Assistant did not get mean the loss is between Ring and Home Assistant. An empty, still property can also be this quiet. {{ now().strftime('%b %-d %-I:%M %p') }}."
+      }
+    },
+    {
+      "choose": [
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{{ trigger.id == 'drop' }}"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "notify.<your_mobile_app_target>",
+              "data": {
+                "title": "⚠️ Cameras: motion stopped fleet-wide",
+                "message": "{% set fd = state_attr('sensor.camera_motion_stale','fleet_drop') or {} %}{% set lo = fd.get('last_onset') if fd is mapping else none %}{% set gross = ((as_timestamp(now()) - lo | float(0)) / 3600) | round(1) if lo else none %}{% set net = fd.get('silence_net_h') if fd is mapping else none %}{% set pu = states.sensor.camera_motion_stale.last_updated if states.sensor.camera_motion_stale is not none else none %}{% set down = (((as_timestamp(pu) - lo | float(0)) / 3600) - net | float(0)) | round(1) if (lo and pu and net is not none) else 0 %}No motion from any camera in {{ gross if gross is not none else 'over 2' }} h{% if down > 0.25 %} (Home Assistant was down {{ down }} h of it){% endif %}{% if fd.get('since') %}; raised {{ fd.get('since') | timestamp_custom('%-I:%M %p') }}, a normally busy time{% endif %}. Motion may be getting lost upstream: check the Ring app and the Ring plugin."
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "mode": "single"
+}

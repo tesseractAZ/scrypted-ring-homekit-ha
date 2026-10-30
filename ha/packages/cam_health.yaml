@@ -31,6 +31,8 @@ command_line:
         - down
         - frozen
         - slow
+        - down_late
+        - degraded_late
         - all_down
         - summary
         - detail

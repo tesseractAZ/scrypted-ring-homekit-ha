@@ -30,6 +30,7 @@ command_line:
         - probe_shortfall
         - flapping
         - flap_count
+        - flapping_late
         - worst
         - worst_rate
         - door_openings

@@ -316,6 +316,16 @@ DOOR_TRIP_S = 300.0   # repeat openings of one door inside this are ONE trip
 # way to see a camera that still fires now and then but misses its own door
 # every time: motion staleness resets on each stray event, so it never trips.
 DOOR_STATE = "/config/.cam_flap_door_state.json"
+# A SECOND FLAPPING CAMERA. camera_flap_alert pages on binary_sensor.cameras_flapping
+# turning on (held FLAP_HOLD_S), so a camera that starts flapping while another
+# already is moved no edge and was never paged. FLAP_STATE keeps each flapping
+# camera's first flapping poll and the episode start (the poll the flapping list
+# last went from empty to non-empty); flapping_late lists the cameras flapping
+# for the hold that started at least one hold after the episode began, i.e.
+# after the binary's own page (a camera that started earlier is in that page's
+# summary). An error run leaves FLAP_STATE alone.
+FLAP_STATE = os.environ.get("CAMFLAP_FLAP_STATE", "/config/.cam_flap_flapping_state.json")
+FLAP_HOLD_S = 1200
 DOOR_ROLLING_D = 7.0          # the per-camera door record covers this many days
 # A camera is FAILING its door when, over DOOR_ROLLING_D, it has at least
 # DOOR_FAIL_MIN_TRIPS judged trips, saw no more than DOOR_FAIL_MAX_SAW_FRAC of
@@ -805,6 +815,38 @@ def update_rolling(trips, now, covered_from=None):
     return rolling, failing, note
 
 
+def flapping_late(members, now, path=None):
+    """Update FLAP_STATE for this poll's flapping list; return the late cameras."""
+    path = path or FLAP_STATE
+    try:
+        with open(path) as fh:
+            prev = json.load(fh)
+    except Exception:  # noqa: BLE001 - no state: see below
+        prev = None
+    if not isinstance(prev, dict):
+        # No record (first run of this version, or lost state): an episode already
+        # running had its page before this poll, so its cameras count as old and
+        # only a camera that starts flapping from now on can be late.
+        prev = {"since": {c: 0.0 for c in members}, "ep": 0.0 if members else None}
+    since = prev.get("since") if isinstance(prev.get("since"), dict) else {}
+    since = {c: float(since[c]) if isinstance(since.get(c), (int, float)) else now
+             for c in members}
+    ep = prev.get("ep") if members else None
+    if members and not isinstance(ep, (int, float)):
+        ep = now
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    try:
+        with open(tmp, "w") as fh:
+            json.dump({"since": since, "ep": ep}, fh)
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 - a lost write costs at most one late page
+        try:
+            os.remove(tmp)
+        except Exception:  # noqa: BLE001
+            pass
+    return sorted(c for c, t in since.items() if now - t >= FLAP_HOLD_S and t >= ep + FLAP_HOLD_S)
+
+
 def emit(payload):
     base = {
         "span_min": None, "rates": None, "counts": None,
@@ -812,7 +854,7 @@ def emit(payload):
         "push_undecryptable": None, "push_undecryptable_rate": None,
         "push_drops": None, "push_drop_rate": None,   # legacy aliases, same value
         "probe_counts": None, "probe_shortfall": [],
-        "flapping": [], "flap_count": 0,
+        "flapping": [], "flap_count": 0, "flapping_late": None,
         "worst": None, "worst_rate": -1, "updated_at": None,
         "door_openings": None, "door_orphans": None, "door_orphan_rate": None,
         "doors": None, "door_orphans_by_door": None, "door_orphan_times": None,
@@ -1127,6 +1169,7 @@ def main():
         "push_drops": push_undecryptable, "push_drop_rate": push_undecryptable_rate,
         "probe_counts": probes, "probe_shortfall": shortfall,
         "flapping": flapping, "flap_count": len(flapping),
+        "flapping_late": flapping_late(flapping, time.time()),
         "worst": worst if fails[worst] else None, "worst_rate": rates[worst],
         "updated_at": int(time.time() // HEARTBEAT_BUCKET_S) * HEARTBEAT_BUCKET_S,
         "door_openings": door_openings, "door_orphans": door_orphans,

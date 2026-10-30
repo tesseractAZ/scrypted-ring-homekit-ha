@@ -1,6 +1,6 @@
 {
   "alias": "Cameras - flap alert",
-  "description": "Pages when a camera's HKSV recording-error rate stays over threshold for 20 min. sensor.camera_flap_rate v2 counts per-camera 'motion recording error' lines - a lost or truncated security clip - plus fleet-wide stream faults. It REPLACED a v1 metric that counted prebuffer restarts, a string that stopped occurring when prebuffer was disabled fleet-wide, leaving the sensor pinned at 0.0 and unable to fire for 9 days. Threshold 2/hr with a 3-event floor: a healthy camera records 0. Error-coded closes are context only - code 3 also covers a benign max-duration cancel. Also pages if Ring push-decryption failures (undecryptable push messages: either a rethrown ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY dump or a swallowed `Message dropped as it could not be decrypted: <reason>` line in the engine log) reach 5/hr sustained 30 min. Each one can be a LOST motion or doorbell event: the Ring plugin learns of motion only from these pushes (ring-client-api builds onMotionDetected from push notifications alone). The earlier 'no motion lost' checks (30 of 30, 42 of 42) matched the engine's logged motion detections against HA; a push that fails to decrypt never becomes a detection, so they could not see it. 2026-10-28: the fleet went silent for 3.8 h (no motion onset from 16:21:45 to 20:11:38 local, against 38-89 onsets in that window on each of the nine previous evenings) while the rate rose to 16/h. The cause was dgreif/ring#1709: the plugin's push receiver read FCM's newer `dh=KEY; p256ecdsa=SIG` crypto-key header with slice(3). A local patch to the plugin bundle fixed it (docs/operations.md section 3), and motion returned about 2 min after the patched plugin relaunched. Re-authenticating does not fix it. RE-ASSERTS hourly (:41) while binary_sensor.cameras_flapping stays on (restart-wipe guard; the re-assert also covers a persistent push-decrypt fault, and the push-drop paragraph keys off the live rate rather than the trigger). 2026-10-28: triggers read push_undecryptable_rate (the same value as the legacy push_drop_rate); the flapping trigger has id flapping; a push-tier push adds that motion may be getting lost; with no recording error the card lists none instead of nine 0.0/hr rows; camera_flap_recovered dismisses the card only when both tiers are clear.",
+  "description": "Pages when a camera's HKSV recording-error rate stays over threshold for 20 min. sensor.camera_flap_rate v2 counts per-camera 'motion recording error' lines - a lost or truncated security clip - plus fleet-wide stream faults. It REPLACED a v1 metric that counted prebuffer restarts, a string that stopped occurring when prebuffer was disabled fleet-wide, leaving the sensor pinned at 0.0 and unable to fire for 9 days. Threshold 2/hr with a 3-event floor: a healthy camera records 0. Error-coded closes are context only - code 3 also covers a benign max-duration cancel. Also pages if Ring push-decryption failures (undecryptable push messages: either a rethrown ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY dump or a swallowed `Message dropped as it could not be decrypted: <reason>` line in the engine log) reach 5/hr sustained 30 min. Each one can be a LOST motion or doorbell event: the Ring plugin learns of motion only from these pushes (ring-client-api builds onMotionDetected from push notifications alone). The earlier 'no motion lost' checks (30 of 30, 42 of 42) matched the engine's logged motion detections against HA; a push that fails to decrypt never becomes a detection, so they could not see it. 2026-10-28: the fleet went silent for 3.8 h (no motion onset from 16:21:45 to 20:11:38 local, against 38-89 onsets in that window on each of the nine previous evenings) while the rate rose to 16/h. The cause was dgreif/ring#1709: the plugin's push receiver read FCM's newer `dh=KEY; p256ecdsa=SIG` crypto-key header with slice(3). A local patch to the plugin bundle fixed it (docs/operations.md section 3), and motion returned about 2 min after the patched plugin relaunched. Re-authenticating does not fix it. RE-ASSERTS hourly (:41) while binary_sensor.cameras_flapping stays on (restart-wipe guard; the re-assert also covers a persistent push-decrypt fault, and the push-drop paragraph keys off the live rate rather than the trigger). 2026-10-28: triggers read push_undecryptable_rate (the same value as the legacy push_drop_rate); the flapping trigger has id flapping; a push-tier push adds that motion may be getting lost; with no recording error the card lists none instead of nine 0.0/hr rows; camera_flap_recovered dismisses the card only when both tiers are clear. 2026-10-29: SECOND CAMERA: binary_sensor.cameras_flapping is on while ANY camera flaps, so a camera that started flapping while another already was moved no edge. cam_flap.py now publishes flapping_late (cameras flapping for the 20 min hold that started at least 20 min after the flapping episode began, i.e. after the binary's own page) and the flapping_late trigger pages each added camera ('Also flapping: X'). START-UP CHECK: a fault present when Home Assistant starts cannot fire the state or template trigger (template triggers arm only from false; the binary is already on). The boot trigger notes which tiers are present, waits up to the tier's hold (20 min flapping, 30 min push-decrypt) and pages those still present, with '(present since Home Assistant started)'. mode parallel so a boot wait does not swallow a live trigger. After a restart a camera that starts flapping during the boot hold can be pushed twice (one repeat per start, as for the start-up check).",
   "triggers": [
     {
       "platform": "state",
@@ -23,6 +23,17 @@
       "platform": "time_pattern",
       "minutes": "41",
       "id": "reassert"
+    },
+    {
+      "platform": "state",
+      "entity_id": "sensor.camera_flap_rate",
+      "attribute": "flapping_late",
+      "id": "flapping_late"
+    },
+    {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
     }
   ],
   "conditions": [
@@ -46,9 +57,59 @@
           "value_template": "{{ (state_attr('sensor.camera_flap_rate','push_undecryptable_rate') or 0)|float(0) >= 5.0 }}"
         }
       ]
+    },
+    {
+      "condition": "template",
+      "value_template": "{% if trigger.id == 'flapping_late' %}{% set f = trigger.from_state %}{% set t = trigger.to_state %}{% set new = ((t.attributes.get('flapping_late') if t else none) or []) %}{% set old = ((f.attributes.get('flapping_late') if f else none) or []) %}{{ f is not none and f.state not in ['unknown', 'unavailable'] and (new | reject('in', old) | list | count) > 0 }}{% else %}true{% endif %}"
     }
   ],
   "actions": [
+    {
+      "if": [
+        {
+          "condition": "trigger",
+          "id": "boot"
+        }
+      ],
+      "then": [
+        {
+          "variables": {
+            "latched": "{{ [('flapping', is_state('binary_sensor.cameras_flapping', 'on')), ('push_drops', (state_attr('sensor.camera_flap_rate','push_undecryptable_rate') or 0) | float(0) >= 5.0)] | selectattr('1') | map(attribute='0') | list }}"
+          }
+        },
+        {
+          "if": [
+            {
+              "condition": "template",
+              "value_template": "{{ latched | count == 0 }}"
+            }
+          ],
+          "then": [
+            {
+              "stop": "nothing present at the start"
+            }
+          ]
+        },
+        {
+          "wait_template": "{% set now_true = [('flapping', is_state('binary_sensor.cameras_flapping', 'on')), ('push_drops', (state_attr('sensor.camera_flap_rate','push_undecryptable_rate') or 0) | float(0) >= 5.0)] | selectattr('1') | map(attribute='0') | list %}{{ latched | select('in', now_true) | list | count == 0 }}",
+          "timeout": "{{ '00:30:00' if 'push_drops' in latched else '00:20:00' }}",
+          "continue_on_timeout": true
+        },
+        {
+          "if": [
+            {
+              "condition": "template",
+              "value_template": "{{ wait.completed }}"
+            }
+          ],
+          "then": [
+            {
+              "stop": "no fault from before the start outlasted its hold"
+            }
+          ]
+        }
+      ]
+    },
     {
       "data": {
         "notification_id": "camera_flap",
@@ -71,7 +132,7 @@
               "action": "notify.<your_mobile_app_target>",
               "data": {
                 "title": "📹 Camera stream churn",
-                "message": "{{ state_attr('sensor.camera_flap_rate','summary') }}{% if trigger.id == 'push_drops' %} - Ring motion may be getting lost: check that cameras still report motion.{% endif %}"
+                "message": "{% if trigger.id == 'flapping_late' %}{% set f = trigger.from_state %}{% set t = trigger.to_state %}Also flapping: {{ ((t.attributes.get('flapping_late') if t else none) or []) | reject('in', ((f.attributes.get('flapping_late') if f else none) or [])) | join(', ') }}. {% endif %}{{ state_attr('sensor.camera_flap_rate','summary') }}{% if trigger.id == 'push_drops' %} - Ring motion may be getting lost: check that cameras still report motion.{% endif %}{% if trigger.id == 'boot' %} (present since Home Assistant started){% endif %}"
               }
             }
           ]
@@ -79,5 +140,5 @@
       ]
     }
   ],
-  "mode": "single"
+  "mode": "parallel"
 }

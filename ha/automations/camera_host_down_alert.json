@@ -1,11 +1,17 @@
 {
   "alias": "Cameras - host was down (recorder gap)",
-  "description": "Reports an outage of the HOST after the fact. Every camera monitor is a process inside the thing it monitors, so a host-down event produces no alert of any kind while it is happening - the two monitor dead-men can only fire while HA is up, and every gate is >=5 min while a cold boot restores service in ~2 min. A 2026-08-26 mains cut took the whole fleet dark for 56.9 min and raised nothing at all. cam_motion.py now publishes host_gap_min: the largest hole spanning EVERY entity in the recorder over the last 24h, which is only explicable by the host being down. Fires once per outage (the value decays out of the 24h window on its own) and is dismiss-only on recovery. Added 2026-08-27. TRIGGER NOTE: numeric_state is deliberately NOT used here. It only fires from an ARMED state, and after a cold boot neither ordering arms it - if the automation attaches while the sensor is still 'unknown' the arming check raises and the entity is never armed, and if the sensor's first poll lands first the value is already above the threshold so it is never armed either. The automation would have been structurally incapable of reporting the very outage it was written for. A template trigger plus an unconditional half-hourly sweep, both gated on the same condition, fire regardless of boot ordering; recreating the same notification_id is idempotent. Pushes only on the gap trigger; the half-hourly sweep restores the card without re-notifying.",
+  "description": "Reports an outage of the HOST after the fact. Every camera monitor is a process inside the thing it monitors, so a host-down event produces no alert of any kind while it is happening - the two monitor dead-men can only fire while HA is up, and every gate is >=5 min while a cold boot restores service in ~2 min. A 2026-08-26 mains cut took the whole fleet dark for 56.9 min and raised nothing at all. cam_motion.py now publishes host_gap_min: the largest hole spanning EVERY entity in the recorder over the last 24h, which is only explicable by the host being down. Fires once per outage (the value decays out of the 24h window on its own) and is dismiss-only on recovery. Added 2026-08-27. TRIGGER NOTE: numeric_state is deliberately NOT used here. It only fires from an ARMED state, and after a cold boot neither ordering arms it - if the automation attaches while the sensor is still 'unknown' the arming check raises and the entity is never armed, and if the sensor's first poll lands first the value is already above the threshold so it is never armed either. The automation would have been structurally incapable of reporting the very outage it was written for. A template trigger plus an unconditional half-hourly sweep, both gated on the same condition, fire regardless of boot ordering; recreating the same notification_id is idempotent. Pushes only on the gap trigger; the half-hourly sweep restores the card without re-notifying. 2026-10-29: SECOND OUTAGE: the template trigger on host_gap_min > 15 stayed true while an earlier outage was inside the 24 h window, so a second outage never paged. cam_motion.py now publishes host_gap_last_end and host_gap_last_min (the most recent all-entity hole over 15 min; its length taken from the long gap scan when the hole straddles the 24 h edge) and host_gap_new_end, which is set only on the FIRST poll that sees a newer outage (the end last seen is kept in /config/.cam_motion_state.json, so an error poll, a reload or a restart cannot page it again; a run that outlasts command_timeout is not killed and its output is discarded, so a run past 50 s keeps the previous end and the next published poll carries the outage). The gap trigger pages when host_gap_new_end is set, whatever the previous reading was. The recorder writes nothing until Home Assistant has started, so the poll run while starting does not see the outage that preceded the start; the first poll after it does, about 30 min later. The boot trigger covers a restart made after that outage was recorded but before the next poll: it pages when the reading present at the start has host_gap_new_end set. The card and push name the latest outage's length; the half-hourly sweep keeps the card while host_gap_min > 15.",
   "triggers": [
     {
-      "platform": "template",
-      "value_template": "{{ (state_attr('sensor.camera_motion_stale','host_gap_min')|float(0)) > 15 }}",
+      "platform": "state",
+      "entity_id": "sensor.camera_motion_stale",
+      "attribute": "host_gap_new_end",
       "id": "gap"
+    },
+    {
+      "platform": "homeassistant",
+      "event": "start",
+      "id": "boot"
     },
     {
       "platform": "time_pattern",
@@ -16,7 +22,7 @@
   "conditions": [
     {
       "condition": "template",
-      "value_template": "{{ (state_attr('sensor.camera_motion_stale','host_gap_min')|float(0)) > 15 }}"
+      "value_template": "{% if trigger.id == 'gap' %}{{ trigger.to_state is not none and trigger.to_state.attributes.get('host_gap_new_end') is not none }}{% elif trigger.id == 'boot' %}{{ state_attr('sensor.camera_motion_stale','host_gap_new_end') is not none }}{% else %}{{ (state_attr('sensor.camera_motion_stale','host_gap_min')|float(0)) > 15 }}{% endif %}"
     }
   ],
   "actions": [
@@ -25,7 +31,7 @@
       "data": {
         "notification_id": "camera_host_down",
         "title": "⚠️ Camera host was down",
-        "message": "The Home Assistant host stopped recording for {{ state_attr('sensor.camera_motion_stale','host_gap_min') }} minutes within the last 24h - a gap spanning EVERY entity, which means the host itself was down, not any one integration. The camera fleet was unmonitored for that period and no camera alert could have fired during it (all nine cameras keep recording to the Ring cloud regardless). If this was not a planned reboot, check power to the host. {{ now().strftime('%b %-d %-I:%M %p') }}."
+        "message": "{% set lm = state_attr('sensor.camera_motion_stale','host_gap_last_min') %}{% set le = state_attr('sensor.camera_motion_stale','host_gap_last_end') %}The Home Assistant host stopped recording for {{ lm if lm is not none else state_attr('sensor.camera_motion_stale','host_gap_min') }} minutes{% if le is not none %} (back {{ le | timestamp_custom('%b %-d %-I:%M %p') }}){% endif %}{% if lm is not none and (state_attr('sensor.camera_motion_stale','host_gap_min') | float(0)) > lm | float(0) + 0.5 %}; the longest hole in the last 24h was {{ state_attr('sensor.camera_motion_stale','host_gap_min') }} minutes{% endif %} - a gap spanning EVERY entity, which means the host itself was down, not any one integration. The camera fleet was unmonitored for that period and no camera alert could have fired during it (all nine cameras keep recording to the Ring cloud regardless). If this was not a planned reboot, check power to the host. {{ now().strftime('%b %-d %-I:%M %p') }}."
       }
     },
     {
@@ -34,7 +40,7 @@
           "conditions": [
             {
               "condition": "template",
-              "value_template": "{{ trigger.id == 'gap' }}"
+              "value_template": "{{ trigger.id in ['gap', 'boot'] }}"
             }
           ],
           "sequence": [
@@ -42,7 +48,7 @@
               "action": "notify.<your_mobile_app_target>",
               "data": {
                 "title": "⚠️ Camera host was down",
-                "message": "HA stopped recording for {{ state_attr('sensor.camera_motion_stale','host_gap_min') }} min in the last 24h - the fleet was unmonitored. Cameras kept recording to the Ring cloud."
+                "message": "{% set lm = state_attr('sensor.camera_motion_stale','host_gap_last_min') %}{% set le = state_attr('sensor.camera_motion_stale','host_gap_last_end') %}HA stopped recording for {{ lm if lm is not none else state_attr('sensor.camera_motion_stale','host_gap_min') }} min{% if le is not none %} (back {{ le | timestamp_custom('%-I:%M %p') }}){% endif %} - the fleet was unmonitored. Cameras kept recording to the Ring cloud."
               }
             }
           ]

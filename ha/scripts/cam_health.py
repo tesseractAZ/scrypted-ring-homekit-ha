@@ -81,6 +81,40 @@ FLEET_MISS_MIN = 5      # majority of cams failing THIS cycle => fleet-level out
                         # reported immediately instead of waiting out DOWN_AFTER
 
 
+# A SECOND CAMERA'S FAULT. camera_health_alert pages a tier on the edge of its
+# fleet count (down_count > 0 held DOWN_HOLD_S; frozen_count or slow_count > 0
+# held DEGRADED_HOLD_S), so a camera that joins a tier while another camera is
+# already latched in it moved no edge and was never paged. Each camera's entry
+# time into a tier and each tier's episode start (the poll its camera list last
+# went from empty to non-empty) are kept in STATE, and <tier>_late lists the
+# cameras held in the tier for the hold that joined at least one hold after the
+# episode began, i.e. after the count edge's own page went out (a camera that
+# joined earlier is in that page's summary). The automation pages each camera
+# added to a _late list. The holds match the automation's `for:` holds.
+DOWN_HOLD_S = 480
+DEGRADED_HOLD_S = 1800
+
+
+def tier_late(st, key, members, now, hold):
+    """Update per-camera entry times and the episode start for one tier in
+    STATE; return the sorted late cameras (see A SECOND CAMERA'S FAULT)."""
+    tiers = st.setdefault("_tiers", {})
+    prev = tiers.get(key)
+    if not isinstance(prev, dict):
+        # No record (first run of this version, or lost state): an episode already
+        # running had its page before this poll, so its cameras count as old and
+        # only a camera joining from now on can be late.
+        prev = {"since": {c: 0.0 for c in members}, "ep": 0.0 if members else None}
+    since = prev.get("since") if isinstance(prev.get("since"), dict) else {}
+    since = {c: float(since[c]) if isinstance(since.get(c), (int, float)) else now
+             for c in members}
+    ep = prev.get("ep") if members else None
+    if members and not isinstance(ep, (int, float)):
+        ep = now
+    tiers[key] = dict(prev, since=since, ep=ep)
+    return sorted(c for c, t in since.items() if now - t >= hold and t >= ep + hold)
+
+
 def spool_write(path, data, mode):
     try:
         os.makedirs(SPOOL_DIR, mode=0o700, exist_ok=True)
@@ -159,6 +193,10 @@ def main():
                 pending += 1
                 detail[name] = f"miss({code or 'timeout'})"
 
+    t_run = time.time()
+    down_late = tier_late(st, "down", down, t_run, DOWN_HOLD_S)
+    degraded_late = tier_late(st, "degraded", frozen + slow, t_run, DEGRADED_HOLD_S)
+
     try:
         json.dump(st, open(STATE, "w"))
     except Exception:
@@ -196,6 +234,7 @@ def main():
     print(json.dumps({
         "healthy": healthy, "down_count": n_down, "frozen_count": n_frozen, "slow_count": n_slow,
         "down": down, "frozen": frozen, "slow": slow, "all_down": all_down,
+        "down_late": down_late, "degraded_late": degraded_late,
         "stale_count": stale_now, "all_stale": all_stale, "fleet_stale": fleet_stale,
         "miss_count": miss_now, "fleet_miss": fleet_miss, "pending": pending,
         "summary": summary, "detail": detail,
@@ -212,6 +251,7 @@ except Exception as e:
     # which is the reassuring direction from a script that has just failed.
     print(json.dumps({"healthy": -1, "down_count": 0, "frozen_count": 0, "slow_count": 0,
                       "down": [], "frozen": [], "slow": [], "all_down": False,
+                      "down_late": None, "degraded_late": None,
                       "stale_count": 0, "all_stale": False, "fleet_stale": False,
                       "miss_count": 0, "fleet_miss": False, "pending": 0,
                       "summary": f"probe script error: {e}", "detail": {},

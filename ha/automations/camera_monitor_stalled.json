@@ -1,6 +1,6 @@
 {
   "alias": "Cameras - a monitor has stopped updating",
-  "description": "Freshness dead-man for the five camera monitors. Every other dead-man here triggers only on unavailable/unknown/-1, and NONE of them looks at age - which left a whole failure class invisible. Home Assistant rewrites last_updated only when the state or an attribute CHANGES, and a healthy fleet emits a byte-identical payload for hours, so a monitor whose update loop has STOPPED sits pinned at \"9 / 0.0 / 9/9 OK\" indefinitely: no bad state, no recorder row, no page. Measured before the fix, sensor.camera_health had already gone 37 minutes without a row while perfectly healthy, and legitimate steady periods reach 1h56m (health) and 2h20m (flap) - which is why a naive age bar would false-fire, and why each script now publishes a bucketed `updated_at` so last_updated advances at least once per bucket (600 s; 3600 s for the archive) whenever the loop actually runs. Bars are per sensor because poll intervals differ 30x: 45 min for the three fast monitors, 90 min for the 30-minute motion monitor, 3 h for the hourly engine-log archive. Re-asserts hourly at :17 as a restart-wipe guard, and pushes on anything except that re-assert.",
+  "description": "Freshness dead-man for the five camera monitors. Every other dead-man here triggers only on unavailable/unknown/-1, and NONE of them looks at age - which left a whole failure class invisible. Home Assistant rewrites last_updated only when the state or an attribute CHANGES, and a healthy fleet emits a byte-identical payload for hours, so a monitor whose update loop has STOPPED sits pinned at \"9 / 0.0 / 9/9 OK\" indefinitely: no bad state, no recorder row, no page. Measured before the fix, sensor.camera_health had already gone 37 minutes without a row while perfectly healthy, and legitimate steady periods reach 1h56m (health) and 2h20m (flap) - which is why a naive age bar would false-fire, and why each script now publishes a bucketed `updated_at` so last_updated advances at least once per bucket (600 s; 3600 s for the archive) whenever the loop actually runs. Bars are per sensor because poll intervals differ 30x: 45 min for the three fast monitors, 90 min for the 30-minute motion monitor, 3 h for the hourly engine-log archive. Re-asserts hourly at :17 as a restart-wipe guard, and pushes on anything except that re-assert. 2026-10-29: Removed the boot trigger: its condition needs the binary on for 15 min, and a start resets last_changed, so it could never pass. Nothing is lost: every monitor's last_updated also resets at a start, so a stall cannot be latched when triggers attach, and the stalled trigger sees it form.",
   "triggers": [
     {
       "platform": "state",
@@ -10,11 +10,6 @@
         "minutes": 15
       },
       "id": "stalled"
-    },
-    {
-      "platform": "homeassistant",
-      "event": "start",
-      "id": "boot"
     },
     {
       "platform": "time_pattern",

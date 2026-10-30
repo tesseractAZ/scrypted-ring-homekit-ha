@@ -27,6 +27,11 @@ command_line:
         - summary
         - error
         - host_gap_min
+        - host_gap_last_end
+        - host_gap_last_min
+        - host_gap_new_end
+        - fleet_drop
+        - stale_added
         - applied_window
         - visual_localized_hours
         - visual_localized_count
@@ -103,3 +108,37 @@ template:
             {%- else %}{{ pd.get('error')
                  or 'partial_loss attribute missing (json_attributes allowlist, or the script is the old version)' }}
             {%- endif %}
+
+  # FLEET MOTION DROP (cam_motion.py fleet_drop.active, latched there until a
+  # newer onset). TRIGGER-BASED on purpose: it updates only on a valid reading
+  # (state known, no error, a fleet_drop mapping without an error) and otherwise
+  # keeps its state, and a trigger-based entity restores its last state across a
+  # template reload or a restart. A failed poll, a reload or a restart therefore
+  # cannot make an off->on edge (a second page for the same drop) or an on->off
+  # edge (a false all-clear). A state-based `this.state` hold does not survive a
+  # template reload (the removed entity is written 'unavailable' first).
+  # camera_motion_fleet_drop_alert pages its off->on edge only: a drop that is
+  # still latched across a restart was paged when it was raised, and the start
+  # restores just its card.
+  - triggers:
+      - trigger: state
+        entity_id: sensor.camera_motion_stale
+      # The poll run while Home Assistant starts lands before this block's
+      # triggers attach (they attach at EVENT_HOMEASSISTANT_START), so without a
+      # start trigger the binary would keep its restored state for a whole poll
+      # interval: a drop that cleared before the restart would read as present.
+      - trigger: homeassistant
+        event: start
+    conditions:
+      - condition: template
+        value_template: >-
+          {% set fd = state_attr('sensor.camera_motion_stale','fleet_drop') %}
+          {{ states('sensor.camera_motion_stale') not in ['unknown','unavailable']
+             and state_attr('sensor.camera_motion_stale','error') is none
+             and fd is mapping and fd.get('error') is none
+             and fd.get('active') is not none }}
+    binary_sensor:
+      - name: Camera motion fleet drop
+        unique_id: camera_motion_fleet_drop
+        device_class: problem
+        state: "{{ (state_attr('sensor.camera_motion_stale','fleet_drop') or {}).get('active') == true }}"

@@ -36,6 +36,7 @@ spike changes counted once ("merged"), and - until the next IR frame after a
 luma spike - the frame from before it).
 """
 import base64
+import copy
 import hashlib
 import io
 import json
@@ -44,6 +45,7 @@ import os
 import sys
 import time
 import urllib.request
+from time import monotonic as _monotonic
 from concurrent.futures import ThreadPoolExecutor
 
 # A command_line sensor's stderr is written into the HA core log; at this
@@ -370,11 +372,81 @@ PROBE_BLIND_MIN = 15.0   # a camera not successfully probed in this long is
 BODY_RING_N = 8
 
 
+# A SECOND BLIND CAMERA. camera_vision_monitor_down pages on
+# binary_sensor.camera_vision_monitor_problem turning on (held BLIND_HOLD_S), and
+# that binary is on for ANY blind camera or a script error, so a camera that goes
+# blind while the binary is already on moved no edge and was never paged. STATE
+# keeps each blind camera's first blind poll and the episode start (the poll the
+# blind list last went from empty to non-empty, or an error run that found none
+# running); blind_late lists the cameras blind for the hold that went blind at
+# least one hold after the episode began, i.e. after the binary's own page.
+BLIND_HOLD_S = 1800
+# A run whose output Home Assistant never published (a command timeout, see
+# below) also keeps the binary on - it is on for unknown/unavailable. When the
+# previous published run is older than BLIND_DARK_S while runs were still being
+# made, the episode is taken to have begun one poll after it, so a camera found
+# blind after a long dark spell is late rather than silently part of a page that
+# could not name it. A non-zero exit or a hung run writes nothing and is not
+# covered here: the dead page alone reports it.
+BLIND_DARK_S = 360
+# A timed-out run is NOT killed (Home Assistant 2026.10 kills a command_line
+# command only when it has stdin): it runs on and its output is thrown away. A
+# run still going at DISCARD_AFTER_S (command_timeout is 60 s) when it writes its
+# state leaves the blind tier and last_ok as the previous run left them, stamps
+# only last_run - and only when the previous run was itself recent, an unbroken
+# chain of runs - and exits WITHOUT output, so the first published run after a
+# slow spell still sees how long the monitor was dark. The dark rule applies only
+# while runs were still being made (last_run recent): after a host outage
+# nothing ran, and the start-up check pages what is blind.
+DISCARD_AFTER_S = 55.0
+_T0 = _monotonic()   # a module-level alias: tests replace the `time` module
+
+
+def tier_late(st, key, members, now, hold):
+    """Update per-camera entry times and the episode start for one tier in st;
+    return the sorted late cameras (see A SECOND BLIND CAMERA)."""
+    tiers = st.setdefault("_tiers", {})
+    prev = tiers.get(key)
+    if not isinstance(prev, dict):
+        # No record (first run of this version, or lost state): an episode already
+        # running had its page before this poll, so its cameras count as old and
+        # only a camera joining from now on can be late.
+        prev = {"since": {c: 0.0 for c in members}, "ep": 0.0 if members else None}
+    since = prev.get("since") if isinstance(prev.get("since"), dict) else {}
+    since = {c: float(since[c]) if isinstance(since.get(c), (int, float)) else now
+             for c in members}
+    ep = prev.get("ep") if members else None
+    if members and not isinstance(ep, (int, float)):
+        ep = now
+    tiers[key] = dict(prev, since=since, ep=ep)
+    return sorted(c for c, t in since.items() if now - t >= hold and t >= ep + hold)
+
+
+def mark_error_episode():
+    """An error run is part of the problem episode the automation sees: start the
+    blind episode if none is running. Best effort - a failed write costs at most
+    one late page."""
+    try:
+        with open(STATE) as fh:
+            st = json.load(fh)
+        tiers = st.setdefault("_tiers", {})
+        b = tiers.get("blind") if isinstance(tiers.get("blind"), dict) else {}
+        if isinstance(b.get("ep"), (int, float)):
+            return
+        tiers["blind"] = dict(b, ep=time.time())
+        tmp = "%s.tmp.%d" % (STATE, os.getpid())
+        with open(tmp, "w") as fh:
+            json.dump(st, fh)
+        os.replace(tmp, STATE)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def emit(payload):
     base = {
         "hours_since_visual": None, "changes_24h": None, "ir_mode": None,
         "max_norm_diff": None, "active_count": None,
-        "probe_age_min": None, "blind": None, "blind_count": None,
+        "probe_age_min": None, "blind": None, "blind_count": None, "blind_late": None,
         "summary": "", "error": None, "updated_at": None,
     }
     base.update(payload)
@@ -383,6 +455,7 @@ def emit(payload):
 
 
 def fail(msg):
+    mark_error_episode()
     emit({"summary": "error: " + msg, "error": msg})
 
 
@@ -855,6 +928,29 @@ def main():
         changes[name] = len([t for t in log if now - t < 24 * 3600])
         irs[name] = entry.get("ir")
 
+    probe_age_min = {}
+    for name in [c[0] for c in CAMS]:
+        pts = st.get(name, {}).get("probe_ts")
+        probe_age_min[name] = round((now - float(pts)) / 60.0, 1) if pts else None
+    blind = sorted(n for n, v in probe_age_min.items()
+                   if v is None or v > PROBE_BLIND_MIN)
+    bt = (st.get("_tiers") or {}).get("blind") if isinstance(st.get("_tiers"), dict) else None
+    prev_bt = copy.deepcopy(bt) if isinstance(bt, dict) else None
+    if (blind and isinstance(bt, dict) and not isinstance(bt.get("ep"), (int, float))
+            and isinstance(bt.get("last_ok"), (int, float)) and now - bt["last_ok"] > BLIND_DARK_S
+            and isinstance(bt.get("last_run"), (int, float)) and now - bt["last_run"] <= BLIND_DARK_S):
+        bt["ep"] = float(bt["last_ok"]) + 120.0
+    blind_late = tier_late(st, "blind", blind, now, BLIND_HOLD_S)
+    discard = _monotonic() - _T0 > DISCARD_AFTER_S
+    if discard and prev_bt is not None:
+        prev_run = prev_bt.get("last_run")
+        st["_tiers"]["blind"] = prev_bt            # nobody will see this run
+        if isinstance(prev_run, (int, float)) and now - prev_run <= BLIND_DARK_S:
+            st["_tiers"]["blind"]["last_run"] = now
+    elif not discard:
+        st["_tiers"]["blind"]["last_ok"] = now
+        st["_tiers"]["blind"]["last_run"] = now
+
     tmp = "%s.tmp.%d" % (STATE, os.getpid())
     try:
         with open(tmp, "w") as fh:
@@ -865,6 +961,8 @@ def main():
             os.remove(tmp)
         except Exception:  # noqa: BLE001
             pass
+    if discard:
+        os._exit(3)
 
     cached = sorted(
         n for n in [c[0] for c in CAMS]
@@ -881,12 +979,6 @@ def main():
         # frame differencing catches only a few percent of real activity
         # (cam_motion.py measures this per camera as vision recall).
         summary += "; no visual change detected: " + ",".join(quiet)
-    probe_age_min = {}
-    for name in [c[0] for c in CAMS]:
-        pts = st.get(name, {}).get("probe_ts")
-        probe_age_min[name] = round((now - float(pts)) / 60.0, 1) if pts else None
-    blind = sorted(n for n, v in probe_age_min.items()
-                   if v is None or v > PROBE_BLIND_MIN)
     if blind:
         summary += "; NOT SEEN >%.0fm: %s" % (PROBE_BLIND_MIN, ",".join(blind))
     cached = [n for n in cached if n not in blind]
@@ -915,6 +1007,7 @@ def main():
         "hours_since_visual": hours, "changes_24h": changes, "ir_mode": irs,
         "max_norm_diff": maxdiff, "active_count": active,
         "probe_age_min": probe_age_min, "blind": blind, "blind_count": len(blind),
+        "blind_late": blind_late,
         "summary": summary,
         "updated_at": int(time.time() // HEARTBEAT_BUCKET_S) * HEARTBEAT_BUCKET_S,
     })

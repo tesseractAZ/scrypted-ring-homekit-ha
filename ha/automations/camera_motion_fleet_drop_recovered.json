@@ -1,0 +1,38 @@
+{
+  "id": "camera_motion_fleet_drop_recovered",
+  "alias": "Cameras - fleet-wide motion drop recovered",
+  "description": "Dismisses the fleet motion drop card when binary_sensor.camera_motion_fleet_drop turns off (cam_motion.py clears its latch only when a newer motion onset arrives), and at the :13 sweep while it is off. The binary is trigger-based and changes only on a valid reading, so neither a failed poll nor a reload dismisses the card mid-outage.",
+  "triggers": [
+    {
+      "platform": "state",
+      "entity_id": "binary_sensor.camera_motion_fleet_drop",
+      "to": "off",
+      "not_from": [
+        "unavailable",
+        "unknown"
+      ],
+      "id": "clear"
+    },
+    {
+      "platform": "time_pattern",
+      "minutes": "13",
+      "id": "sweep"
+    }
+  ],
+  "conditions": [
+    {
+      "condition": "state",
+      "entity_id": "binary_sensor.camera_motion_fleet_drop",
+      "state": "off"
+    }
+  ],
+  "actions": [
+    {
+      "action": "persistent_notification.dismiss",
+      "data": {
+        "notification_id": "camera_motion_fleet_drop"
+      }
+    }
+  ],
+  "mode": "single"
+}

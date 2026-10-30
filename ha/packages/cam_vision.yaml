@@ -22,6 +22,7 @@ command_line:
         - probe_age_min
         - blind
         - blind_count
+        - blind_late
         - summary
         - error
         - updated_at

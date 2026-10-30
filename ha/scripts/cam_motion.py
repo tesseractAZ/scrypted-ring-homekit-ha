@@ -21,6 +21,8 @@ import sqlite3
 import sys
 import time
 
+_T0 = time.monotonic()   # process start: see DISCARDED RUN
+
 # PARTIAL LOSS (partial_loss.py beside this script). Imported defensively: a
 # missing or broken module costs only the partial_* attributes - published as
 # partial_loss=None and partial_detail={"error": ...}, never as an empty list
@@ -158,6 +160,55 @@ HEARTBEAT_BUCKET_S = 600
 # visible once the host returns. (A 2026-08-26 mains cut took the whole fleet
 # dark for 56.9 min and raised nothing.) Measured cost ~0.1 s.
 HOST_GAP_LOOKBACK_H = 24.0
+# A host-down page needs each gap's IDENTITY, not only the largest size: while an
+# earlier outage is still inside the 24 h window host_gap_min stays above the bar,
+# so a second outage changed nothing an alert could see. host_gap_last_end and
+# host_gap_last_min name the most recent all-entity hole longer than this.
+HOST_GAP_ALERT_S = 900.0
+# FLEET MOTION DROP. A fault that silences EVERY camera at once (the Ring
+# plugin's push receiver failing to decrypt, an MQTT or engine wedge) was paged
+# only by the 9 h fleet-silence check, or by the cause's own detector when one
+# exists. This compares the last FLEET_DROP_WINDOW_S of fleet motion with the
+# same clock window on each of the previous FLEET_DROP_BASE_DAYS days. The window
+# is ARMED when at least FLEET_DROP_NEED_DAYS of those days logged
+# FLEET_DROP_MIN_COUNT onsets or more, and a drop is a window with no onset at
+# all, armed, both at this poll and FLEET_DROP_CONFIRM_S earlier (two polls; both
+# are recomputed from recorder rows, so a restart, reload or extra poll cannot
+# stitch or split them). Once raised, the drop is LATCHED in MOTION_STATE until
+# a newer onset arrives: the window disarms at quieter hours (10:30-12:00 and
+# 22:30-06:30 on this fleet), and an unlatched verdict would read as an
+# all-clear in the middle of an outage and page it again when it re-armed.
+# Replayed every 30 min over 2026-10-04..10-29: the 10-28 decrypt outage pages
+# 2.1 h after its last onset (2.0-2.5 h across poll phases), when the 9 h check
+# never fired (the silence lasted 3.8 h); the 10-16 one (no onset from 10-15
+# 21:25 to 10-16 15:40 local, 18.2 h) pages at 07:30, after the push-decrypt
+# tier (06:35) and the 9 h check (07:11) had both paged it; one false page
+# (10-11 07:30, an ordinary quiet morning); armed 40-43% of the time. RECORDER
+# HOLES: more than HOST_GAP_ALERT_S of hole inside the window gives no verdict
+# (camera_host_down_alert pages a single hole that long); a baseline day with
+# any hole is not counted as busy, which can only disarm. The recorder writes
+# nothing until Home Assistant has STARTED, so the poll run while starting
+# sees the outage just ended as an OPEN hole - no row after it yet - and
+# main() adds [newest row, now] as a hole when the newest row is older than
+# PARTIAL_GAP_MIN_S; without that the poll read a host outage as fleet silence.
+# A RECORDER STALL (the recorder stops committing while Home Assistant runs)
+# looks the same from the database. Polls keep running through a stall, so the
+# open hole is netted out of silence_net_h only when no poll ran inside it
+# (MOTION_STATE polled_at): through a stall the 9 h fleet-silence check still
+# pages on the gross silence, as it is the one alert that sees a dead recorder.
+# DISCARDED RUN. Home Assistant 2026.10's command_line does not kill a command
+# that passes command_timeout (60 s here): it publishes 'unknown' and the script
+# runs on, its output thrown away. A run still going at DISCARD_AFTER_S when it
+# writes its state keeps the previous host_gap_seen_end and last_stale and exits
+# WITHOUT output, so "kept the old identity" and "nobody saw this run" are the
+# same set of runs and the first published poll carries the new outage or newly
+# stale camera. A normal run takes about 0.3 s on the reference host.
+DISCARD_AFTER_S = 55.0
+FLEET_DROP_WINDOW_S = 5400.0
+FLEET_DROP_BASE_DAYS = 14
+FLEET_DROP_NEED_DAYS = 12
+FLEET_DROP_MIN_COUNT = 7
+FLEET_DROP_CONFIRM_S = 1800.0
 # PARTIAL LOSS - see partial_loss.py. The detector reuses this file's co-firing
 # constants (partial_shared()) rather than restating them.
 #
@@ -673,6 +724,82 @@ def partial_shared():
             "wilson": _wilson_lower}
 
 
+def _overlap(holes, a, b):
+    """Seconds of [a, b] covered by the recorder holes (merged first)."""
+    tot, end = 0.0, a
+    for s, e in sorted((max(float(s), a), min(float(e), b)) for s, e in holes):
+        if e <= s:
+            continue
+        s = max(s, end)
+        if e > s:
+            tot += e - s
+            end = e
+    return tot
+
+
+def fleet_drop_eval(onsets, now, holes, data_from, latch=None, net_holes=None):
+    """The FLEET MOTION DROP verdict. onsets: sorted motion-on timestamps of every
+    camera; holes: [[start, end]] recorder gaps, an open one included; data_from:
+    the start of the span `onsets` was fetched for; latch: the previous poll's
+    MOTION_STATE["fleet_drop_latch"]; net_holes: the holes netted out of
+    silence_net_h when that differs from `holes`. Returns (published dict, new latch).
+    silence_net_h is the time since the fleet's last onset minus recorder holes
+    inside it (the fleet-silence page reads it, so a host outage is not
+    reported as nine silent cameras)."""
+    w = FLEET_DROP_WINDOW_S
+
+    def count(a, b):
+        return bisect.bisect_right(onsets, b) - bisect.bisect_right(onsets, a)
+
+    def holed(a, b):
+        return any(float(s) < b and a < float(e) for s, e in holes)
+
+    def check(t):
+        base = []
+        for k in range(1, FLEET_DROP_BASE_DAYS + 1):
+            a, b = t - k * 86400.0 - w, t - k * 86400.0
+            base.append(None if holed(a, b) else count(a, b))
+        busy = sum(1 for c in base if c is not None and c >= FLEET_DROP_MIN_COUNT)
+        return count(t - w, t), base, busy
+
+    i = bisect.bisect_right(onsets, now)
+    last_onset = onsets[i - 1] if i else None
+    held = None
+    if isinstance(latch, dict) and last_onset is not None:
+        try:
+            if int(latch["last_onset"]) == int(last_onset):
+                held = float(latch["since"])
+        except Exception:  # noqa: BLE001 - a malformed latch is no latch
+            held = None
+    out = {"window_h": round(w / 3600.0, 2), "confirm_min": round(FLEET_DROP_CONFIRM_S / 60.0),
+           "rule": "0 onsets; busy = %d of %d days with >= %d" % (
+               FLEET_DROP_NEED_DAYS, FLEET_DROP_BASE_DAYS, FLEET_DROP_MIN_COUNT),
+           "count": None, "baseline": None, "busy_days": None, "armed": False,
+           "active": False, "since": None, "reason": None,
+           "last_onset": int(last_onset) if last_onset is not None else None,
+           "silence_net_h": None}
+    if last_onset is not None:
+        out["silence_net_h"] = round(
+            (now - last_onset - _overlap(holes if net_holes is None else net_holes,
+                                         last_onset, now)) / 3600.0, 2)
+    raw = False
+    if data_from > now - FLEET_DROP_CONFIRM_S - FLEET_DROP_BASE_DAYS * 86400.0 - w:
+        out["reason"] = "history shorter than %d days" % FLEET_DROP_BASE_DAYS
+    elif _overlap(holes, now - FLEET_DROP_CONFIRM_S - w, now) > HOST_GAP_ALERT_S:
+        out["reason"] = "recorder hole in the window"
+    else:
+        n, base, busy = check(now)
+        n0, _, busy0 = check(now - FLEET_DROP_CONFIRM_S)
+        armed = busy >= FLEET_DROP_NEED_DAYS
+        raw = armed and busy0 >= FLEET_DROP_NEED_DAYS and n == 0 and n0 == 0
+        out.update(count=n, baseline=base, busy_days=busy, armed=armed)
+    if raw or held is not None:
+        out.update(active=True, since=int(held if held is not None else now))
+        return out, {"last_onset": int(last_onset) if last_onset is not None else None,
+                     "since": held if held is not None else now}
+    return out, None
+
+
 def scan_host_gaps(conn, cache, now, horizon):
     """All-entity recorder holes > PARTIAL_GAP_MIN_S since `horizon`.
 
@@ -962,6 +1089,11 @@ def emit(payload):
         "partial_loss": None,
         "partial_detail": None,
         "host_gap_min": None,
+        "host_gap_last_end": None,
+        "host_gap_last_min": None,
+        "host_gap_new_end": None,
+        "fleet_drop": None,
+        "stale_added": None,
         "visual_hours": None,
         "visual_localized_hours": None,
         "visual_localized_count": None,
@@ -1003,10 +1135,14 @@ def main():
     # first row inside the window has no LAG partner, so an outage still running
     # at the boundary - and every outage longer than the lookback - reported
     # nothing at all, which is the exact blindness this field exists to remove.
+    # The same scan also lists every hole over PARTIAL_GAP_MIN_S as "start:end"
+    # (GROUP_CONCAT skips the NULLs), for the host-down identity and the fleet
+    # motion drop.
     gap_sql = (
-        "SELECT MAX(gap) FROM (SELECT last_updated_ts - "
+        "SELECT MAX(ts - prev), GROUP_CONCAT(CASE WHEN ts - prev > ? "
+        "THEN prev || ':' || ts END) FROM (SELECT last_updated_ts AS ts, "
         "COALESCE(LAG(last_updated_ts) OVER (ORDER BY last_updated_ts), ?) "
-        "AS gap FROM states WHERE last_updated_ts > ?)"
+        "AS prev FROM states WHERE last_updated_ts > ?)"
     )
     # Every motion ON row over the corroboration window, for the co-firing test.
     ev_sql = (
@@ -1016,6 +1152,8 @@ def main():
         "ORDER BY s.last_updated_ts" % placeholders
     )
     host_gap_min = None
+    gaps24 = []
+    newest_row = None
     motion_events = []
     motion_events_all = []   # the partial-loss lookback (~62 d, longer than 30 d)
     try:
@@ -1043,9 +1181,12 @@ def main():
             ]
             motion_events = [x for x in motion_events_all if x[0] > ev_cut]
             cutoff = time.time() - HOST_GAP_LOOKBACK_H * 3600
-            g = conn.execute(gap_sql, (cutoff, cutoff)).fetchone()
+            g = conn.execute(gap_sql, (PARTIAL_GAP_MIN_S, cutoff, cutoff)).fetchone()
             if g and g[0] is not None:
                 host_gap_min = round(float(g[0]) / 60.0, 1)
+            if g and g[1]:
+                gaps24 = sorted([float(x) for x in p.split(":")] for p in g[1].split(","))
+            newest_row = conn.execute("SELECT MAX(last_updated_ts) FROM states").fetchone()[0]
             if _pl is not None:
                 try:  # an annotation's input: a failure is published, never fatal
                     gap_cache = scan_host_gaps(conn, gap_cache, time.time(),
@@ -1080,6 +1221,49 @@ def main():
 
     now = time.time()
     last = {entities[e]: ts for e, ts in rows if ts}
+    alert_gaps = [p for p in gaps24 if p[1] - p[0] > HOST_GAP_ALERT_S]
+    host_gap_last_end = int(alert_gaps[-1][1]) if alert_gaps else None
+    host_gap_last_min = None
+    if alert_gaps:
+        start = alert_gaps[-1][0]
+        # gap_sql truncates a hole that straddles its 24 h edge; the long scan's
+        # cache holds the true start of the same hole
+        for a, b in ((gap_cache or {}).get("gaps") or []) if isinstance(gap_cache, dict) else []:
+            try:
+                if abs(float(b) - alert_gaps[-1][1]) < 2.0:
+                    start = min(start, float(a))
+            except Exception:  # noqa: BLE001
+                continue
+        host_gap_last_min = round((alert_gaps[-1][1] - start) / 60.0, 1)
+    # HOST-DOWN IDENTITY. host_gap_new_end is set only on the first poll that sees
+    # a newer outage, so a reload, an error poll or a restart cannot page an
+    # outage again; the end last seen is kept in MOTION_STATE. A first run of
+    # this version adopts the current value without publishing it.
+    if "host_gap_seen_end" in prev_state:
+        seen_end = prev_state.get("host_gap_seen_end")
+        newer = host_gap_last_end is not None and (
+            not isinstance(seen_end, (int, float)) or host_gap_last_end > seen_end)
+        host_gap_new_end = host_gap_last_end if newer else None
+        if newer:
+            seen_end = host_gap_last_end
+    else:
+        seen_end, host_gap_new_end = host_gap_last_end, None
+    try:   # an annotation: a failure is published, never fatal
+        holes = list(gaps24)
+        if isinstance(gap_cache, dict):
+            holes += [list(map(float, p)) for p in gap_cache.get("gaps") or []]
+        net_holes = list(holes)
+        if newest_row is not None and now - float(newest_row) > PARTIAL_GAP_MIN_S:
+            holes.append([float(newest_row), now])      # the open hole (see FLEET MOTION DROP)
+            polled_at = prev_state.get("polled_at")
+            if not isinstance(polled_at, (int, float)) or polled_at <= float(newest_row) + PARTIAL_GAP_MIN_S:
+                net_holes.append([float(newest_row), now])   # no poll inside it: Core was down
+        fleet_drop, fleet_latch = fleet_drop_eval(
+            sorted(t for t, _ in motion_events_all), now, holes,
+            pl_cut if motion_events_all else now, prev_state.get("fleet_drop_latch"), net_holes)
+    except Exception as exc:  # noqa: BLE001
+        fleet_drop = {"active": None, "armed": False, "error": "fleet drop failed: %s" % exc}
+        fleet_latch = prev_state.get("fleet_drop_latch")
     # A camera the recorder has NEVER seen 'on' is reported as None, not 0h.
     hours = {}
     for cam in CAMS:
@@ -1098,6 +1282,12 @@ def main():
         if (hours[c] is None
             or hours[c] > STALE_HOURS_OVERRIDES.get(c, STALE_HOURS))
     ) if fleet_active else []
+    # Cameras stale now that were not at the previous poll that wrote the state
+    # file. camera_motion_dead_alert's start-up push reads it: a camera that
+    # turns stale at the poll Home Assistant runs while starting is set before
+    # any trigger attaches, so no change of `stale` can ever page it.
+    prev_stale = prev_state.get("last_stale")
+    stale_added = sorted(set(stale) - set(prev_stale)) if isinstance(prev_stale, list) else None
 
     # Discriminator: cam_vision.py's frame-differencing log tells us whether a
     # motion-event-stale camera's SCENE has actually been changing. Verdicts are
@@ -1484,22 +1674,30 @@ def main():
         background = None
     # Written atomically: cam_flap.py reads this file too, and a torn write would
     # read as "no background" (safe) but also cost the proof latches (not safe).
+    identity = {"last_stale": stale, "host_gap_seen_end": seen_end}
+    discard = time.monotonic() - _T0 > DISCARD_AFTER_S   # see DISCARDED RUN
+    if discard:
+        identity = {k: prev_state[k] for k in identity if k in prev_state}
     tmp = "%s.tmp.%d" % (MOTION_STATE, os.getpid())
     try:
         with open(tmp, "w") as fh:
-            json.dump({"proofs": new_latches, "background": background,
+            json.dump(dict({"proofs": new_latches, "background": background,
                        "vision_recall": recall_state,
                        "vision_usable_since": usable_since,
                        "partial": partial_state,
                        "partial_cleared": partial_cleared,
                        "host_gaps": gap_cache if isinstance(gap_cache, dict) else None,
-                       "witness_log": witness_log}, fh)
+                       "witness_log": witness_log,
+                       "fleet_drop_latch": fleet_latch,
+                       "polled_at": now}, **identity), fh)
         os.replace(tmp, MOTION_STATE)
     except Exception:  # noqa: BLE001 - losing the latch must not fail the sensor
         try:
             os.remove(tmp)
         except Exception:  # noqa: BLE001
             pass
+    if discard:
+        os._exit(3)
 
     door_evidence, door_failing = door_evidence_for(stale, now)
 
@@ -1521,7 +1719,10 @@ def main():
     proven = sorted(c for c, v in corroboration.items() if v.get("broken"))
     if proven:
         summary = "EVENT PATH BROKEN: %s | %s" % (", ".join(proven), summary)
-    if host_gap_min and host_gap_min > 15.0:
+    if fleet_drop.get("active"):
+        summary = ("FLEET MOTION DROP: no onset from any camera in %.1fh | " % (
+            fleet_drop.get("silence_net_h") or 0.0)) + summary
+    if host_gap_min and host_gap_min > HOST_GAP_ALERT_S / 60.0:
         summary = ("HOST WAS DOWN %.0f min in the last %.0fh | " %
                    (host_gap_min, HOST_GAP_LOOKBACK_H)) + summary
 
@@ -1536,6 +1737,11 @@ def main():
         "hours_since": hours,
         "fleet_active": fleet_active,
         "host_gap_min": host_gap_min,
+        "host_gap_last_end": host_gap_last_end,
+        "host_gap_last_min": host_gap_last_min,
+        "host_gap_new_end": host_gap_new_end,
+        "fleet_drop": fleet_drop,
+        "stale_added": stale_added,
         "visual_hours": visual_hours,
         "visual_localized_hours": localized_hours,
         "visual_localized_count": localized_count,
