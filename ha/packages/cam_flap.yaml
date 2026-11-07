@@ -17,6 +17,7 @@ command_line:
       value_template: "{{ value_json.worst_rate }}"
       json_attributes:
         - span_min
+        - window_min
         - rates
         - counts
         - recording_errors

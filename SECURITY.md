@@ -20,7 +20,7 @@ This is a reference repository maintained on a best-effort basis, with no respon
 | `README.md`, `docs/` | - | documentation |
 | `.github/` | GitHub Actions | CI only |
 
-The repository ships **no add-on, no container image, no Scrypted plugin and no AppArmor profile**. Scrypted runs as a third-party Home Assistant add-on whose code, configuration and confinement belong to its maintainers; the documentation configures it through Scrypted's own UI, and the scripts read its log. The one exception is a documented local patch to the Ring plugin's bundled push receiver ([Operations §3](docs/operations.md#3-motion--doorbell-press--home-assistant-mqtt)). It needs access to the Scrypted volume, so keep the original file, and a plugin update replaces the patched copy.
+The repository ships **no add-on, no container image, no Scrypted plugin and no AppArmor profile**. Scrypted runs as a third-party Home Assistant add-on whose code, configuration and confinement belong to its maintainers; the documentation configures it through Scrypted's own UI, and the scripts read its log.
 
 The scripts use the Python standard library, plus Pillow from the Core container in `cam_vision.py`. None of them opens a listening socket, spawns a shell or a subprocess, or deserialises anything but JSON (no `pickle`, `yaml.load` or `eval`). Every network call is plain HTTP to one of two local endpoints: the Supervisor (`http://supervisor`) and the host's own Scrypted HTTP port (`http://<HA_HOST_IP>:11080`). Files are written under `/config` (each monitor's own dotfile state and the engine-log archive directory) and under `/dev/shm/cam_snap/` in the Core container's tmpfs, a directory created with mode `0700` where `cam_health.py` leaves the latest good snapshot of each camera and a cycle marker for `cam_vision.py`.
 
@@ -62,7 +62,7 @@ It is **not redacted**. It holds Ring session JWTs, webhook tokens and request U
 
 ### Other monitor state
 
-`/config/.cam_health_state.json` (frame hashes), `/config/.cam_vision_state.json` (per-camera 48 x 30 grayscale baseline frames, base64, and change times), `/config/.cam_motion_state.json` (motion statistics, verdict latches and recorder-gap history) and `/config/.cam_flap_door_state.json` (door-trip verdicts with times) are ordinary `/config` files and are included in Home Assistant backups.
+`/config/.cam_health_state.json` (frame hashes), `/config/.cam_vision_state.json` (per-camera 48 x 30 grayscale baseline frames, base64, and change times), `/config/.cam_motion_state.json` (motion statistics, verdict latches and recorder-gap history), `/config/.cam_flap_door_state.json` (door-trip verdicts with times), `/config/.cam_flap_rec_state.json` (recording-error times per camera, 6 h) and `/config/.cam_flap_flapping_state.json` (when each camera started flapping) are ordinary `/config` files and are included in Home Assistant backups.
 
 `/dev/shm/cam_snap/` in the Home Assistant Core container holds the latest good snapshot of every camera (`<cam>.jpg`) and a `CYCLE` marker. It is tmpfs (memory), outside `/config`, not in any backup, and emptied when Home Assistant restarts. Until then it is the current picture of every view, readable by anything with root access to the Core container.
 

@@ -423,7 +423,9 @@ shows up here first.
   (dead-man's switch for the monitor itself; a snapshot-watchdog death does
   not trip it - the window is measured from log timestamps, and `cam_vision.py`
   requests the snapshots itself once `cam_health.py`'s shared frames go stale -
-  and `camera_health_monitor_down` covers that). Also carries a tripwire on UNDECRYPTABLE cloud push
+  and `camera_health_monitor_down` covers that). The rate runs over a fixed 6 h (`window_min`), held in
+  `/config/.cam_flap_rec_state.json`, because the 60,000-line slice (`span_min`) shrinks to about 85 min at
+  the evening peak. The rate falls off over up to 6 h after a burst. Also carries a tripwire on UNDECRYPTABLE cloud push
   messages (`push_undecryptable`). The push receiver either drops a message it
   cannot decrypt and logs one line (`Message dropped as it could not be
   decrypted: <reason>`, e.g. a missing crypto-key) or rethrows the error as a
@@ -438,14 +440,16 @@ shows up here first.
   never becomes a detection, so they could not see it. On 2026-10-28 the fleet
   went silent for 3.8 h (no motion onset from 16:21 to 20:11 local, against 38–89
   in that window on each of the nine previous evenings) while the rate rose to
-  16/h; motion returned about 2 min after the patched plugin relaunched. The `ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY` failures are a known
+  16/h; motion returned about 2 min after a locally patched plugin relaunched. The `ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY` failures were a
   push-receiver defect: FCM now sends the crypto-key header as
-  `dh=KEY; p256ecdsa=SIG`, and the receiver strips `dh=` with `slice(3)`, which
-  leaves the suffix on the key. It is fixed in `@eneris/push-receiver` 4.3.1, but
-  no released `ring-client-api` or Scrypted Ring plugin carries the fix (upstream
-  issue [dgreif/ring#1709](https://github.com/dgreif/ring/issues/1709)), so the
-  plugin needs the local patch in `docs/operations.md` §3; re-authenticating does
-  not help. The tripwire pages, and its push says motion may be getting lost. The
+  `dh=KEY; p256ecdsa=SIG`, and the receiver stripped `dh=` with `slice(3)`, which
+  left the suffix on the key (upstream issue
+  [dgreif/ring#1709](https://github.com/dgreif/ring/issues/1709)). Ring plugin
+  0.0.147 parses the header; re-authenticating does not help. Since that plugin a
+  dropped message is logged at debug and leaves no line in the engine log, so the
+  tripwire counts rethrown failures only and a rate of 0 does not clear the push
+  path (`docs/operations.md` §3). The tripwire stays on the log slice, where it
+  reacts faster than it would over 6 h. It pages, and its push says motion may be getting lost. The
   rate is also confounded by push volume, which tracks motion, so normalise
   before calling a trend. `camera_flap_recovered` dismisses the card only when
   both tiers are clear (no camera flapping for 30 min, and the rate under 4/h with

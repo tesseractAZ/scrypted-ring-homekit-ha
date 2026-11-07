@@ -3,7 +3,7 @@
 One [Scrypted](https://github.com/koush/scrypted) session is the only Ring cloud client on the automation side. It serves every camera to Apple HomeKit (with HomeKit Secure Video) and to Home Assistant. Around it runs a purpose-built monitoring and log-forensics stack:
 
 - **six Python scripts:** five monitors plus the partial-loss detector module that `cam_motion.py` imports, ≈7,200 lines, standard library plus Pillow;
-- **34 Home Assistant automations;**
+- **36 Home Assistant automations;**
 - **5 command-line sensors.**
 
 Together they detect the failures a camera system usually hides: a dead camera behind a cached snapshot, an event path that has gone silent while every probe stays green, streams that flap without missing a snapshot, and a camera that slowly stops seeing people at its own door.
@@ -66,14 +66,14 @@ The repository holds the deployable monitors, packages and automations as saniti
 - **Vision cross-checks.** Frame differencing annotates each stale camera's verdict without changing the flag. Two or more localized scene changes with no motion event read "detection/event path suspect". A quiet scene is called consistent with vacancy only when the camera's measured vision recall supports it. That recall is scored with a trailing-miss run test.
 
 ### Stream and log forensics: `cam_flap.py`
-- **HKSV recording-failure rate** per camera, parsed from the last 60,000 lines of the Scrypted engine journal and trimmed to at most 6 hours. A camera is flagged at 2 or more failures per hour with at least 3 failures in the window, and pages once that has held for 20 minutes.
+- **HKSV recording-failure rate** per camera over a fixed 6 hours, parsed from the last 60,000 lines of the Scrypted engine journal and a small persisted record of the failures those lines no longer reach. A camera is flagged at 2 or more failures per hour with at least 3 failures in the window, which is 12 failures in a full window, and pages once that has held for 20 minutes.
 - **HAP close-code split.** Error-coded HomeKit closes are split by reason code into hub TIMEOUT, CANCELLED and every other code, and the three always sum to the lumped count. Measured timing showed what each code means:
   - every CANCELLED landed 12.0 s after the clip's last fragment, a normal clip end;
   - every TIMEOUT landed 16–17 s after, a stream that stopped.
 
   So an error-coded close is not read as a fault on its own.
 - **Mid-session video stalls:** a hub TIMEOUT close after 10 s or more without a fragment, or an ffmpeg failure while the session is up. Each session counts once, and stalls stay out of the paging metric.
-- **A push-decrypt tripwire,** counted once per failure. Each failure can be a lost motion event, because Ring motion arrives only as these pushes (see [Operations §3](docs/operations.md#3-motion--doorbell-press--home-assistant-mqtt)).
+- **A push-decrypt tripwire,** counted once per failure. Each failure can be a lost motion event, because Ring motion arrives only as these pushes. Since Ring plugin 0.0.147 it sees only the failures the receiver rethrows, so a rate of 0 does not clear the push path (see [Operations §3](docs/operations.md#3-motion--doorbell-press--home-assistant-mqtt)).
 - **Probe-shortfall accounting,** which flags a camera whose logged snapshot requests fall below 75 % of the expected probe cycles.
 
 ### Door coverage: `cam_flap.py`
@@ -113,7 +113,7 @@ The repository holds the deployable monitors, packages and automations as saniti
 
 ### Engineering and supply chain
 - **Contract-checked in CI.**
-  - All 137 published sensor attributes are checked against each package's allowlist in both directions.
+  - All 138 published sensor attributes are checked against each package's allowlist in both directions.
   - Every automation parses, and each one that carries an `id` is checked against its filename.
   - A public-repo hygiene sweep runs generic patterns plus instance patterns loaded from a CI secret, in a job that isolates that secret.
 - **Hardened pipeline.**

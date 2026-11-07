@@ -137,7 +137,10 @@ STALE_HOURS_OVERRIDES = {
     # Fit these from OCCUPIED-period data only, and only from periods the
     # recorder was actually writing: a window fitted just above a "quiet gap"
     # that is mostly a recorder blackout is fitted to hours in which the camera
-    # was UNOBSERVED, not hours in which it was quiet.
+    # was UNOBSERVED, not hours in which it was quiet. Leave out a silence that
+    # overlaps another camera's proven outage, and one still open: neither shows
+    # the camera was quiet rather than broken. Replay partial_loss.py as well: a
+    # camera past its old window is no longer stale there, so it can be judged.
 }
 FLEET_ACTIVE_HOURS = 24.0   # ...and someone else fired within this window
 QUERY_TIMEOUT_S = 20

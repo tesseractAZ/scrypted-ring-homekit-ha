@@ -61,10 +61,11 @@ from datetime import datetime, timedelta
 ADDON = "<scrypted_addon_slug>"
 LINES = 60000
 WINDOW_MIN = 360.0      # rate window is bounded by TIME, not by LINES: the 60k-line
-                        # span was observed anywhere from ~106 to ~727 min depending
+                        # span was observed anywhere from ~85 to ~727 min depending
                         # on engine chattiness (~85%% of it is our own probe traffic),
-                        # so identical error counts published rates differing ~7x.
-                        # Lines older than this are dropped before counting.
+                        # so identical error counts published rates differing ~8.6x.
+                        # Lines older than this are dropped before counting. A slice
+                        # that reaches less far is filled from REC_STATE.
 MIN_SPAN_MIN = 10.0     # below this the rates are too noisy to publish
 ALERT_HR = 2.0          # per-camera recording failures/hour -> flagged
 MIN_EVENTS = 3          # ...and at least this many absolute failures
@@ -111,27 +112,28 @@ DEVICE_IDS = {  # scrypted device id -> short name, for probe accounting
 # that fails to decrypt never becomes a detection, so they could not see it. On
 # 2026-10-28 the fleet went silent for 3.8 h while this rate rose to 16/h. The
 # cause was the plugin's push receiver reading FCM's newer
-# "dh=KEY; p256ecdsa=SIG" crypto-key header with slice(3) (dgreif/ring#1709;
-# fixed in @eneris/push-receiver 4.3.1). A local plugin patch fixes it
-# (docs/operations.md section 3); re-authenticating does not. Rate is also
-# confounded by push VOLUME (which tracks motion), so normalise before calling
-# a trend.
+# "dh=KEY; p256ecdsa=SIG" crypto-key header with slice(3) (dgreif/ring#1709).
+# A local patch of the plugin stopped it that day, and Ring plugin 0.0.147 parses
+# the header; re-authenticating never helped. Rate is also confounded by push
+# VOLUME (which tracks motion), so normalise before calling a trend.
+#
+# WHAT 0 MEANS SINCE 0.0.147. That plugin's receiver logs the swallowed line
+# below at debug, and the engine log carries no debug (no heartbeat line in 26 h,
+# 2026-11-04), so a swallowed failure leaves nothing to count and only a rethrown
+# one shows. A rate of 0 does not clear the push path: the fleet drop, partial
+# loss and staleness checks judge what actually arrived. The swallowed shape stays
+# in PUSH_DECRYPT for a plugin that prints it.
 #
 # ONE COUNT PER FAILURE, whichever shape the engine prints. The push receiver
 # either swallows a decrypt failure or rethrows it, never both, so one failure
-# never prints both shapes. Checked in @eneris/push-receiver 4.3.0 (the version
-# ring-client-api 14.3.0 pins) and on its main branch, and on 2026-10-28 in the
-# copy bundled into the Ring plugin 0.0.145, which matches 4.3.0: slice(3) on the
-# crypto-key header, the three reasons below logged with warn, anything else
-# rethrown. main logs the swallowed line at debug, so the deployed receiver
-# behaves like 4.3.0, not main. The local plugin patch makes a header with no
-# dh= or salt= value throw a "crypto-key is missing ..." or "salt is missing ..."
-# message, so it is swallowed and counted here, not rethrown as a TypeError.
+# never prints both shapes. Checked in the copy bundled into the Ring plugin
+# 0.0.145 (2026-10-28, logged with warn) and 0.0.147 (2026-11-04, logged at
+# debug): the three reasons below are swallowed, anything else is rethrown.
 #   swallowed  "Message dropped as it could not be decrypted: <reason>" - ONE
 #              line, no stack, for the reasons it expects ("crypto-key is
 #              missing", "salt is missing", "Unsupported state or unable to
-#              authenticate data"). The only shape seen since August: 1 in the
-#              3-day engine log to 2026-10-03, which the ECDH-only match missed.
+#              authenticate data"). 1 in the 3-day engine log to 2026-10-03,
+#              which the ECDH-only match missed.
 #   rethrown   a Node error DUMP (console.error of the Error): a header that
 #              names the code ("Error [ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY]:
 #              Public key is not valid for specified curve"), indented "    at"
@@ -139,8 +141,12 @@ DEVICE_IDS = {  # scrypted device id -> short name, for probe accounting
 #              and "}" - the code TWICE for one failure. ECDH.computeSecret
 #              prints this shape for an invalid public key on Node 20 (source)
 #              and Node 26 (reproduced). August: ~1.6 matching lines/h; bursts
-#              on 2026-10-14/15 and 2026-10-28 (up to 16/h, until the plugin
-#              patch).
+#              on 2026-10-14/15 and 2026-10-28 (up to 16/h, until a local patch
+#              of the plugin). 0.0.147 adds two rethrown reasons, "crypto-key
+#              header is missing dh parameter" and "encryption header is missing
+#              salt parameter" (the header is there, its value is not). Neither
+#              text is on the swallow list and neither error has a code, so the
+#              dump's header is the one line that names the failure.
 # A failure is counted at its FIRST matching line. A later matching line of the
 # same failure is skipped when either
 #   - it is an indented or brace line (PUSH_DUMP_CONT_RE) of a dump already
@@ -157,7 +163,9 @@ DEVICE_IDS = {  # scrypted device id -> short name, for probe accounting
 # In the 3-day log to 2026-10-03, all 473 Node error dumps (uncaughtException
 # EPIPE/ECONNRESET) ran from header to "code:" line without a foreign line.
 PUSH_DECRYPT = ("ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY",
-                "Message dropped as it could not be decrypted")
+                "Message dropped as it could not be decrypted",
+                "crypto-key header is missing dh parameter",
+                "encryption header is missing salt parameter")
 PUSH_DUMP_CONT_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ \S* [\w.-]+(?:\[\d+\])?: (?:\s|[{}\]],?\s*$)")
 # A Node dump is header + 10 frames + code line (~12 lines); 40 leaves room for
@@ -326,6 +334,24 @@ DOOR_STATE = "/config/.cam_flap_door_state.json"
 # summary). An error run leaves FLAP_STATE alone.
 FLAP_STATE = os.environ.get("CAMFLAP_FLAP_STATE", "/config/.cam_flap_flapping_state.json")
 FLAP_HOLD_S = 1200
+# FIXED RATE WINDOW (2026-11-07). WINDOW_MIN caps the slice but cannot fill it: at
+# the evening peak (41,500 entries/h, 2026-11-06) LINES reaches back about 85 min,
+# so a camera's rate had a denominator that moved with engine chatter. 3 errors
+# read 1.8/h over 100 min and 0.5/h over 360 min, and a steady 2.1/h crossed the
+# threshold as a fourth error entered or left the slice. Fetching 360 min at that
+# peak would take about 250,000 lines every poll, against 8.4 s for 60,000.
+# REC_STATE holds each recording error of the window and the span the record has
+# observed; each slice overwrites the part it covers, so an error counts once
+# however many polls see it. When a slice starts past the record's end the time
+# between was not observed, so the record restarts at the slice: the window is
+# then the real observed span and never shorter than the slice. A slice that was
+# trimmed reached past the cutoff, so it observed the whole window, even if the
+# journal was silent for part of it. The rate therefore falls off over up to 6 h
+# after a burst. Only the recording errors moved. Probes, stream faults and closes
+# stay on the slice, and so does the push tier on purpose: at 16/h its 5/h bar
+# takes 31 min on a 100-min slice and 112 min on 360, and that page is the early
+# warning for lost motion. The summary names the slice when the two differ.
+REC_STATE = os.environ.get("CAMFLAP_REC_STATE", "/config/.cam_flap_rec_state.json")
 DOOR_ROLLING_D = 7.0          # the per-camera door record covers this many days
 # A camera is FAILING its door when, over DOOR_ROLLING_D, it has at least
 # DOOR_FAIL_MIN_TRIPS judged trips, saw no more than DOOR_FAIL_MAX_SAW_FRAC of
@@ -847,9 +873,46 @@ def flapping_late(members, now, path=None):
     return sorted(c for c, t in since.items() if now - t >= FLAP_HOLD_S and t >= ep + FLAP_HOLD_S)
 
 
+def recording_window(events, start, end, path=None):
+    """Merge this slice's recording errors into REC_STATE; return (events, minutes).
+
+    events are (stamp, camera) pairs from the slice, start and end its first and
+    last stamps, all in the naive UTC form, which sorts as time. minutes is the
+    span the returned events cover (see FIXED RATE WINDOW)."""
+    path = path or REC_STATE
+    form = "%Y-%m-%d %H:%M:%S"
+    last = datetime.strptime(end, form)
+    try:
+        with open(path) as fh:
+            prev = json.load(fh)
+        seen = {t for t, _ in events}     # stamps are whole seconds: an error in the
+        kept = [(t, c) for t, c in prev["events"]   # head's second may precede the head
+                if t < start or (t == start and t not in seen)]
+        covered, reached = prev["from"], prev["to"]
+        datetime.strptime(covered, form), datetime.strptime(reached, form)
+    except Exception:  # noqa: BLE001 - no usable record: the slice is all that was seen
+        kept, covered, reached = [], start, start
+    if reached < start or covered > start:   # a hole, or the slice reaches further back
+        kept, covered = [], start
+    cutoff = (last - timedelta(minutes=WINDOW_MIN)).strftime(form)
+    merged = [e for e in kept + sorted(events) if e[0] >= cutoff]
+    covered = max(covered, cutoff)
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    try:
+        with open(tmp, "w") as fh:
+            json.dump({"from": covered, "to": end, "events": merged}, fh)
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 - the next slice overlaps this one, so it costs nothing
+        try:
+            os.remove(tmp)
+        except Exception:  # noqa: BLE001
+            pass
+    return merged, (last - datetime.strptime(covered, form)).total_seconds() / 60.0
+
+
 def emit(payload):
     base = {
-        "span_min": None, "rates": None, "counts": None,
+        "span_min": None, "window_min": None, "rates": None, "counts": None,
         "recording_errors": None, "closed_with_error": None, "stream_errors": None,
         "push_undecryptable": None, "push_undecryptable_rate": None,
         "push_drops": None, "push_drop_rate": None,   # legacy aliases, same value
@@ -933,6 +996,7 @@ def main():
         span_min = WINDOW_MIN
 
     rec = {n: 0 for n in CAMS.values()}
+    rec_events = []      # [(ts_string, camera)]: this slice's recording errors
     closed_err = {n: 0 for n in CAMS.values()}  # context tier, NOT the alert metric
     probes = {n: 0 for n in DEVICE_IDS.values()}
     stream_errors = 0
@@ -1037,7 +1101,9 @@ def main():
             for label, name in CAMS.items():
                 if ("[%s]" % label) in ln:
                     if "motion recording error" in ln:
-                        rec[name] += 1
+                        tsm = TS_RE.match(ln)
+                        if tsm:
+                            rec_events.append((tsm.group(1), name))
                     else:
                         closed_err[name] += 1
                         closed_by[close_kind(ln)][name] += 1
@@ -1095,8 +1161,12 @@ def main():
     # max-duration cancel, so counting them over-flags healthy cameras. Video
     # stalls stay out as well: each stalled recording also ends in a recording
     # error that this metric already counts (see MID-SESSION VIDEO STALLS).
+    rec_events, window_min = recording_window(rec_events, stamps[0], stamps[1])
+    for _, name in rec_events:
+        if name in rec:
+            rec[name] += 1
     fails = dict(rec)
-    rates = {n: round(v / span_min * 60, 1) for n, v in fails.items()}
+    rates = {n: round(v / window_min * 60, 1) for n, v in fails.items()}
     worst = max(rates, key=rates.get)
     flapping = sorted(
         n for n, r in rates.items()
@@ -1113,23 +1183,26 @@ def main():
     push_undecryptable_rate = round(push_undecryptable / span_min * 60, 1)
     if fails[worst]:
         summary = "worst %s %.1f/hr over %.0fm; %d cam(s) over threshold" % (
-            worst, rates[worst], span_min, len(flapping))
+            worst, rates[worst], window_min, len(flapping))
     else:
         # Nothing to rank: a "worst" camera at 0.0/hr reads as a fault, so the
         # window says so plainly and `worst` is None.
-        summary = "no recording errors over %.0fm" % span_min
+        summary = "no recording errors over %.0fm" % window_min
+    lead = summary
     if push_undecryptable_rate >= 1.0:
         summary += "; undecryptable push msgs %.1f/hr" % push_undecryptable_rate
     if unknown_motion:
         # Loud, because it silently corrupts the orphan metric.
         summary += ("; UNRECOGNISED CAMERA NAME(S) IN LOG: %s - orphan counts are "
                     "unreliable until CAMS is updated" % ",".join(sorted(unknown_motion)))
+    # Not this slice: the door record spans days, the zone note is about the host.
+    standing = ""
     if door_note:
-        summary += "; " + door_note
+        standing += "; " + door_note
     if _ZONE[2]:
-        summary += "; " + _ZONE[2]
+        standing += "; " + _ZONE[2]
     if door_failing:
-        summary += "; DOOR COVERAGE FAILING: " + ", ".join(
+        standing += "; DOOR COVERAGE FAILING: " + ", ".join(
             "%s saw %d of %d door trips in %.1f days (%d strong + %d weak corroborated misses, %d nobody "
             "saw; %d strong misses in a row since it last saw its door)" % (
                 c, door_rolling[c]["saw"], door_rolling[c]["trips"], door_rolling[c]["days"],
@@ -1155,9 +1228,14 @@ def main():
     if stalled:
         summary += "; mid-session video stalls: " + ",".join(
             "%s=%d" % (n, video_stalls[n]) for n in stalled)
+    # The first clause is the rate window; the clauses left in summary are this slice.
+    sliced = summary[len(lead):]
+    if sliced and round(window_min) != round(span_min):
+        sliced = "; last %.0fm: %s" % (span_min, sliced[2:])
+    summary = lead + standing + sliced
 
     emit({
-        "span_min": round(span_min, 1),
+        "span_min": round(span_min, 1), "window_min": round(window_min, 1),
         "rates": rates, "counts": fails,
         "recording_errors": rec, "closed_with_error": closed_err,
         "stream_errors": stream_errors,
