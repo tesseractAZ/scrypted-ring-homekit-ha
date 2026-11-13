@@ -193,6 +193,7 @@ action:
   ```
   Automatic retention prunes only *automatic* backups; a **manual** full backup is exempt, so keep one manual full backup as a stable restore point.
 - Trigger a full backup with `POST /backups/new/full`. Note the supervisor API returns an empty `unknown_error` on this call when it exceeds the proxy timeout — the backup keeps running; poll `/jobs/info` (`backup_manager_full_backup`) and `/backups` for completion rather than trusting the immediate response.
+- **When the host's LAN address changes.** Links that use loopback (the MQTT broker in §3, the probes in §5, the Generic Camera URLs) need nothing. The exception is Scrypted's own **Server Addresses** setting (Scrypted Core), which must name the wired LAN address: re‑pin it after the change. A stale pin is skipped with an `invalid local address` warning in the engine log, leaving Scrypted no local address to hand its clients.
 
 ---
 
