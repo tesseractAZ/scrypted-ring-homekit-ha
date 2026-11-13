@@ -36,7 +36,7 @@ The scripts use the Python standard library, plus Pillow from the Core container
 | Credential | Used by | Sent to | Stored |
 |---|---|---|---|
 | `SUPERVISOR_TOKEN` | `cam_flap.py`, `cam_logarchive.py` | `http://supervisor/addons/<scrypted_addon_slug>/logs`, as a Bearer header | never: read from the Core container's environment; not written, logged or published |
-| Scrypted webhook tokens | `cam_health.py`, `cam_vision.py` | the URL path of `http://<HA_HOST_IP>:11080/endpoint/@scrypted/webhook/public/<device_id>/<webhook_token>/takePicture` | in the **deployed** copies under `/config/scripts/`, and therefore in Home Assistant backups; placeholders in this repository |
+| Scrypted webhook tokens | `cam_health.py`, `cam_vision.py` | the URL path of `http://127.0.0.1:11080/endpoint/@scrypted/webhook/public/<device_id>/<webhook_token>/takePicture` | in the **deployed** copies under `/config/scripts/`, and therefore in Home Assistant backups; placeholders in this repository |
 | Home Assistant long-lived access token | the operator, for the REST deploy steps in [`ha/README.md`](ha/README.md) | Home Assistant's REST API | not used or stored by any script |
 
 `SUPERVISOR_TOKEN` is Home Assistant Core's own Supervisor token and carries Core's broad Supervisor API access. Anything that can modify `/config/scripts/` therefore runs code with it; see the hardening list below.

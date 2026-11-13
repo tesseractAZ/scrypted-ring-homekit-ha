@@ -68,7 +68,7 @@ Do **not** use the reverse‑direction "Home Assistant" Scrypted plugin — that
 
 **Setup:**
 
-1. Install `@scrypted/mqtt`. Point its **External Broker** at your MQTT broker (`mqtt://<HA_HOST_IP>:1883`) with a broker username/password (`<mqtt_user>`/`<mqtt_pass>`).
+1. Install `@scrypted/mqtt`. Point its **External Broker** at your MQTT broker with a broker username/password (`<mqtt_user>`/`<mqtt_pass>`). With Scrypted as the add‑on and the Mosquitto add‑on on the same host, use `mqtt://127.0.0.1:1883`: Scrypted runs on the host network and Mosquitto publishes 1883 on the host. A broker URL pinned to the host's LAN address stops all motion and doorbell events the moment that address changes, while the snapshot probes stay green, so only the motion monitors can notice (a DHCP change on 2026‑11‑13 cut motion this way). The plugin reads the broker URL only when each camera's client connects, so after changing it, re‑save each camera's MQTT settings (or reload the plugin) and confirm one client per camera in the broker log.
 2. Apply the MQTT **mixin** to each camera (the mixin is stored in the device's `mixins` array — note it does **not** add a `mixin:@scrypted/mqtt` string to the `interfaces` list, so don't mistake its absence there for "not applied").
 3. Scrypted publishes retained HA‑discovery config under `homeassistant/binary_sensor/<prefix>-<cid>/…`. HA auto‑creates:
    - `binary_sensor.<cam>_motion` (MotionSensor)
@@ -105,7 +105,7 @@ You can tell it's working by sampling a camera's snapshot hash over time: a came
 
 **Do not trust `/api/camera_proxy`** for health — it returns HTTP 200 with a **stale cached JPEG** when the upstream camera is dead, so it cannot detect failure. Probe the **honest** source: the Scrypted webhook snapshot endpoint on the insecure port.
 
-A small `command_line` sensor runs a script that fetches every camera's `http://<HA_HOST_IP>:11080/endpoint/@scrypted/webhook/public/<cid>/<token>/takePicture` concurrently and classifies each:
+A small `command_line` sensor runs a script that fetches every camera's `http://127.0.0.1:11080/endpoint/@scrypted/webhook/public/<cid>/<token>/takePicture` concurrently and classifies each:
 
 - **down** — non‑200 / tiny body for **N consecutive** probes (tolerate a single transient miss).
 - **frozen** — the **byte‑identical** JPEG returned for several consecutive probes (a healthy camera returns a *distinct* frame every probe, but an identical hash means a **stale snapshot**, not proof of a wedged camera: on a snapshot timeout the webhook serves Scrypted's cached last-good JPEG as a full-size HTTP 200, so only the hash betrays it, and the tier is bursty, rotates across cameras and falls hardest on the busiest ones - a snapshot-pipeline signal, not a per-camera hardware verdict). This catches a camera that returns a stale‑but‑valid 200 — the failure a proxy‑based check is blind to.

@@ -32,7 +32,10 @@ each good frame in SPOOL_DIR for cam_vision.py (see SHARED FRAMES).
 import json, hashlib, os, time, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
-HOST = "<HA_HOST_IP>:11080"
+# Scrypted's HTTP port on THIS host: Core and the Scrypted app both run on the host network,
+# so loopback survives a change of the host's LAN address (as on 2026-11-13). A Scrypted on
+# another machine needs that machine's address here instead.
+HOST = "127.0.0.1:11080"
 CAMS = [
     ("<cam_1>", "<device_id_1>", "<webhook_token>"),
     ("<cam_2>", "<device_id_2>", "<webhook_token>"),

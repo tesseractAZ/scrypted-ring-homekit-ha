@@ -86,8 +86,9 @@ Scrypted → Settings/Users → create a **new admin user** (your own username/p
 3. Use the **insecure (http, 11080)** endpoint so HA doesn't reject the self‑signed cert. A wrong token returns HTTP 401 `Invalid Token`.
 
 ```
-http://<HA_HOST_IP>:11080/endpoint/@scrypted/webhook/public/<device_id>/<token>/takePicture
+http://127.0.0.1:11080/endpoint/@scrypted/webhook/public/<device_id>/<token>/takePicture
 ```
+With Scrypted as the add‑on, HA reaches it on loopback (`127.0.0.1`); a Scrypted on another machine needs that machine's address. Keep same‑host links on loopback: a link pinned to the host's LAN address breaks the moment that address changes.
 
 ### 5b. Live stream (Rebroadcast / prebuffer-mixin)
 - Plugin: `@scrypted/prebuffer-mixin` ("Rebroadcast Plugin") — auto‑enabled mixin on every camera.
@@ -95,9 +96,9 @@ http://<HA_HOST_IP>:11080/endpoint/@scrypted/webhook/public/<device_id>/<token>/
 - Per camera, copy the read‑only **RTSP Rebroadcast Url**:
 
 ```
-rtsp://<HA_HOST_IP>:<rebroadcastPort>/<rtspServerPath>
+rtsp://127.0.0.1:<rebroadcastPort>/<rtspServerPath>
 ```
-`<rtspServerPath>` is a random hex token **persisted per stream — copy exactly, do not construct.** Replace any `localhost` with the address reachable **from HA**.
+`<rtspServerPath>` is a random hex token **persisted per stream — copy exactly, do not construct.** The host part must be reachable **from HA**: `127.0.0.1` for the add‑on, that machine's address for a Scrypted elsewhere.
 
 **VERIFY:** each `/takePicture` URL returns a JPEG in a browser; each `rtsp://…/<token>` plays in VLC — **before** touching HA.
 
@@ -200,8 +201,8 @@ Delete the obsolete automations; remove the custom snapshot component + its pack
 | HTTPS/admin port | `10443` (self‑signed) |
 | HTTP/insecure port | `11080` |
 | Integration host (add‑on) | `127.0.0.1:10443` |
-| Still Image URL | `http://<HA_HOST_IP>:11080/endpoint/@scrypted/webhook/public/<device_id>/<token>/takePicture` |
-| RTSP rebroadcast URL | `rtsp://<HA_HOST_IP>:<rebroadcastPort>/<rtspServerPath>` (pin the port; path = random hex, copy exactly) |
+| Still Image URL | `http://127.0.0.1:11080/endpoint/@scrypted/webhook/public/<device_id>/<token>/takePicture` |
+| RTSP rebroadcast URL | `rtsp://127.0.0.1:<rebroadcastPort>/<rtspServerPath>` (pin the port; path = random hex, copy exactly) |
 | Rebroadcast plugin | `@scrypted/prebuffer-mixin` ("Rebroadcast Plugin") |
 | Webhook plugin | `@scrypted/webhook` |
 | MQTT plugin (motion/doorbell) | `@scrypted/mqtt` → see operations.md §3 |
