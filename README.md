@@ -101,10 +101,11 @@ The repository holds the deployable monitors, packages and automations as saniti
 
 ### Alerting discipline
 - **A second fault pages too.** Tier alerts fire on the edge of a fleet count, so a camera that joined a tier while another was already latched used to move no edge. The health, stream-churn and vision monitors now publish the cameras that joined a tier at least one hold after its episode began, and each newly listed camera is pushed ("Also down: …").
-- **Pushes carry new information.** There are 36 automations with 82 triggers, and 16 of them can push. No re-assert ever pushes; pushes are gated on an onset, a set difference or a freshness stamp. There are three deliberate exceptions:
+- **Pushes carry new information.** There are 37 automations with 83 triggers, and 17 of them can push. No re-assert ever pushes; pushes are gated on an onset, a set difference or a freshness stamp. There are three deliberate exceptions:
   - the fleet-silence alert pages every hour and at boot while the whole fleet stays silent past 9 h;
   - the per-camera dead-man pages again at boot while a broken-camera proof stands;
   - the camera-health and stream-churn alerts and the health, motion, flap and vision dead-men push once per start when a fault already present at the start outlasts its hold, since a fault present when the triggers arm cannot fire them.
+- **An all-clear follows a pushed fault.** Each fault alert that pushes (all but the walk test and the host-down notice, which reports an outage already over) also records its card in `sensor.camera_alert_ledger`, a trigger-based sensor that survives restarts. Every 5 min `camera_all_clear` checks each open card against its own recovery test: the fault's indicator clear for the same hold its recovered automation uses, plus evidence where a card can clear without a recovery (partial loss: every flagged camera released by recovery, not gone stale or acknowledged; door coverage: every failing camera saw its door again; motion-dead: the fleet is active; a stalled monitor: every monitor's own heartbeat past both the push and the moment the stall cleared). It then pushes "Cleared: <title>" once, with how long ago the first alert went out. A card that stays ambiguous for a day closes silently, and a fault that never pushed is never recorded. Card dismissals play no part, so neither a person dismissing a card nor a restart can produce an all-clear.
 - **Survives restarts.** Persistent notifications do not survive a Home Assistant restart, so 14 staggered re-asserts and boot triggers restore every open fault card.
 - **Every monitor has a dead-man.**
   - Each monitor pages when it errors, goes unavailable or stops updating, with freshness tracked through bucketed heartbeats and per-sensor age bars from 45 minutes to 3 hours.
@@ -150,7 +151,7 @@ The repository holds the deployable monitors, packages and automations as saniti
    │   cam_logarchive ── engine journal → redacted, pseudonymised 35-day archive       │
    │        │                                                                          │
    │        ▼  sensors + fail-closed template binaries                                 │
-   │   36 automations: gated pushes · cards · re-asserts · dead-men · walk test        │
+   │   37 automations: gated pushes · cards · re-asserts · dead-men · walk test        │
    └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 

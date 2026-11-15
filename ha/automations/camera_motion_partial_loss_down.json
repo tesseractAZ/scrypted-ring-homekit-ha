@@ -55,6 +55,13 @@
                 "title": "📷 Partial-loss test not running",
                 "message": "The partial-loss test has failed for an hour - a camera losing most of its motion events is not being looked for. Staleness monitoring is unaffected."
               }
+            },
+            {
+              "event": "camera_alert_pushed",
+              "event_data": {
+                "card": "camera_partial_loss_down",
+                "title": "📷 Partial-loss test not running"
+              }
             }
           ]
         }

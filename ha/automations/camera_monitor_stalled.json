@@ -52,6 +52,13 @@
                 "title": "📷 Camera monitor stopped updating",
                 "message": "{{ state_attr('binary_sensor.camera_monitor_stalled','stalled') }}"
               }
+            },
+            {
+              "event": "camera_alert_pushed",
+              "event_data": {
+                "card": "camera_monitor_stalled",
+                "title": "📷 Camera monitor stopped updating"
+              }
             }
           ]
         }

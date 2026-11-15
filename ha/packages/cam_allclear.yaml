@@ -1,0 +1,79 @@
+# Camera all-clear ledger (2026-11-15).
+#
+# Every camera fault automation that pushes to the phone fires `camera_alert_pushed`
+# {card, title[, subjects]} once its notify call has returned (Home Assistant does not
+# report delivery: a relay failure is logged, not raised); `card` is that automation's
+# persistent-notification id. This sensor keeps those cards open (state = how many). The
+# camera_all_clear sweep closes one with `camera_alert_cleared` once that card's own
+# recovery test passes (and pushes "Cleared: <title>"), or silently when its indicator has
+# been clear for a day with no evidence of a recovery. A fault that never pushed is never
+# opened, so it clears quietly.
+#
+# open: {card: {first, last (epoch s, event time), count, title, subjects}}. subjects:
+# partial loss - the flagged cameras; door coverage - each failing camera's last_saw at the
+# push. A push whose subjects still cover the
+# entry's subjects continues that episode (the first recorded value per camera is kept);
+# one that no longer covers them starts a fresh entry, so an episode that ended without
+# evidence cannot hold a later episode's all-clear hostage. An optional `at` (ISO time) on
+# the event dates an entry, for recording a push that predates this sensor.
+#
+# Trigger-based, so the state and attributes survive a restart. Restore data is written
+# periodically and at a clean stop, so a crash can roll back the last few minutes: a push
+# recorded then can be lost (no all-clear) or a close undone (one repeated all-clear).
+template:
+  - triggers:
+      - trigger: event
+        event_type: camera_alert_pushed
+        id: pushed
+      - trigger: event
+        event_type: camera_alert_cleared
+        id: cleared
+    actions:
+      - variables:
+          prev: "{{ state_attr('sensor.camera_alert_ledger', 'open') or {} }}"
+          card: "{{ trigger.event.data.get('card') }}"
+          ts: "{{ as_timestamp(trigger.event.data.get('at') or trigger.event.time_fired, 0) }}"
+          open: >-
+            {% set prev = prev if prev is mapping else {} %}
+            {% set keep = prev.items() | rejectattr('0', 'eq', card) | list %}
+            {% if trigger.id == 'pushed' and card is string and card | length > 0 and ts > 0 %}
+              {% set p = prev.get(card) or {} %}
+              {% set s0 = p.get('subjects') if p.get('subjects') is mapping else {} %}
+              {% set s1 = trigger.event.data.get('subjects') %}
+              {% set s1 = s1 if s1 is mapping else {} %}
+              {% set fresh = (s0 | count) > 0 and (s1 | count) > 0
+                             and (s0.keys() | reject('in', s1.keys() | list) | list | count) > 0 %}
+              {% set p = {} if fresh else p %}
+              {% set s0 = {} if fresh else s0 %}
+              {% set e = {'first': [p.get('first', ts) | float(ts), ts] | min,
+                          'last': [p.get('last', ts) | float(ts), ts] | max,
+                          'count': (p.get('count', 0) | int(0)) + 1,
+                          'title': (trigger.event.data.get('title') or p.get('title') or card) | string,
+                          'subjects': dict(s1.items() | list + s0.items() | list)} %}
+              {{ dict(keep + [(card, e)]) }}
+            {% elif trigger.id == 'cleared' %}{{ dict(keep) }}{% else %}{{ prev }}{% endif %}
+    sensor:
+      - name: Camera alert ledger
+        unique_id: camera_alert_ledger
+        icon: mdi:bell-check-outline
+        state: "{{ open | count }}"
+        attributes:
+          open: "{{ open }}"
+  # Validity edges for the sweep: each is the template its card's recovered automation holds
+  # with `for:`, so the sweep holds the same thing (last_changed = when it last became true).
+  - binary_sensor:
+      - name: Camera push decrypt ok
+        unique_id: camera_push_decrypt_ok
+        state: >-
+          {% set r = state_attr('sensor.camera_flap_rate','push_undecryptable_rate') %}{{ r is not none and state_attr('sensor.camera_flap_rate','error') is none and r | float(0) < 4.0 }}
+      - name: Camera health monitor reporting
+        unique_id: camera_health_monitor_reporting
+        state: "{{ states('sensor.camera_health') not in ['unavailable','unknown','-1'] }}"
+      - name: Camera motion monitor reporting
+        unique_id: camera_motion_monitor_reporting
+        state: "{{ states('binary_sensor.camera_motion_stale') in ['on','off'] and state_attr('sensor.camera_motion_stale','error') is none }}"
+      - name: Camera partial loss test reporting
+        unique_id: camera_partial_loss_test_reporting
+        state: >-
+          {{ state_attr('sensor.camera_motion_stale','partial_loss') is not none
+             and (state_attr('sensor.camera_motion_stale','partial_detail') or {}).get('error') is none }}

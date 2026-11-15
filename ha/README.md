@@ -15,7 +15,7 @@ before deploying (grep for `<` to find them).
 | `scripts/cam_vision.py` | `/config/scripts/cam_vision.py` | the frame-differencing visual-activity sensor |
 | `scripts/partial_loss.py` | `/config/scripts/partial_loss.py` (beside `cam_motion.py`) | imported by `cam_motion.py` (the partial-loss test) |
 | `scripts/cam_logarchive.py` | `/config/scripts/cam_logarchive.py` | the hourly engine-log archive sensor |
-| `packages/cam_health.yaml`, `packages/cam_flap.yaml`, `packages/cam_motion.yaml`, `packages/cam_vision.yaml`, `packages/cam_logarchive.yaml` | `/config/packages/` | `homeassistant: packages: !include_dir_named packages` |
+| `packages/cam_health.yaml`, `packages/cam_flap.yaml`, `packages/cam_motion.yaml`, `packages/cam_vision.yaml`, `packages/cam_logarchive.yaml`, `packages/cam_allclear.yaml` | `/config/packages/` | `homeassistant: packages: !include_dir_named packages` |
 | `automations/*.json` | HA **storage** automations (not files) | `POST /api/config/automation/config/<id>` |
 
 ## Deploy order
@@ -789,6 +789,44 @@ stays past its 9-hour bar: during a total outage an hourly page is intended.
 The start-up checks in `camera_health_alert` and the four monitor dead-men also
 push once per start for a fault that outlasts its hold, because a fault present
 when the triggers arm can never fire them.
+
+- `camera_all_clear` — one push when a camera fault that **pushed** has recovered:
+  "✅ Camera all-clear — Cleared: <the alert's title>. First alert 1 h 40 min ago,
+  2 alerts. Cameras now: 9/9 OK." Each of the fourteen fault alerts that push fires
+  `camera_alert_pushed` {card, title[, subjects]} right after its notify call returns,
+  and `sensor.camera_alert_ledger` (`packages/cam_allclear.yaml`) keeps those cards
+  open across restarts. Every 5 min this sweep gathers the indicator states into plain
+  values and gives each open card one verdict:
+  - **clear** (push, then close) when the card's own recovery test passes. Each test
+    holds the fault indicator for the same time as that card's recovered automation
+    (35 min for camera health, 30 for flap, vision, motion-dead and partial loss, 60
+    for door coverage, 15 for a stalled monitor, 5 for the three monitor-down cards,
+    none for fleet drop and the log archive). Four cards also
+    need evidence, because their card can clear without a recovery: partial loss needs
+    every flagged camera released by recovery (not stale, dormant or acknowledged);
+    door coverage needs every failing camera to have seen its door again; motion-dead
+    needs an active fleet (the stale set also empties when the whole fleet goes quiet);
+    a stalled monitor needs every monitor's own `updated_at` heartbeat past both the
+    push and the moment the stall cleared, so a restart's first publication, which
+    resets every `last_updated`, is not taken for a recovery. The flap card also holds
+    `binary_sensor.camera_push_decrypt_ok` for 30 min. Holds on a validity edge use the
+    package's small template binaries (push decrypt ok; health, motion and partial-loss
+    test monitors reporting), each the template its recovered automation holds with `for:`.
+  - **silent** (close, no push) when a card's indicator has been clear for a day without
+    that evidence (a flagged camera went stale, a door aged out of the 7-day record), or
+    for a card with no recovery test a week after its last push.
+  - **wait** otherwise.
+
+  Card dismissals play no part: a person dismissing a card, a manual Run of a recovered
+  automation and a restart cannot produce an all-clear, and a restart only restarts the
+  holds. A push whose cameras no longer cover the open entry's cameras starts a fresh
+  entry, so an episode that ended without evidence cannot hold a later one's all-clear.
+  Not recorded: the walk test (nothing clears it) and `camera_host_down_alert`, which
+  reports an outage that had already ended. The CI step `.github/allclear-wiring.py`
+  fails if a pushing fault does not record its card or a recorded card has no recovery
+  test. Limits: Home Assistant does not report push delivery (a relay failure is logged,
+  not raised), so the ledger records a returned notify call; a crash can roll the ledger
+  back to its last restore dump.
 
 ## Partial motion loss (`cam_motion.py` + `partial_loss.py`)
 

@@ -119,6 +119,13 @@
                 "title": "📷 Camera health monitor down",
                 "message": "The snapshot-probe watchdog is dead (state {{ states('sensor.camera_health') }}) - the fleet is NOT being probed and its own alert cannot fire.{% if trigger.id == 'boot' %} (present since Home Assistant started){% endif %}"
               }
+            },
+            {
+              "event": "camera_alert_pushed",
+              "event_data": {
+                "card": "camera_health_monitor_down",
+                "title": "📷 Camera health monitor down"
+              }
             }
           ]
         }

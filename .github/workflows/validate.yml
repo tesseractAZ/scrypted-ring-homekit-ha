@@ -100,6 +100,9 @@ jobs:
           sys.exit(1 if fail else 0)
           PY
 
+      - name: All-clear wiring (every pushing fault records its card; every card has a recovery test)
+        run: python .github/allclear-wiring.py
+
   # The sweep is the only step that sees a secret (the instance names and ids
   # this public repository exists to hide), so it runs in its own job on a fresh
   # runner with no third-party code but the pinned checkout: nothing an earlier

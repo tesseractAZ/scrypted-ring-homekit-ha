@@ -147,6 +147,13 @@
                 "title": "📷 Camera vision monitor degraded",
                 "message": "{% if trigger.id == 'blind_late' %}Also not seen: {% set f = trigger.from_state %}{% set t = trigger.to_state %}{{ ((t.attributes.get('blind_late') if t else none) or []) | reject('in', ((f.attributes.get('blind_late') if f else none) or [])) | join(', ') }}. {% endif %}{{ state_attr('sensor.camera_visual_activity','summary') or 'vision monitor not reporting' }}{% if trigger.id == 'boot' %} (present since Home Assistant started){% endif %}"
               }
+            },
+            {
+              "event": "camera_alert_pushed",
+              "event_data": {
+                "card": "camera_vision_monitor_down",
+                "title": "📷 Camera vision monitor degraded"
+              }
             }
           ]
         }

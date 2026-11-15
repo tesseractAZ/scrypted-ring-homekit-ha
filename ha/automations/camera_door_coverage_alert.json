@@ -51,6 +51,14 @@
                 "title": "🚪 Door coverage failing: {{ (state_attr('sensor.camera_flap_rate','door_coverage_failing') or []) | join(', ') }}",
                 "message": "{% set r = (state_attr('sensor.camera_flap_rate','door_rolling') or {}) %}{% for c in (state_attr('sensor.camera_flap_rate','door_coverage_failing') or []) %}{% set x = r.get(c) or {} %}{{ c }} saw {{ x.get('saw', 0) }} of {{ x.get('trips', 0) }} door trips in {{ x.get('days', 0) }} days ({{ x.get('missed', 0) }} strong + {{ x.get('weak', 0) }} weak corroborated misses, {{ x.get('unseen', 0) }} nobody saw; {{ x.get('run', 0) }} strong in a row). {% endfor %}Check its motion settings in the Ring app, then walk-test the door."
               }
+            },
+            {
+              "event": "camera_alert_pushed",
+              "event_data": {
+                "card": "camera_door_coverage",
+                "title": "🚪 Door coverage failing: {{ (state_attr('sensor.camera_flap_rate','door_coverage_failing') or []) | join(', ') }}",
+                "subjects": "{% set r = state_attr('sensor.camera_flap_rate', 'door_rolling') or {} %}{% set ns = namespace(d=[]) %}{% for c in state_attr('sensor.camera_flap_rate', 'door_coverage_failing') or [] %}{% set ns.d = ns.d + [(c | string, ((r.get(c) or {}).get('last_saw') or ''))] %}{% endfor %}{{ dict(ns.d) }}"
+              }
             }
           ]
         }

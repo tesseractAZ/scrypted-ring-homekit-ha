@@ -118,6 +118,13 @@
                 "title": "📷 Camera motion monitor down",
                 "message": "The motion-staleness monitor is dead or erroring - per-camera staleness is NOT being evaluated.{% if trigger.id == 'boot' %} (present since Home Assistant started){% endif %}"
               }
+            },
+            {
+              "event": "camera_alert_pushed",
+              "event_data": {
+                "card": "camera_motion_monitor_down",
+                "title": "📷 Camera motion monitor down"
+              }
             }
           ]
         }

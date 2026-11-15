@@ -1,0 +1,75 @@
+{
+  "id": "camera_all_clear",
+  "alias": "Cameras: all clear after a pushed fault",
+  "description": "Says once on the phone that a camera fault which PUSHED has recovered. Each fault automation that pushes fires camera_alert_pushed, which sensor.camera_alert_ledger keeps open. Every 5 min this checks each open card against its own recovery test - the fault indicator clear for the same hold its recovered automation uses, plus per-camera evidence for partial loss and door coverage and an active fleet for motion-dead and fresh monitor heartbeats for a stall - pushes 'Cleared: <title>' and closes it. A card whose indicator has been clear for a day without that evidence (a flagged camera went stale, a door aged out of the record) closes silently: nothing confirmed a recovery, so nothing claims one. Card dismissals play no part, and a person's dismissal or a manual Run of a recovered automation changes nothing. Holds are measured from the indicator's last change, so a restart restarts them; the stalled card also needs each monitor's own heartbeat to move past both the push and the moment the stall cleared, so a restart's first publication is not taken for a recovery. Faults that never pushed are never opened.",
+  "triggers": [
+    {
+      "trigger": "time_pattern",
+      "minutes": "/5",
+      "id": "sweep"
+    }
+  ],
+  "conditions": [
+    {
+      "condition": "numeric_state",
+      "entity_id": "sensor.camera_alert_ledger",
+      "above": 0
+    }
+  ],
+  "actions": [
+    {
+      "variables": {
+        "now_ts": "{{ as_timestamp(now()) | round(0) }}",
+        "L": "{% set o = state_attr('sensor.camera_alert_ledger', 'open') %}{{ o if o is mapping else {} }}",
+        "inp": "{% set ids = {\"cameras_problem\": \"binary_sensor.cameras_problem\", \"camera_vision_monitor_problem\": \"binary_sensor.camera_vision_monitor_problem\", \"camera_monitor_stalled\": \"binary_sensor.camera_monitor_stalled\", \"cameras_flapping\": \"binary_sensor.cameras_flapping\", \"camera_motion_stale\": \"binary_sensor.camera_motion_stale\", \"camera_motion_partial_loss\": \"binary_sensor.camera_motion_partial_loss\", \"camera_door_coverage_problem\": \"binary_sensor.camera_door_coverage_problem\", \"camera_motion_fleet_drop\": \"binary_sensor.camera_motion_fleet_drop\", \"scrypted_quiet_logs_undone\": \"binary_sensor.scrypted_quiet_logs_undone\", \"camera_health\": \"sensor.camera_health\", \"camera_engine_log_archive\": \"sensor.camera_engine_log_archive\", \"camera_push_decrypt_ok\": \"binary_sensor.camera_push_decrypt_ok\", \"camera_health_monitor_reporting\": \"binary_sensor.camera_health_monitor_reporting\", \"camera_motion_monitor_reporting\": \"binary_sensor.camera_motion_monitor_reporting\", \"camera_partial_loss_test_reporting\": \"binary_sensor.camera_partial_loss_test_reporting\"} %}{% set ns = namespace(b=[], pc=[], ds=[]) %}{% for k, eid in ids.items() %}{% set s = states[eid] %}{% set ns.b = ns.b + [(k, [s.state if s is not none else 'none', (as_timestamp(s.last_changed) | round(0)) if s is not none else 0])] %}{% endfor %}{% set ms = 'sensor.camera_motion_stale' %}{% set pd = state_attr(ms, 'partial_detail') or {} %}{% for c, d in (pd.get('cams') or {}).items() %}{% set d = d if d is mapping else {} %}{% set ns.pc = ns.pc + [(c, {'cleared': (d.get('cleared') or {}).get('reason'), 'ack': 'ack' in d, 'status': d.get('status'), 'since': d.get('since') is not none, 'dormant': d.get('dormant_since') is not none})] %}{% endfor %}{% for c, d in (state_attr('sensor.camera_flap_rate', 'door_rolling') or {}).items() %}{% set ns.ds = ns.ds + [(c, ((d or {}).get('last_saw') or ''))] %}{% endfor %}{% set ns2 = namespace(hb=[]) %}{% for e in [\"sensor.camera_health\", \"sensor.camera_visual_activity\", \"sensor.camera_flap_rate\", \"sensor.camera_motion_stale\", \"sensor.camera_engine_log_archive\"] %}{% set ns2.hb = ns2.hb + [(e, state_attr(e, 'updated_at') | float(0))] %}{% endfor %}{% set mst = states[ms] %}{% set hs = (state_attr(ms, 'hours_since') or {}).values() | reject('none') | list %}{{ {'b': dict(ns.b), 'fleet_active': state_attr(ms, 'fleet_active') == true, 'hours_min': (hs | min) if hs else none, 'motion_sample_ts': (as_timestamp(mst.last_updated) | round(0)) if mst is not none else 0, 'partial_cams': dict(ns.pc), 'door_failing': state_attr('sensor.camera_flap_rate', 'door_coverage_failing') or [], 'door_last_saw': dict(ns.ds), 'beats': dict(ns2.hb)} }}"
+      }
+    },
+    {
+      "variables": {
+        "ready": "{% set HOLD = {\"camera_health\": [\"cameras_problem\", 35], \"camera_vision_monitor_down\": [\"camera_vision_monitor_problem\", 30], \"camera_monitor_stalled\": [\"camera_monitor_stalled\", 15], \"camera_flap\": [\"cameras_flapping\", 30], \"camera_flap_down\": [\"cameras_flapping\", 30], \"camera_motion_dead\": [\"camera_motion_stale\", 30], \"camera_partial_loss\": [\"camera_motion_partial_loss\", 30], \"camera_door_coverage\": [\"camera_door_coverage_problem\", 60], \"camera_motion_fleet_drop\": [\"camera_motion_fleet_drop\", 0], \"scrypted_quiet_logs_undone\": [\"scrypted_quiet_logs_undone\", 0], \"camera_health_monitor_down\": [\"camera_health_monitor_reporting\", 5], \"camera_motion_monitor_down\": [\"camera_motion_monitor_reporting\", 5], \"camera_partial_loss_down\": [\"camera_partial_loss_test_reporting\", 5], \"camera_log_archive_down\": [\"camera_engine_log_archive\", 0]} %}{% set B = inp.b %}{% set ns = namespace(out=[]) %}{% set dk = B.get('camera_push_decrypt_ok') or ['none', now_ts] %}{% set decrypt_held = dk[0] == 'on' and now_ts - (dk[1] | float(now_ts)) >= 1800 %}{% for card, e in L.items() %}{% set h = HOLD.get(card) %}{% set s = (B.get(h[0]) if h else none) or ['none', now_ts] %}{% set age = now_ts - (s[1] | float(now_ts)) %}{% set held = h is not none and age >= h[1] * 60 %}{% set off = s[0] == 'off' and held %}{% set onh = s[0] == 'on' and held %}{% set off_day = s[0] == 'off' and age >= 86400 %}{% set last = e.get('last') | float(now_ts) %}{% set subj = (e.get('subjects') or {}) if (e.get('subjects') or {}) is mapping else {} %}{% set ok = namespace(v=(subj | count) > 0) %}{% if card in ['camera_health', 'camera_vision_monitor_down', 'camera_motion_fleet_drop', 'scrypted_quiet_logs_undone'] %}{% set v = 'clear' if off else none %}{% elif card in ['camera_health_monitor_down', 'camera_motion_monitor_down', 'camera_partial_loss_down'] %}{% set v = 'clear' if onh else none %}{% elif card == 'camera_monitor_stalled' %}{% set floor = [last, s[1] | float(now_ts)] | max %}{% set okm = namespace(v=true) %}{% for m in [\"sensor.camera_health\", \"sensor.camera_visual_activity\", \"sensor.camera_flap_rate\", \"sensor.camera_motion_stale\", \"sensor.camera_engine_log_archive\"] %}{% if (inp.beats.get(m) | float(0)) <= floor %}{% set okm.v = false %}{% endif %}{% endfor %}{% set v = 'clear' if off and okm.v else ('silent' if off_day else none) %}{% elif card == 'camera_flap' %}{% set v = 'clear' if off and decrypt_held else none %}{% elif card == 'camera_flap_down' %}{% set v = 'clear' if s[0] in ['on', 'off'] and held else none %}{% elif card == 'camera_motion_dead' %}{% set v = 'clear' if off and inp.fleet_active else none %}{% elif card == 'camera_partial_loss' %}{% for c in subj %}{% set pc = inp.partial_cams.get(c) or {} %}{% set released = pc.get('cleared') == 'recovered' or (pc.get('status') not in [none, 'flagged', 'stale', 'no events in lookback'] and not pc.get('since') and not pc.get('dormant')) %}{% if pc.get('ack') or not released %}{% set ok.v = false %}{% endif %}{% endfor %}{% set v = 'clear' if off and ok.v else ('silent' if off_day else none) %}{% elif card == 'camera_door_coverage' %}{% for c, saw0 in subj.items() %}{% set saw = inp.door_last_saw.get(c) or '' %}{% if c in inp.door_failing or saw == '' or saw == saw0 %}{% set ok.v = false %}{% endif %}{% endfor %}{% set v = 'clear' if off and ok.v else ('silent' if off_day else none) %}{% elif card == 'cameras_motion_stale' %}{% set pt = inp.motion_sample_ts | float(0) %}{% set v = 'clear' if inp.hours_min is number and pt > 0 and now_ts - pt <= 2100 and (pt - inp.hours_min * 3600) > last else none %}{% elif card == 'camera_log_archive_down' %}{% set v = 'clear' if s[0] in ['ok', 'catchup', 'gap', 'resync', 'withheld'] else none %}{% else %}{% set v = 'silent' if now_ts - last > 7 * 86400 else none %}{% endif %}{% if v %}{% set ns.out = ns.out + [[card, v]] %}{% endif %}{% endfor %}{{ ns.out }}"
+      }
+    },
+    {
+      "repeat": {
+        "for_each": "{{ ready }}",
+        "sequence": [
+          {
+            "variables": {
+              "card": "{{ repeat.item[0] }}",
+              "verdict": "{{ repeat.item[1] }}",
+              "entry": "{{ L.get(repeat.item[0]) or {} }}",
+              "mins": "{{ ((now_ts - (entry.get('first') | float(now_ts))) / 60) | round(0, 'floor') | int(0) }}",
+              "ago": "{% set m = mins | int(0) %}{% if m < 60 %}{{ m }} min{% elif m < 2880 %}{{ m // 60 }} h {{ m % 60 }} min{% else %}{{ m // 1440 }} d {{ (m % 1440) // 60 }} h{% endif %}"
+            }
+          },
+          {
+            "if": [
+              {
+                "condition": "template",
+                "value_template": "{{ verdict == 'clear' }}"
+              }
+            ],
+            "then": [
+              {
+                "action": "notify.<your_mobile_app_target>",
+                "data": {
+                  "title": "✅ Camera all-clear",
+                  "message": "Cleared: {{ entry.title }}. First alert {{ ago }} ago{{ ', %d alerts' % (entry.count | int(1)) if (entry.count | int(1)) > 1 else '' }}. Cameras now: {{ state_attr('sensor.camera_health', 'summary') or 'unknown' }}."
+                }
+              }
+            ]
+          },
+          {
+            "event": "camera_alert_cleared",
+            "event_data": {
+              "card": "{{ card }}",
+              "verdict": "{{ verdict }}"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "mode": "single",
+  "max_exceeded": "silent"
+}

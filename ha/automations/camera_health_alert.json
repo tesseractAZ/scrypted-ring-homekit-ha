@@ -138,6 +138,13 @@
                 "title": "📷 Camera fault",
                 "message": "{% if trigger.id in ['down_late', 'degraded_late'] %}{% set f = trigger.from_state %}{% set t = trigger.to_state %}{% set added = ((t.attributes.get(trigger.id) if t else none) or []) | reject('in', ((f.attributes.get(trigger.id) if f else none) or [])) | list %}{{ 'Also down' if trigger.id == 'down_late' else 'Also degraded' }}: {{ added | join(', ') }}. {% endif %}{{ state_attr('sensor.camera_health','summary') }}{% if trigger.id == 'boot' %} (present since Home Assistant started){% endif %}"
               }
+            },
+            {
+              "event": "camera_alert_pushed",
+              "event_data": {
+                "card": "camera_health",
+                "title": "📷 Camera fault"
+              }
             }
           ]
         }

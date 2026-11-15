@@ -34,6 +34,13 @@
         "title": "⚠️ Cameras: no motion from ANY camera",
         "message": "{% set hs = state_attr('sensor.camera_motion_stale','hours_since') or {} %}{% set vals = hs.values() | reject('none') | list %}No motion event from any of the 9 cameras in {{ (vals | min) | round(1) if vals else '?' }}h. The Ring->Scrypted->MQTT->HA motion path may be wedged.{% set fd = state_attr('sensor.camera_motion_stale','fleet_drop') or {} %}{% set gross = (vals | min) if vals else none %}{% set net = fd.get('silence_net_h') if fd is mapping else none %}{% if gross is not none and net is not none and gross - net > 0.25 %} Home Assistant was down for {{ (gross - net) | round(1) }} h of that time.{% endif %}"
       }
+    },
+    {
+      "event": "camera_alert_pushed",
+      "event_data": {
+        "card": "cameras_motion_stale",
+        "title": "⚠️ Cameras: no motion from ANY camera"
+      }
     }
   ],
   "mode": "single"

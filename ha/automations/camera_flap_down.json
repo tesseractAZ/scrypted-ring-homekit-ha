@@ -110,6 +110,13 @@
                 "title": "📹 Camera stream monitor down",
                 "message": "The stream-fault monitor has been in an error state for an hour.{% if trigger.id == 'boot' %} (present since Home Assistant started){% endif %}"
               }
+            },
+            {
+              "event": "camera_alert_pushed",
+              "event_data": {
+                "card": "camera_flap_down",
+                "title": "📹 Camera stream monitor down"
+              }
             }
           ]
         }

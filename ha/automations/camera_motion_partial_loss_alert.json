@@ -52,6 +52,14 @@
                 "title": "Partial motion loss: {{ (state_attr('sensor.camera_motion_stale','partial_loss') or []) | join(', ') }}",
                 "message": "{% set det = (state_attr('sensor.camera_motion_stale','partial_detail') or {}).get('cams') or {} %}{% for c in (state_attr('sensor.camera_motion_stale','partial_loss') or []) %}{% set d = det.get(c) or {} %}{% set e = d.get('entry') or {} %}{{ c }} still fires but has dropped out of {{ d.get('partner', '?') }}'s motion: {% if d.get('recent') %}{{ d.recent }} co-fires in 48 h vs {{ d.get('baseline', '?') }} before (P={{ d.get('p') }}){% else %}not re-tested this poll; at entry {{ (e.get('recent') or ['?', '?']) | join('/') }} vs {{ (e.get('base') or ['?', '?']) | join('/') }} (P={{ e.get('p') }}){% endif %}. {% set orc = d.get('own_recent') %}{% if orc is none %}Test the outer parts of its view - a doorstep test does not clear it. {% elif (d.get('own_recent_n') or 0) > orc | length %}{{ d.own_recent_n }} detections of its own in 48 h; test the outer view at several hours - a doorstep test does not clear it. {% elif not orc %}No detection of its own in 48 h (not yet stale); test its whole view - a doorstep test does not clear it. {% else %}{% set hs = orc | map('timestamp_custom', '%H') | map('int') | unique | sort | list %}{% if hs | count > 8 %}Still seen at {{ hs | count }} different hours in 48 h; test the outer view at several hours - a doorstep test does not clear it. {% else %}Still seen only at {% for h in hs %}{{ (h % 12) or 12 }} {{ 'AM' if h < 12 else 'PM' }}{{ ', ' if not loop.last }}{% endfor %} (local hours); test the outer view at other hours - a doorstep test does not clear it. {% endif %}{% endif %}{% endfor %}Check its motion settings in the Ring app."
               }
+            },
+            {
+              "event": "camera_alert_pushed",
+              "event_data": {
+                "card": "camera_partial_loss",
+                "title": "Partial motion loss: {{ (state_attr('sensor.camera_motion_stale','partial_loss') or []) | join(', ') }}",
+                "subjects": "{% set ns = namespace(d=[]) %}{% for c in state_attr('sensor.camera_motion_stale', 'partial_loss') or [] %}{% set ns.d = ns.d + [(c | string, true)] %}{% endfor %}{{ dict(ns.d) }}"
+              }
             }
           ]
         }

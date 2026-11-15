@@ -55,6 +55,13 @@
                 "title": "🗄 {% if is_state('sensor.camera_engine_log_archive','clock') %}No Scrypted engine log for 48 h+{% else %}Camera engine-log archive not archiving{% endif %}",
                 "message": "{% if is_state('sensor.camera_engine_log_archive','clock') %}No Scrypted engine log line for {{ ((state_attr('sensor.camera_engine_log_archive','lag_min') or 0) / 60) | round(1) }} h: the engine is stopped or hung, or its log no longer reaches the journal.{% else %}Two archive runs in a row failed ({{ states('sensor.camera_engine_log_archive') }}). The journal holds ~{{ state_attr('sensor.camera_engine_log_archive', 'journal_reach_h') or 37 }} h of engine log; lines older than that are lost if this is not fixed.{% endif %}"
               }
+            },
+            {
+              "event": "camera_alert_pushed",
+              "event_data": {
+                "card": "camera_log_archive_down",
+                "title": "🗄 {% if is_state('sensor.camera_engine_log_archive','clock') %}No Scrypted engine log for 48 h+{% else %}Camera engine-log archive not archiving{% endif %}"
+              }
             }
           ]
         }

@@ -65,6 +65,13 @@
                 "title": "📷 No motion events: {{ (state_attr('sensor.camera_motion_stale','stale') or []) | join(', ') }}",
                 "message": "{% set new_set = ((trigger.to_state.attributes.get('stale') if trigger.to_state is defined and trigger.to_state else none) or []) %}{% set old_set = ((trigger.from_state.attributes.get('stale') if trigger.from_state is defined and trigger.from_state else none) or []) %}{% set added = new_set | reject('in', old_set) | list %}{% set fs = trigger.from_state if trigger.from_state is defined and trigger.from_state else none %}{% set gap = fs is none or fs.state in ['unknown', 'unavailable'] or fs.attributes.get('stale') is none or fs.attributes.get('error') is not none %}{% set pb = (state_attr('sensor.camera_motion_stale','corroboration') or {}).items() | selectattr('1.broken','defined') | selectattr('1.broken') | map(attribute='0') | list %}{% if trigger.id == 'setchange' and added | count > 0 %}{{ 'Motion monitor back after a gap - stale: ' if gap else 'New: ' }}{{ added | join(', ') }}. {% elif trigger.id == 'proven' %}{{ 'Motion monitor back after a gap. ' if gap else '' }}{{ '' if pb else 'Proven broken: none at send time. ' }}{% elif trigger.id == 'boot' %}HA restarted. {% set sa = state_attr('sensor.camera_motion_stale','stale_added') or [] %}{% if sa %}New: {{ sa | join(', ') }}. {% endif %}{% endif %}{% set corr = state_attr('sensor.camera_motion_stale','corroboration') or {} %}{% set broke = corr.items() | selectattr('1.broken','defined') | selectattr('1.broken') | map(attribute='0') | list %}{% if broke %}PROVEN event-path failure: {{ broke | join(', ') }}. {% endif %}{{ state_attr('sensor.camera_motion_stale','summary') }}{% set st = state_attr('sensor.camera_motion_stale','stale') or [] %}{% set wt = namespace(c=[]) %}{% for k, v in corr.items() %}{% if k in st and v is mapping and 'ROOM SWITCH' in ((v.get('verdict') or '') | string) %}{% set wt.c = wt.c + [k] %}{% endif %}{% endfor %}{% if wt.c %} | Walk test ({{ wt.c | join(', ') }}): double-tap either paddle of the room switch, then walk in.{% endif %}"
               }
+            },
+            {
+              "event": "camera_alert_pushed",
+              "event_data": {
+                "card": "camera_motion_dead",
+                "title": "📷 No motion events: {{ (state_attr('sensor.camera_motion_stale','stale') or []) | join(', ') }}"
+              }
             }
           ]
         }

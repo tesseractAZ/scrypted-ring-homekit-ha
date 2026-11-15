@@ -81,6 +81,13 @@
                 "title": "⚠️ Cameras: motion stopped fleet-wide",
                 "message": "{% set fd = state_attr('sensor.camera_motion_stale','fleet_drop') or {} %}{% set lo = fd.get('last_onset') if fd is mapping else none %}{% set gross = ((as_timestamp(now()) - lo | float(0)) / 3600) | round(1) if lo else none %}{% set net = fd.get('silence_net_h') if fd is mapping else none %}{% set pu = states.sensor.camera_motion_stale.last_updated if states.sensor.camera_motion_stale is not none else none %}{% set down = (((as_timestamp(pu) - lo | float(0)) / 3600) - net | float(0)) | round(1) if (lo and pu and net is not none) else 0 %}No motion from any camera in {{ gross if gross is not none else 'over 2' }} h{% if down > 0.25 %} (Home Assistant was down {{ down }} h of it){% endif %}{% if fd.get('since') %}; raised {{ fd.get('since') | timestamp_custom('%-I:%M %p') }}, a normally busy time{% endif %}. Motion may be getting lost upstream: check the Ring app and the Ring plugin."
               }
+            },
+            {
+              "event": "camera_alert_pushed",
+              "event_data": {
+                "card": "camera_motion_fleet_drop",
+                "title": "⚠️ Cameras: motion stopped fleet-wide"
+              }
             }
           ]
         }

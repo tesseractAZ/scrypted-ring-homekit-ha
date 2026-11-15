@@ -134,6 +134,13 @@
                 "title": "📹 Camera stream churn",
                 "message": "{% if trigger.id == 'flapping_late' %}{% set f = trigger.from_state %}{% set t = trigger.to_state %}Also flapping: {{ ((t.attributes.get('flapping_late') if t else none) or []) | reject('in', ((f.attributes.get('flapping_late') if f else none) or [])) | join(', ') }}. {% endif %}{{ state_attr('sensor.camera_flap_rate','summary') }}{% if trigger.id == 'push_drops' %} - Ring motion may be getting lost: check that cameras still report motion.{% endif %}{% if trigger.id == 'boot' %} (present since Home Assistant started){% endif %}"
               }
+            },
+            {
+              "event": "camera_alert_pushed",
+              "event_data": {
+                "card": "camera_flap",
+                "title": "📹 Camera stream churn"
+              }
             }
           ]
         }
