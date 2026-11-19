@@ -461,7 +461,7 @@ The recorder writes a new `states` row for an entity only when its state **or a 
 | `binary_sensor.camera_motion_stale` | template | **48** (48–54) | 48 rows, 7 KB | `summary` |
 | `binary_sensor.cameras_problem` | template | **5** (2–62) | 4 rows, <1 KB | state and `summary`, only when a fault appears or clears |
 | `binary_sensor.cameras_flapping` | template | **0** (0–4) | none | state only |
-| `binary_sensor.camera_door_coverage_problem` | template | not yet recorded (new) | none | state and `failing`; changes only when the failing set changes (derived) |
+| `binary_sensor.camera_door_coverage_problem` | template | not yet recorded (new) | none | state and `failing`; changes only when the failing set changes or the door feed goes in or out of `live`; unavailable while it is not live (derived) |
 | `binary_sensor.camera_motion_fleet_drop` | template (trigger-based) | not yet recorded (new, 2026-10-29) | none | state only; changes only when a drop is raised or cleared (derived) |
 
 **Total: 3,158 rows and 1.54 MB of attribute JSON per day** (measured on the reference fleet, 2026-09-14). At Home Assistant's default `purge_keep_days: 10`, that keeps about 31,600 rows and 15 MB of attribute JSON (derived). Scale it by your own retention. The per-row `states` and index overhead is not included (measure on your box).
@@ -494,7 +494,7 @@ Three writers matter:
   - **Who reads them.** No shipped automation, template or script reads either attribute. `cam_motion.py` reads the vision state file, not the entity.
   - **Without them.** Replaying the same 24 h without those two attributes gives 225 rows and about 0.18 MB (derived from the measured rows).
 
-**The door-coverage attributes make the flap sensor's rows larger.** `door_rolling`, `door_deferred` and `door_coverage_failing` are in its attribute allowlist, and the 24 h figures above predate them. `door_rolling` alone is about 0.6 KB of compact JSON for four door-covering cameras (measured on the prepared door record, 2026-09-14). This sensor writes a row on every poll, so the attributes add roughly 90 KB/day of attribute JSON (derived; measure on your box).
+**The door-coverage attributes make the flap sensor's rows larger.** `door_rolling`, `door_deferred` and `door_coverage_failing` are in its attribute allowlist, and the 24 h figures above predate them. `door_rolling` alone is about 0.6 KB of compact JSON for four door-covering cameras (measured on the prepared door record, 2026-09-14). This sensor writes a row on every poll, so the attributes add roughly 90 KB/day of attribute JSON (derived; measure on your box). `door_feed` (2026-11-18) adds about 90 bytes per row, about 13 KB/day (computed from the format).
 
 **The partial-loss attributes make the motion sensor's rows larger too.** `partial_loss` and `partial_detail` are in `sensor.camera_motion_stale`'s attribute allowlist, and the 24 h figures above predate them. The comment on `PAYLOAD_BUDGET_B` in `cam_motion.py` records a peak of 8.1 KB for the whole attribute set over a 56-day replay (measured 2026-10-03); the evidence lists are trimmed once the payload would pass 12,000 bytes. At 48 rows a day that peak is about 0.39 MB/day of attribute JSON, against the 80 KB in the table (derived; measure on your box).
 

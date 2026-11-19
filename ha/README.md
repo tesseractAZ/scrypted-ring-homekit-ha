@@ -398,6 +398,39 @@ updates its card on a restart, a set change or the 6-hourly re-assert without
 re-notifying. `cam_motion.py` also appends failing cameras to its own `summary`, because
 that summary is the only text the staleness push carries.
 
+**A door feed that stops is not a covered door (2026-11-18).** Every verdict above
+needs door openings, and they come from one source, the contacts' `entryOpen: true`
+lines. When that source stops (the contacts are removed or re-paired elsewhere, or
+their hub leaves the account), the record stops gaining trips, `door_coverage_failing`
+empties as the trips age out, and the binary reads "off" while judging nothing. On the
+reference fleet the last door opening was at 2026-11-11 23:57Z, the alarm-side devices
+left the engine at the 2026-11-13 01:31Z discovery, and the binary read "off" the whole
+time. `cam_flap.py` therefore keeps, in the door record, the newest opening it has seen
+(any door, paired or not) and when it started looking (`feed_since`), and publishes
+`door_feed`: `state` (`live`, `silent` or `unknown`), `last_open`, `silent_h` and
+`watched_h`. The feed is **live** while the last opening is under `DOOR_FEED_SILENT_H`
+(24 h) old, **silent** once the record has itself watched 24 h without one, and
+**unknown** before that. Only the record's own observations count: judged trips cover
+paired doors only, so they never stand in for "no opening". A new or rebuilt record
+therefore reads unknown until it has watched 24 h. Watching starts at the first
+sample's start, so on the first poll after this ships it already counts that slice
+(up to 6 h). A gap in the watching (the monitor did not run, or every poll failed)
+starts it again, because openings in the gap were never seen. `silent_h` and
+`watched_h` are floored to whole hours, so neither reaches 24 before the state changes.
+Over 332 openings
+(2026-10-15..11-11) the median gap was 0.1 h, the 99th percentile 12.6 h and the longest
+14.7 h, overnight. Whenever the feed is not live, `binary_sensor.camera_door_coverage_problem`
+is **unavailable** rather than "off", and where `DOOR_CAMERA` pairs any door, the flap
+summary says why: `NO DOOR FEED: ... - door coverage is not being judged`, `door feed not
+established (N of 24 h watched, ...)` or `door feed not evaluated`. If a failing verdict
+is still in the record, the clause says "no new door trips are being judged" instead.
+This is a display truth, not an alert: a house left empty is a silent feed too, and the
+check cannot judge doors either way. One opening makes the feed live again at once, so
+a new contact needs no warm-up. A fault in the feed verdict reads `unknown` and is named
+in the summary; it never costs the trip record. The card closers (the recovered automation
+and the all-clear) need the binary "off", so a door-coverage card that is open when the
+feed stops stays open until openings resume: an unjudged check is not a clear one.
+
 The fleet-level orphan rate still ships **without an alert threshold**: its expected
 value is ~0 (measured 1 of 26 openings over 2.3 days), but 26 openings is far too thin
 to fit a bar, and inventing one from noise is a mistake this project has made before.

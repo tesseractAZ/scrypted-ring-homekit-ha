@@ -49,6 +49,9 @@ command_line:
         - door_deferred
         - door_rolling
         - door_coverage_failing
+        # whether door openings still arrive: {state live|silent|unknown, last_open,
+        # silent_h, watched_h}; the door-coverage binary below needs "live"
+        - door_feed
         # error-coded closes split by HAP close reason (sum = closed_with_error):
         # hub TIMEOUT (6) vs CANCELLED (3, a clip ending) vs any other code
         - closed_timeout
@@ -72,6 +75,11 @@ template:
       # over cam_flap's rolling door record. Deliberately independent of motion
       # staleness: a camera that still fires now and then never goes stale, so a
       # staleness alert can never catch one that misses its own door every time.
+      # Unavailable, not "off", while no door openings arrive (door_feed not live,
+      # including a missing door_feed): with no openings there is nothing to judge,
+      # and "off" would claim the doors are covered. The flap sensor's door_feed
+      # attribute gives the reason; where DOOR_CAMERA pairs a door, its summary says
+      # it too ("NO DOOR FEED ..." / "door feed not established ...").
       - name: Camera door coverage problem
         unique_id: camera_door_coverage_problem
         device_class: problem
@@ -79,6 +87,7 @@ template:
           {{ (state_attr('sensor.camera_flap_rate', 'door_coverage_failing') or []) | length > 0 }}
         availability: >-
           {{ states('sensor.camera_flap_rate') not in ['unknown', 'unavailable']
-             and state_attr('sensor.camera_flap_rate', 'error') is none }}
+             and state_attr('sensor.camera_flap_rate', 'error') is none
+             and (state_attr('sensor.camera_flap_rate', 'door_feed') or {}).get('state') == 'live' }}
         attributes:
           failing: "{{ state_attr('sensor.camera_flap_rate', 'door_coverage_failing') }}"

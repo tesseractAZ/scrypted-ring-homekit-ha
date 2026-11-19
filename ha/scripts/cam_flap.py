@@ -324,6 +324,27 @@ DOOR_TRIP_S = 300.0   # repeat openings of one door inside this are ONE trip
 # way to see a camera that still fires now and then but misses its own door
 # every time: motion staleness resets on each stray event, so it never trips.
 DOOR_STATE = "/config/.cam_flap_door_state.json"
+# DOOR FEED. Every door-coverage verdict needs door openings, and they come from one
+# source: the door contacts' "entryOpen: true" lines. When that source stops (the
+# contacts were removed, re-paired elsewhere, or their hub left the account), the
+# record stops gaining trips, door_coverage_failing empties as its trips age out and
+# the check reads healthy while judging nothing. Measured 2026-11-11..18: the last
+# door opening was at 11-11 23:57Z, the alarm-side devices then left the engine at the
+# 11-13 01:31Z discovery, and the door-coverage binary read "off" the whole time.
+# door_feed says whether openings still arrive (see door_feed_state):
+#   live     an opening within DOOR_FEED_SILENT_H
+#   silent   none for DOOR_FEED_SILENT_H, watched by the record itself for that long
+#   unknown  the record has not watched that long yet: a new or rebuilt record, or
+#            one whose monitor stopped running for a while. Watching starts at the
+#            first sample's start, so the first one counts its whole slice (up to 6 h)
+# The door-coverage binary is unavailable, not "off", whenever the feed is not live.
+# Its card closers need "off" too, so a door-coverage card that is open when the feed
+# stops stays open until openings resume: an unjudged check is not a clear one.
+# A display truth, not an alert: a house left empty is a silent feed too, and the
+# check cannot judge doors either way. Measured 10-15..11-11 over 332 openings: gap
+# median 0.1 h, p99 12.6 h, longest 14.7 h (overnight).
+DOOR_FEED_SILENT_H = 24.0   # 1.6x the longest gap measured; a quiet day away reads silent too
+FEED_UNKNOWN = {"state": "unknown", "last_open": None, "silent_h": None, "watched_h": None}
 # A SECOND FLAPPING CAMERA. camera_flap_alert pages on binary_sensor.cameras_flapping
 # turning on (held FLAP_HOLD_S), so a camera that starts flapping while another
 # already is moved no edge and was never paged. FLAP_STATE keeps each flapping
@@ -704,8 +725,44 @@ def corroboration_is_strong(near, te, background):
     return False
 
 
-def update_rolling(trips, now, covered_from=None):
-    """Merge newly judged trips into DOOR_STATE; return (rolling, failing, note).
+def door_feed_state(silent_h, watched_h):
+    """Classify the door feed (see DOOR FEED) as "live", "silent" or "unknown".
+
+    silent_h   hours since the newest door opening the record has seen (any door,
+               paired with a camera or not), or None if it has seen none. Never
+               negative: a stamp ahead of the clock reads 0.
+    watched_h  hours the record has been looking for openings (since feed_since):
+               how long a silence it could have seen.
+
+    Whatever is not "live" makes the door-coverage binary unavailable, so this
+    decides when the stack stops claiming the doors are covered.
+    """
+    # One opening proves the feed delivers, so it is live again at once - the first
+    # opening after a silence (or from a new contact) needs no warm-up.
+    if silent_h is not None and silent_h < DOOR_FEED_SILENT_H:
+        return "live"
+    # Silent only once the record has itself watched long enough to have seen an
+    # opening; a record that started looking recently cannot call the feed dead.
+    return "silent" if watched_h >= DOOR_FEED_SILENT_H else "unknown"
+
+
+def feed_since_epoch(state, now, start=None):
+    """When this record started looking for openings. A stored value is kept; a missing
+    or bad one starts at this sample's start (it sees openings from there), else now."""
+    fs = state.get("feed_since")
+    if _finite(fs) and 0 < fs <= now + 60:
+        return fs
+    return start if _finite(start) and 0 < start <= now else now
+
+
+def update_rolling(trips, now, covered_from=None, latest_open=None):
+    """Merge newly judged trips into DOOR_STATE; return (rolling, failing, note, feed).
+
+    latest_open is the epoch of this slice's newest door opening (any door), or
+    None. The record keeps the newest opening it has ever seen as last_open, and
+    feed is the published door_feed: {"state", "last_open", "silent_h",
+    "watched_h"} from door_feed_state. A record that cannot be evaluated reports
+    the feed as "unknown", never "live".
 
     covered_from is the earliest time this sample could judge a trip. The record
     keeps the earliest such time it has ever seen, so the published "days" says
@@ -784,6 +841,39 @@ def update_rolling(trips, now, covered_from=None):
             except Exception:  # noqa: BLE001
                 pass
         days = round(max(0.0, now - max(since if since is not None else now, horizon)) / 86400.0, 1)
+        # Door feed (see DOOR FEED), from the record's OWN bookkeeping only: last_open is
+        # the newest opening of any door it has seen, and watched_h how long it has been
+        # looking. Kept trips do not seed it: they hold paired doors only, so "no opening
+        # for N h" taken from them can be false. Its own guard: a fault here costs the
+        # feed verdict ("unknown" plus a note), never the trip record.
+        last_open, feed_since = None, None
+        try:
+            lo = state.get("last_open")
+            last_open = lo if _finite(lo) and 0 < lo <= now + 60 else None
+            if _finite(latest_open) and latest_open > 0:
+                lo = min(latest_open, now)    # a stamp ahead of the clock counts as now
+                last_open = lo if last_open is None else max(last_open, lo)
+            feed_since = feed_since_epoch(state, now, covered_from)
+            # A gap in the looking (the monitor did not run, or every poll failed): this
+            # sample starts after the last poll, so openings in between were never seen.
+            # Watching starts again at this sample.
+            ca = state.get("computed_at")
+            if _finite(ca) and _finite(covered_from) and ca < covered_from - 60:
+                feed_since = max(feed_since, min(covered_from, now))
+            watched_h = (now - feed_since) / 3600.0
+            silent_h = max(0.0, now - last_open) / 3600.0 if last_open is not None else None
+            fstate = door_feed_state(silent_h, watched_h)
+            if fstate not in ("live", "silent", "unknown"):
+                raise ValueError("door_feed_state returned %r" % (fstate,))
+            # Whole hours, floored: a published figure never reaches the threshold
+            # before the state does.
+            feed = {"state": fstate,
+                    "last_open": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(last_open)) if last_open is not None else None,
+                    "silent_h": int(silent_h) if silent_h is not None else None,
+                    "watched_h": int(watched_h)}
+        except Exception as exc:  # noqa: BLE001
+            feed = dict(FEED_UNKNOWN)
+            note = (note + "; " if note else "") + "door feed not evaluated (%s)" % exc
         rolling = {c: {"trips": 0, "saw": 0, "missed": 0, "weak": 0, "unseen": 0, "run": 0,
                        "days": days, "last_saw": None, "last_trip": None,
                        "failing_since_ts": None}
@@ -823,13 +913,14 @@ def update_rolling(trips, now, covered_from=None):
             failing_since[c] = int(ts) if _finite(ts) and 0 < ts <= now + 60 else int(now)
             rolling[c]["failing_since_ts"] = failing_since[c]
     except Exception:  # noqa: BLE001 - last resort for a shape not foreseen
-        return {}, [], "door record could not be evaluated"
+        return {}, [], "door record could not be evaluated", dict(FEED_UNKNOWN)
     tmp = "%s.tmp.%d" % (DOOR_STATE, os.getpid())
     try:
         with open(tmp, "w") as fh:
             json.dump({"trips": kept, "rolling": rolling, "failing": failing,
                        "failing_since": failing_since, "covered_from": since,
                        "rolling_days": days, "restarted_at": restarted_at,
+                       "last_open": last_open, "feed_since": feed_since, "feed": feed,
                        "computed_at": int(now)}, fh)
         os.replace(tmp, DOOR_STATE)
     except Exception:  # noqa: BLE001
@@ -838,7 +929,7 @@ def update_rolling(trips, now, covered_from=None):
             os.remove(tmp)
         except Exception:  # noqa: BLE001
             pass
-    return rolling, failing, note
+    return rolling, failing, note, feed
 
 
 def flapping_late(members, now, path=None):
@@ -924,6 +1015,7 @@ def emit(payload):
         "door_missed_by_cam": None, "door_miss_times": None,
         "door_cover_stats": None,
         "door_deferred": None, "door_rolling": None, "door_coverage_failing": None,
+        "door_feed": None,
         "closed_timeout": None, "closed_cancelled": None, "closed_other": None,
         "video_stalls": None, "video_stall_times": None,
         "summary": "", "error": None,
@@ -1152,9 +1244,18 @@ def main():
     door_openings = sum(door_by_name.values())
     door_orphans = sum(orphan_by_name.values())
     door_orphan_rate = round(door_orphans / float(door_openings), 3) if door_openings else None
-    door_rolling, door_failing, door_note = update_rolling(
+    latest_open = None   # this slice's newest opening of ANY door, paired or not
+    for t, _ in door_events:
+        try:
+            te = _utc(t)
+        except Exception:  # noqa: BLE001
+            continue
+        if _finite(te):
+            latest_open = te if latest_open is None else max(latest_open, te)
+    door_rolling, door_failing, door_note, door_feed = update_rolling(
         dj["trips"], time.time(),
-        (win_start + max(DOOR_MOTION_WINDOW_S, DOOR_TRIP_S)) if win_start is not None else None)
+        (win_start + max(DOOR_MOTION_WINDOW_S, DOOR_TRIP_S)) if win_start is not None else None,
+        latest_open=latest_open)
 
     # Alert metric = hard recording errors only. Error-coded closes are
     # reported as context but excluded: code 3 also covers a benign
@@ -1197,6 +1298,24 @@ def main():
                     "unreliable until CAMS is updated" % ",".join(sorted(unknown_motion)))
     # Not this slice: the door record spans days, the zone note is about the host.
     standing = ""
+    # Door feed, only where door coverage is configured at all (DOOR_CAMERA). A failing
+    # verdict still in the record is real evidence, so the clause then says no NEW
+    # trips are being judged. A fault (watched_h None) adds no clause of its own:
+    # door_note already says "door feed not evaluated (...)" or "door record could
+    # not be evaluated".
+    if DOOR_CAMERA and door_feed.get("state") != "live" and door_feed.get("watched_h") is not None:
+        judged = ("no new door trips are being judged" if door_failing
+                  else "door coverage is not being judged")
+        if door_feed.get("state") == "silent":
+            standing += "; NO DOOR FEED: %s - %s" % (
+                ("no door opening for %d h (last %sZ)" % (door_feed["silent_h"], door_feed["last_open"]))
+                if door_feed.get("last_open") else
+                "no door opening in the %d h on record" % door_feed["watched_h"], judged)
+        else:
+            standing += "; door feed not established (%d of %d h watched, %s) - %s" % (
+                door_feed["watched_h"], DOOR_FEED_SILENT_H,
+                ("last door opening %sZ" % door_feed["last_open"]) if door_feed.get("last_open")
+                else "no door opening", judged)
     if door_note:
         standing += "; " + door_note
     if _ZONE[2]:
@@ -1255,7 +1374,7 @@ def main():
         "door_missed_by_cam": missed_by_cam, "door_miss_times": miss_times,
         "door_cover_stats": cover_stats,
         "door_deferred": door_deferred, "door_rolling": door_rolling,
-        "door_coverage_failing": door_failing,
+        "door_coverage_failing": door_failing, "door_feed": door_feed,
         "door_orphans_by_door": orphan_by_name, "door_orphan_times": orphan_times,
         "closed_timeout": closed_by["timeout"], "closed_cancelled": closed_by["cancelled"],
         "closed_other": closed_by["other"],
