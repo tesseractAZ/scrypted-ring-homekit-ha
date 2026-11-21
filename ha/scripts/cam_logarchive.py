@@ -291,8 +291,13 @@ CURSOR_SHAPE = re.compile(r"^(?:[a-z]=[0-9a-f]{1,64};){2,9}[a-z]=[0-9a-f]{1,64}$
 #   SES  dialog_id / session_id   12 letters  one signalling dialog / RMS session
 #        (UUID-valued only, lower-cased first; dialog and session share the
 #        class so an equal value stays visibly equal)
-# location/user/account/owner/household/hardware ids, serials and MACs stay the
-# constant <RID>: account- or hardware-level, constant within this archive, so a
+# location/user/account/owner/household/hardware ids and serials stay the
+# constant <RID> (a MAC of six pairs with one separator, ':' or '-', and no ':'
+# or '-' glued to either end is <MAC> from R5b first; under a mac_address key a
+# value of [0-9A-Za-z_.:-], one glued to the key's ':' included, reaches R6 and
+# becomes <RID>; a MAC whose pairs are separated by spaces or %3A meets no rule
+# and no residual pattern): account- or hardware-level, constant within this
+# archive, so a
 # pseudonym would tell nothing. A pseudonym is not reversible without the key,
 # which never leaves the host's archive directory (a dotfile, so a '*' copy of the
 # day files leaves it behind) and never enters a backup; the
@@ -904,15 +909,17 @@ RESIDUAL = [
     # The BACKSTOP of R9 (10-04 review: a 12-character location id under
     # 'group_key' and inside 'location: { id: .. }' met no rule above): a QUOTED
     # value under any key ending in 'id' or '_key' (any case, Unicode folding
-    # included) that still holds a run of 8+ letters/digits/dashes with a letter
-    # AND a digit, at the start of the value or after a character outside that
-    # class (not after the '2' of an opening %22). No placeholder holds one
-    # (tokens are letters only), so only a raw value can trip it - also one
-    # wrapped as '<..>'. Whatever precedes the suffix is some key, so the key's
-    # start is not matched (1.5x faster, same lines).
+    # included) that still holds a run of 8+ letters/digits/underscores/dashes
+    # with a letter AND a digit, at the start of the value or after a character
+    # outside that class (not after the '2' of an opening %22). The class is R9's
+    # (R_KV_RUN): until 2026-11-21 it left out '_', so an underscore split a run
+    # and an underscored id under a key R9 misses (a Unicode-folded key) passed.
+    # No placeholder holds one (tokens are letters only), so only a raw value
+    # can trip it - also one wrapped as '<..>'. Whatever precedes the suffix is
+    # some key, so the key's start is not matched (1.5x faster, same lines).
     ("kv_id", re.compile(r"(?:(?i:id|_key)|[a-z0-9]Key)(?:\\*[\"']|%22)?\s*(?:[:=]|%3[aAdD])\s*"
-                         r"(?:\\*[\"']|%22)(?:(?:(?!%22)[^'\"\\\n])*?(?!%22)[^A-Za-z0-9'\"\\\n-])?"
-                         r"(?=[A-Za-z0-9-]*[A-Za-z])(?=[A-Za-z0-9-]*\d)[A-Za-z0-9-]{8,}")),
+                         r"(?:\\*[\"']|%22)(?:(?:(?!%22)[^'\"\\\n])*?(?!%22)[^A-Za-z0-9_'\"\\\n-])?"
+                         r"(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{8,}")),
 ]
 # A ':'-group run of 4+ is also how a TIME with ms never looks (HH:MM:SS.mmm has
 # 3), so hex_colon4 does not fire on timestamps.

@@ -82,10 +82,13 @@ before deploying (grep for `<` to find them).
    the device. The one ungated push is `cameras_motion_stale_alert`'s, repeated
    at every hourly check and every start while the whole fleet is past its
    9-hour bar. One gate is subtler than it looks: `camera_motion_dead_alert`
-   watches the proven-broken set with a template trigger, and a template trigger
-   does NOT fire from an initially-true state - the same arming trap
-   `numeric_state` has here - so it also pushes on BOOT whenever a camera is
-   already proven broken. Without that clause a proof raised before the
+   watches the proven-broken set with a state trigger on the motion sensor's
+   `corroboration` attribute, and a condition lets a `proven` run continue only
+   for a camera that was not proven at the previous reading. A proof that
+   already stands when the automation attaches is never new to that condition -
+   in effect the same edge-only trap `numeric_state` has here - so the
+   automation also pushes on BOOT whenever a camera is already proven broken.
+   Without that clause a proof raised before the
    automation loaded would never page, and since the cards are in-memory, the
    restart that wiped the card would be the very event guaranteeing the silence.
    `camera_health_alert`'s four template tiers and `camera_flap_alert`'s
@@ -727,12 +730,19 @@ only if an outage ever shows up here first.
   missing its stale list or carrying an error: a command_line reload, a timeout or
   a script error), the push opens with `Motion monitor back after a gap - stale:
   <cameras>.` instead, because the gate then counts every camera still stale as
-  added. `HA restarted.` marks the boot push. A proven push normally gets no
-  extra lead: its existing `PROVEN event-path failure: <cameras>.` line already
-  leads it. It opens with `Motion monitor back after a gap.` when the proof
-  re-fires as the monitor recovers, and with `Proven broken: none at send time.`
-  (and no PROVEN line) if the proof cleared before the push was sent. The fleet
-  summary and any walk-test hint follow unchanged.
+  added. `HA restarted.` marks the boot push. A `proven` push with no proof at the
+  previous reading gets no extra lead: its existing
+  `PROVEN event-path failure: <cameras>.` line already leads it. A `proven` push
+  opens with `New proof: <cameras>.`, naming only the newly proven cameras, when a
+  proof stood at the previous reading, even one that cleared in the same update
+  (the PROVEN line then names only the new proof). A proof found in the same
+  update that adds a camera to the stale set, or as the monitor recovers from a
+  gap, is pushed by the stale-set change under that change's lead
+  (`New: <cameras>.` or the gap lead); its PROVEN line names the proof but does
+  not mark it new, and the boot push likewise lists every proof. If the proof
+  cleared before the push was sent, a proven push carries
+  `Proven broken: none at send time.` (after any `New proof:` lead) and no PROVEN
+  line. The fleet summary and any walk-test hint follow unchanged.
   Without this lead, a page for a newly stale camera opened with a summary that
   still listed a camera paged earlier, and it read like a repeat of that page.
 The staleness page carries TWO automated discriminators, printed strongest
@@ -854,9 +864,10 @@ The staleness page carries TWO automated discriminators, printed strongest
   `last_changed`, which resets on restart and would otherwise mask staleness.
   The alert fires on the onset edge, on any change to the **stale set** (so an
   additional camera crossing its threshold raises genuinely new information
-  rather than silently rewriting a card you have already read), when the first
-  proof appears (the `proven` template trigger, true while any stale camera is
-  proven broken), on HA start, and on a slow 2-hourly re-assert. It used to
+  rather than silently rewriting a card you have already read), when a camera
+  is newly proven broken (the `proven` trigger, a state trigger on the motion
+  sensor's `corroboration` attribute), on HA start, and on a slow 2-hourly
+  re-assert. It used to
   re-assert *hourly* off a bare clock, which produced 260 identical recreations
   against 3 real state transitions in 26 days and trained the reader to ignore
   the channel. Its condition reads the
@@ -866,14 +877,18 @@ The staleness page carries TWO automated discriminators, printed strongest
   threshold while latched would otherwise never page; recreating the same
   notification_id is idempotent, so the re-assert adds no churn.
   Pushes go out only on genuinely new information: a camera ADDED to the stale
-  set, the first proof while none stands, or a restart while a proof stands or
-  `stale_added` is non-empty. A camera proven while another proof stands moves no
-  edge of the `proven` trigger and, already stale, changes no stale set, so its
-  proof sends no push of its own: the card shows it on the automation's next
-  run, and the next push, whatever triggers it, also names it on its PROVEN
-  line. The 1-hour onset trigger no longer pushes - every transition that turns
-  the binary on is also a stale-set change that `setchange` already pushed, so
-  the first camera to go stale used to page twice an hour apart - and a camera
+  set, a camera proven that was not before, or a restart while a proof stands or
+  `stale_added` is non-empty. The `corroboration` attribute changes on most polls
+  while a camera is stale (its verdict text moves), so a second condition lets a
+  `proven` run continue only when the proven set gained a camera and the same
+  update added no camera to the stale set. When the update did add one, and on a
+  recovery from a gap, the stale-set change pushes instead, and its PROVEN line
+  names the proof. The automation runs queued, so triggers from one update no
+  longer drop each other, and it keeps 50 traces, because every `proven` run the
+  condition stops stores one. The 1-hour onset trigger no longer pushes - every
+  transition that turns the binary on is also a stale-set change that
+  `setchange` already pushed, so the first camera to go stale used to page twice
+  an hour apart - and a camera
   LEAVING the set updates the card without re-paging the cameras still on it.
   Fit each per-camera override to the longest silence that camera shows when
   nothing is wrong (here, an unused interior room reached 211 h), not to a round
@@ -1267,8 +1282,8 @@ word (`token`, `secret`, `password`, `ufrag`, `bearer`) before an opaque run of
 placeholder, runs of 12+ hex or 7+ digits, e-mail domains (also URL-encoded),
 alternative MAC forms, HomeKit setup URIs, a quoted mixed-class value of 16+
 characters under `auth`, `key` or `p256dh`, a quoted value under any key ending
-in `id`, `_key` or `Key` that still holds a run of 8+ letters, digits and
-dashes mixing letters and digits, a raw segment after `mode/location/`,
+in `id`, `_key` or `Key` that still holds a run of 8+ letters, digits,
+underscores and dashes mixing letters and digits, a raw segment after `mode/location/`,
 `locations/` or `accounts/` in a URL path, any text but the placeholder after
 `for location` in either Ring location error, and any keyless run of 24+
 letters, digits and `_+/=-` that holds an upper-case letter, a lower-case
@@ -1290,8 +1305,12 @@ letter, no digit and no capital, so a token can never trip the residual scan,
 which keeps its full strictness for raw values; at 12 letters the chance of
 any collision among 100,000 values is about 1e-6. Account-level ids (location,
 user, account), hardware ids and serials stay the constant `<RID>`; a MAC
-written as six pairs joined by `:` or `-` becomes `<MAC>` (any other form under
-a `mac_address` key `<RID>`), and other UUIDs (SDP stream ids) stay `<UUID>`.
+written as six pairs joined by one separator (`:` or `-`), with no `:` or `-`
+glued to either end, becomes `<MAC>`; under a `mac_address` key a value of
+letters, digits and `_.:-`, one glued to the key's `:` included, becomes
+`<RID>`, while a MAC whose pairs are separated by spaces or `%3A` meets no rule
+and no residual pattern and is archived as logged. Other UUIDs (SDP stream ids)
+stay `<UUID>`.
 A ding's `created_at` and `requested_at` (epoch milliseconds) become the signed
 offset from the line's own UTC stamp, for example `<T:-1.722s>`, so the latency
 from Ring to the engine can be measured without keeping an absolute number;
@@ -1347,11 +1366,10 @@ general rule, any quoted value under a key ending in `id` or `_key` (or `Key`)
 has every run of eight or more letters, digits, dashes and
 underscores that mixes letters and digits replaced by `<RID>`; stream and track
 ids, counters and codec names are digits only, UUIDs or shorter and are not
-touched. The residual scan withholds any such run that is still there, though
-it counts only letters, digits and dashes (an underscore ends a run there), so a
-variant under a quoted `..id`, `.._key` or `..Key` key that no rule knows is
-withheld instead of archived unless underscores split it into runs that no
-longer qualify; an id outside a quoted key (prose, an array element, a map
+touched. The residual scan withholds any such run that is still there,
+counting runs the same way (an underscore joins one), so a variant under a
+quoted `..id`, `.._key` or `..Key` key that no rule knows is withheld instead
+of archived; an id outside a quoted key (prose, an array element, a map
 key, a URL path other than the Ring paths above) is still out of reach. A rule
 fix applies to new lines only: day files written before it keep what they hold
 until they are re-redacted.
