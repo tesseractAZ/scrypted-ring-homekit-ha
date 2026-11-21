@@ -30,7 +30,7 @@ Stage‑by‑stage cutover from a stock‑Ring Home Assistant setup to a single 
 
 **Clicks:** Settings → Add‑ons → Add‑on Store → ⋮ → Repositories → add `https://github.com/koush/scrypted` → search **Scrypted** → **Install** → Show in sidebar **ON** → **Start**. First boot auto‑creates an internal admin used transparently via Ingress.
 
-**Ports (hardcoded defaults):** HTTPS/admin **`10443`** (self‑signed) · HTTP/insecure **`11080`** · integration host later `127.0.0.1:10443`.
+**Ports (hardcoded defaults):** HTTPS/admin **`10443`** (self‑signed) · HTTP/insecure **`11080`**.
 
 **Notes:**
 - HAOS is **not recommended for Scrypted NVR** (limited local storage). Not a blocker if HKSV records to iCloud rather than locally.
@@ -100,7 +100,7 @@ rtsp://127.0.0.1:<rebroadcastPort>/<rtspServerPath>
 ```
 `<rtspServerPath>` is a random hex token **persisted per stream — copy exactly, do not construct.** The host part must be reachable **from HA**: `127.0.0.1` for the add‑on, that machine's address for a Scrypted elsewhere.
 
-**VERIFY:** each `/takePicture` URL returns a JPEG in a browser; each `rtsp://…/<token>` plays in VLC — **before** touching HA.
+**VERIFY:** each `/takePicture` URL returns a JPEG in a browser; each `rtsp://…/<token>` plays in VLC — **before** touching HA. With the add‑on, `127.0.0.1` reaches Scrypted only from the HA host itself, so when testing from another machine, replace `127.0.0.1` with `<HA_HOST_IP>`; in Stage 6, still enter the `127.0.0.1` form.
 
 ---
 
@@ -189,7 +189,7 @@ Delete the obsolete automations; remove the custom snapshot component + its pack
 5. **Battery cams (if any):** the Ring app is not accumulating stray Live‑View recordings.
 
 ## Rollback
-- **At Stage 9 (only DISABLED):** Ring → ⋮ → **Enable** — restores the borrowed session, the old poll loop, and the old stills/dashboard. Fully reversible, no restart, no data loss.
+- **At Stage 9 (only DISABLED):** Ring → ⋮ → **Enable** — restores the borrowed session, the poll loop of any custom component borrowing it (stopped in Stage 9), and the old entities, with no restart and no data loss. It does not undo Stages 3A, 7 or 8: to fall back fully, restore every card, automation and HomeKit‑bridge reference from the Stage 0 list (remove the Scrypted accessory‑mode cameras from Apple Home before the HA bridge exposes the Ring cameras again, or each camera appears twice) and turn back on any snapshot/poller automation paused in Stage 3A.
 - **After Stage 11 (DELETED):** re‑add via + Add Integration → Ring with fresh 2FA — this introduces a **second** client and may rotate Scrypted's token (you may then need to re‑2FA Scrypted).
 - **If Scrypted is the problem:** re‑run its Ring 2FA login (Stage 3B); HA's Ring entry is unaffected.
 - Keep the old custom component + packages YAML backed up until the soak passes.
@@ -200,7 +200,6 @@ Delete the obsolete automations; remove the custom snapshot component + its pack
 | Add‑on repo | `https://github.com/koush/scrypted` |
 | HTTPS/admin port | `10443` (self‑signed) |
 | HTTP/insecure port | `11080` |
-| Integration host (add‑on) | `127.0.0.1:10443` |
 | Still Image URL | `http://127.0.0.1:11080/endpoint/@scrypted/webhook/public/<device_id>/<token>/takePicture` |
 | RTSP rebroadcast URL | `rtsp://127.0.0.1:<rebroadcastPort>/<rtspServerPath>` (pin the port; path = random hex, copy exactly) |
 | Rebroadcast plugin | `@scrypted/prebuffer-mixin` ("Rebroadcast Plugin") |

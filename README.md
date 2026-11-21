@@ -2,8 +2,8 @@
 
 One [Scrypted](https://github.com/koush/scrypted) session is the only Ring cloud client on the automation side. It serves every camera to Apple HomeKit (with HomeKit Secure Video) and to Home Assistant. Around it runs a purpose-built monitoring and log-forensics stack:
 
-- **six Python scripts:** five monitors plus the partial-loss detector module that `cam_motion.py` imports, ≈7,200 lines, standard library plus Pillow;
-- **36 Home Assistant automations;**
+- **six Python scripts:** five monitors plus the partial-loss detector module that `cam_motion.py` imports, ≈7,400 lines, standard library plus Pillow;
+- **37 Home Assistant automations;**
 - **5 command-line sensors.**
 
 Together they detect the failures a camera system usually hides: a dead camera behind a cached snapshot, an event path that has gone silent while every probe stays green, streams that flap without missing a snapshot, and a camera that slowly stops seeing people at its own door.
@@ -46,27 +46,27 @@ The repository holds the deployable monitors, packages and automations as saniti
   - *Cached frames:* a frame matching any of the last 8 distinct body hashes is a cached image and is never analysed.
   - *Unlit frames:* an unlit-grayscale guard catches lamp-off frames.
   - *IR spikes:* a one-frame IR luma spike and its return are merged into one event.
-- **One fetch, two analysers.** Vision analyses the frames the health probe just fetched, shared atomically through tmpfs. That halves the snapshot requests to Scrypted, and with them the ~25-line request dump Scrypted logs for each one. If the health probe stops, vision fetches its own frames.
+- **One fetch, two analysers.** Vision analyses the frames the health probe just fetched, shared atomically through tmpfs. That halves the snapshot requests to Scrypted, and with them the 15-line request dump Scrypted logs for each one. If the health probe stops, vision fetches its own frames.
 
 ### Motion statistics and corroboration: `cam_motion.py`, `partial_loss.py`
 - **Recorder-derived staleness.** Each camera's motion history is read from Home Assistant's recorder, read-only, against a per-camera window (72 h by default). A camera is flagged only while at least one other camera has fired in the last 24 h.
 - **Cross-camera corroboration: proof without a walk test.**
   - Motion events are grouped into clusters linked within 300 s, and each camera's historical co-firing rate with each partner is fitted.
   - A partner qualifies when it co-fires at least 15 % of the time, with at least 20 clusters before the silence and 8 since.
-  - When those partners keep firing and the quiet camera's co-fires stop, the camera is shown broken at α = 10⁻³ (Wilson interval). The proof latches and clears itself on the camera's next real event.
+  - When those partners keep firing and the quiet camera's co-fires stop, the camera is shown broken at α = 10⁻³ (Wilson interval). The proof latches and clears itself on the camera's next real event; it is also forgotten 90 days after the proof, and dropped at any poll at which no camera has fired in the last 24 h.
 - **Partial-loss detection.**
   - A camera can keep firing but drop out of most of the activity its partners record. A binomial tail test with Bonferroni correction (α = 10⁻⁶ per camera-poll) looks for this on a 48-hour window against a 27-day baseline, guarded by a likelihood veto.
-  - In replay it caught 14–18 of 24 losses of 80–100 %, typically 40–50 h after onset. Losses below about 75 %, day-only or night-only losses, and slow declines are mostly missed. The test publishes its own statistical power, so "no flag" is never mistaken for an all-clear.
+  - In replay it caught 14–18 of 24 losses of 80–100 %, typically 40–50 h after onset. Losses below about 75 % and day-only or night-only losses are mostly missed, and slow declines are not detected. The test publishes its own statistical power, so "no flag" is never mistaken for an all-clear.
   - A flag clears only on recovery evidence held for 6 h, never because time has passed. A camera that goes fully silent passes to the staleness check, and its flag is kept dormant.
 - **Chance and coverage models.**
   - Per-camera, per-hour background firing rates over 7 days estimate how often motion coincides by chance.
   - An incremental index of recorder gaps across all entities (over 5 min, ~62-day lookback) keeps unobserved time out of the partial-loss test. The 72 h staleness clock does not exclude it.
-  - A host outage is reported after the fact from those same recorder holes. Each outage is paged once, on the first poll that sees it, so a second outage inside the same 24 h is paged too.
+  - A host outage longer than 15 min is reported after the fact, from a 24 h scan of the same all-entity recorder holes. Each outage is paged once, on the first poll that sees it, so a second outage inside the same 24 h is paged too.
 - **Fleet-wide motion drop.** A fault upstream of every camera (the Ring plugin's push receiver, the engine, MQTT) silences the whole fleet at once. The last 1.5 h of fleet motion is compared with the same clock window on each of the previous 14 days. With zero onsets at two polls 30 min apart, at an hour when 12 of those days logged 7 or more, the alert pages and stays latched until motion returns. In replay it paged the 2026-10-28 push-decrypt outage 2.1 h after the last onset, where the 9 h fleet-silence check never fired. Over 26 days it produced one false page at 27 of 30 poll phases (none at two, two at one), and it is armed about 40–43 % of the time, mostly by day and in the evening.
 - **Vision cross-checks.** Frame differencing annotates each stale camera's verdict without changing the flag. Two or more localized scene changes with no motion event read "detection/event path suspect". A quiet scene is called consistent with vacancy only when the camera's measured vision recall supports it. That recall is scored with a trailing-miss run test.
 
 ### Stream and log forensics: `cam_flap.py`
-- **HKSV recording-failure rate** per camera over a fixed 6 hours, parsed from the last 60,000 lines of the Scrypted engine journal and a small persisted record of the failures those lines no longer reach. A camera is flagged at 2 or more failures per hour with at least 3 failures in the window, which is 12 failures in a full window, and pages once that has held for 20 minutes.
+- **HKSV recording-failure rate** per camera over up to 6 hours, parsed from the last 60,000 lines of the Scrypted engine journal and a small persisted record of the failures those lines no longer reach. The window is the span that record has observed: 6 hours once full; with no usable record, or after a gap in the polls that the 60,000-line slice does not bridge, it restarts at the slice and grows back to 6 hours. A camera is flagged at 2 or more failures per hour with at least 3 failures in the window, which is 12 failures in a full window, and pages once that has held for 20 minutes.
 - **HAP close-code split.** Error-coded HomeKit closes are split by reason code into hub TIMEOUT, CANCELLED and every other code, and the three always sum to the lumped count. Measured timing showed what each code means:
   - every CANCELLED landed 12.0 s after the clip's last fragment, a normal clip end;
   - every TIMEOUT landed 16–17 s after, a stream that stopped.
@@ -105,16 +105,16 @@ The repository holds the deployable monitors, packages and automations as saniti
   - the fleet-silence alert pages every hour and at boot while the whole fleet stays silent past 9 h;
   - the per-camera dead-man pages again at boot while a broken-camera proof stands;
   - the camera-health and stream-churn alerts and the health, motion, flap and vision dead-men push once per start when a fault already present at the start outlasts its hold, since a fault present when the triggers arm cannot fire them.
-- **An all-clear follows a pushed fault.** Each fault alert that pushes (all but the walk test and the host-down notice, which reports an outage already over) also records its card in `sensor.camera_alert_ledger`, a trigger-based sensor that survives restarts. Every 5 min `camera_all_clear` checks each open card against its own recovery test: the fault's indicator clear for the same hold its recovered automation uses, plus evidence where a card can clear without a recovery (partial loss: every flagged camera released by recovery, not gone stale or acknowledged; door coverage: every failing camera saw its door again; motion-dead: the fleet is active; a stalled monitor: every monitor's own heartbeat past both the push and the moment the stall cleared). It then pushes "Cleared: <title>" once, with how long ago the first alert went out. A card that stays ambiguous for a day closes silently, and a fault that never pushed is never recorded. Card dismissals play no part, so neither a person dismissing a card nor a restart can produce an all-clear.
+- **An all-clear follows a pushed fault.** Each fault alert that pushes (all but the walk test and the host-down notice, which reports an outage already over) also records its card in `sensor.camera_alert_ledger`, a trigger-based sensor that survives restarts. Every 5 min `camera_all_clear` checks each open card against its own recovery test: the fault's indicator clear for the same hold its recovered automation uses (the fleet-silence card has no hold: it needs a motion-monitor sample at most 35 min old that shows a motion event after its last push), plus evidence where a card can clear without a recovery (partial loss: every flagged camera released by recovery, not gone stale or acknowledged; door coverage: every failing camera saw its door again; motion-dead: the fleet is active; a stalled monitor: every monitor's own heartbeat past both the push and the moment the stall cleared). It then pushes "Cleared: <title>" once, with how long ago the first alert went out. A partial-loss, door-coverage or stalled-monitor card whose indicator has read off for a day without that evidence closes silently; every other card stays open until its recovery test passes. While no door opening has arrived for 24 h the door-coverage indicator reads unavailable, not off, so a door-coverage card open then stays open until openings resume. A fault that never pushed is never recorded. Card dismissals play no part, so neither a person dismissing a card nor a restart can produce an all-clear.
 - **Survives restarts.** Persistent notifications do not survive a Home Assistant restart, so 14 staggered re-asserts and boot triggers restore every open fault card.
 - **Every monitor has a dead-man.**
   - Each monitor pages when it errors, goes unavailable or stops updating, with freshness tracked through bucketed heartbeats and per-sensor age bars from 45 minutes to 3 hours.
   - A failure already present at start-up still pages: the archive and partial-loss dead-men hold in delayed template binaries, and the health, motion, flap and vision dead-men run a start-up check that waits up to their own hold (30, 65, 60 and 30 minutes).
-  - Template sensors fail closed, and every script emits the same attribute set on success and on error.
+  - Template sensors fail closed, with two exceptions. Four binaries (log-archive down, log-archive events, fleet drop and partial-loss test down) hold their current verdict through a missing reading. The partial-loss test-down binary also reads off while `sensor.camera_motion_stale` carries an error, which `camera_motion_monitor_down` pages instead. Every script emits the same attribute set on success and on error.
 
 ### Engineering and supply chain
 - **Contract-checked in CI.**
-  - All 138 published sensor attributes are checked against each package's allowlist in both directions.
+  - All 139 published sensor attributes are checked against each package's allowlist in both directions.
   - Every automation parses, and each one that carries an `id` is checked against its filename.
   - A public-repo hygiene sweep runs generic patterns plus instance patterns loaded from a CI secret, in a job that isolates that secret.
 - **Hardened pipeline.**
@@ -163,7 +163,7 @@ The repository holds the deployable monitors, packages and automations as saniti
 
 - **Home Assistant** with the built‑in go2rtc (2024.11+), ideally HAOS/Supervised so Scrypted can run as an add‑on.
 - **Scrypted** (add‑on or standalone) with the Ring, HomeKit, Rebroadcast (prebuffer‑mixin), Webhook, and MQTT plugins.
-- **For the monitors in `ha/`:** Scrypted as an add-on on HAOS/Supervised (`cam_flap.py` and `cam_logarchive.py` read its log through the Supervisor API) and the default SQLite recorder (`cam_motion.py` opens `/config/home-assistant_v2.db` read-only). Other installs need those reads adapted.
+- **For the monitors in `ha/`:** Scrypted as an add-on on HAOS/Supervised (`cam_flap.py` and `cam_logarchive.py` read its log through the Supervisor API, and `cam_health.py` and `cam_vision.py` fetch its snapshots on loopback, `HOST = "127.0.0.1:11080"`) and the default SQLite recorder (`cam_motion.py` opens `/config/home-assistant_v2.db` read-only). Other installs need those reads adapted; a Scrypted on another machine needs that machine's address in `HOST` in both probe scripts.
 - **An MQTT broker** reachable by both Scrypted and HA (e.g. the Mosquitto add‑on) — for motion and doorbell events.
 - **Apple HKSV** (optional): a Home Hub (Apple TV / HomePod) on the **same subnet** as Scrypted, plus an iCloud+ plan sized to your camera count.
 - A **Ring account with 2FA** — you log Scrypted in interactively once.
@@ -174,7 +174,7 @@ The repository holds the deployable monitors, packages and automations as saniti
 
 Read in order:
 
-1. **[`docs/migration-runbook.md`](docs/migration-runbook.md)** — the cutover from a stock‑Ring setup to the single‑Scrypted engine, with **zero camera downtime** and a rollback checkpoint at every stage.
+1. **[`docs/migration-runbook.md`](docs/migration-runbook.md)** — the cutover from a stock‑Ring setup to the single‑Scrypted engine, with **zero camera downtime** and a clean rollback checkpoint (Stage 9: the stock Ring integration disabled, not yet deleted).
 2. **[`docs/operations.md`](docs/operations.md)** — everything that runs afterward: live view (and why prebuffer is not the way to make it instant), motion/doorbell into HA, the health watchdog, doorbell announcements, snapshot freshness, diagnosing stream flapping, backups, and (§9) what the monitoring stack itself costs in probe load, runtime, memory, and recorder and disk writes.
 3. **[`ha/`](ha/)** — the deployable artifacts themselves: the five monitor scripts (plus `partial_loss.py`, which `cam_motion.py` imports), their package YAML, and every automation as sanitized, placeholder-ready files. Rebuilding on fresh hardware starts here.
 
@@ -202,7 +202,7 @@ The condensed version of what actually bites in practice. Full detail lives in t
 
 **Operating it**
 - **A Ring plan change is a system event.** Upgrading the subscription tier reset the cloud clip-history epoch (making clip queries return zero for everything older — easily misread as "the API broke"), changed the snapshot refresh cadence, and revived a camera's server-side motion detection that no local fix had touched. Re-verify monitors and re-measure baselines after any plan change.
-- **The supervisor add‑on‑log API returns the *oldest* entries by default.** `Range: entries=:0:N` is a frozen head slice that never advances; use `entries=:-N:N` for the live tail, or you'll analyze hours‑old data and reach the wrong conclusion.
+- **The supervisor add‑on‑log API returns the *oldest* entries by default.** `Range: entries=:0:N` is a head slice that does not follow new lines: it stays put between calls and jumps forward only when the journal discards a whole file of its oldest entries; use `entries=:-N:N` for the live tail, or you'll analyze hours‑old data and reach the wrong conclusion.
 - **Use the insecure HTTP snapshot endpoint** so HA doesn't reject Scrypted's self‑signed certificate.
 - **Home Assistant stores backups locally by default.** That protects you against a bad update, not against a dead SD card — arrange an off‑site copy, or a hardware failure takes your only rebuild image with it.
 

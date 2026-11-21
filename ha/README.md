@@ -16,15 +16,18 @@ before deploying (grep for `<` to find them).
 | `scripts/partial_loss.py` | `/config/scripts/partial_loss.py` (beside `cam_motion.py`) | imported by `cam_motion.py` (the partial-loss test) |
 | `scripts/cam_logarchive.py` | `/config/scripts/cam_logarchive.py` | the hourly engine-log archive sensor |
 | `packages/cam_health.yaml`, `packages/cam_flap.yaml`, `packages/cam_motion.yaml`, `packages/cam_vision.yaml`, `packages/cam_logarchive.yaml`, `packages/cam_allclear.yaml` | `/config/packages/` | `homeassistant: packages: !include_dir_named packages` |
-| `automations/*.json` | HA **storage** automations (not files) | `POST /api/config/automation/config/<id>` |
+| `automations/*.json` | HA UI-managed automations in `/config/automations.yaml` (written by the API, not copied) | `POST /api/config/automation/config/<id>`, with `automation: !include automations.yaml` in `configuration.yaml` (the default) |
 
 ## Deploy order
 
 1. **Fill placeholders.** Five of the six scripts carry them (`partial_loss.py`
    has none) — grep each for `<`.
-   `scripts/cam_health.py` and `scripts/cam_vision.py` each need the HA host IP
-   plus every camera's Scrypted device id and webhook token (how to obtain them:
-   [`docs/migration-runbook.md`](../docs/migration-runbook.md)). The two lists
+   `scripts/cam_health.py` and `scripts/cam_vision.py` each need every camera's
+   Scrypted device id and webhook token (how to obtain them:
+   [`docs/migration-runbook.md`](../docs/migration-runbook.md)). Their `HOST`
+   ships as `127.0.0.1:11080`: Core and Scrypted share the host network, so
+   loopback survives a change of the host's LAN address, and only a Scrypted on
+   another machine needs that machine's address there. The two camera lists
    must match, names included: `cam_vision.py` analyses the frame `cam_health.py`
    leaves for each camera in `/dev/shm/cam_snap/<name>.jpg`, and requests the
    same endpoints itself only while those frames are missing or stale, so while
@@ -55,39 +58,52 @@ before deploying (grep for `<` to find them).
    probes). Getting `PROBERS` wrong scales the expected-probe denominator by
    the same factor: set to 2 with one prober, every camera sits at about half
    the expected count and stays in `probe_shortfall`; left at 1 after adding a
-   second prober, the probe-shortfall detector is silently detuned; and
-   `ALERT_HR_OVERRIDES` ships empty — add a raised threshold per known-chronic
-   camera if you have one. `automations/front_door_doorbell_announce.json`
-   needs your speaker and TTS entity ids.
-   `automations/go2rtc_reload_on_start.json` needs the go2rtc config-entry id —
-   find it with `GET /api/config/config_entries/entry` (filter `domain: go2rtc`).
-   Every fault alert (except the card-only `camera_log_archive_event`) also
-   carries a `notify.<your_mobile_app_target>` action —
+   second prober, the probe-shortfall detector is silently detuned;
+   `DOOR_CAMERA` ships empty (a commented template): map each door contact's
+   name, as the engine log prints it before `entryOpen: true`, to the stem (a
+   `CAMS` value) of the camera that covers that door, adding only pairs someone
+   who knows the property has confirmed, since a wrong pair accuses a healthy
+   camera (while it is empty no trip is judged per camera and
+   `camera_door_coverage_alert` cannot fire); and `ALERT_HR_OVERRIDES` ships
+   empty — add a raised threshold per known-chronic camera if you have one.
+   `automations/front_door_doorbell_announce.json` needs your speaker and TTS
+   entity ids. `automations/go2rtc_reload_on_start.json` needs the go2rtc
+   config-entry id — find it with `GET /api/config/config_entries/entry` (filter
+   `domain: go2rtc`). Every fault alert (except the card-only
+   `camera_log_archive_event`) also carries a `notify.<your_mobile_app_target>`
+   action, and so do `camera_room_walk_test` (two steps) and `camera_all_clear`
+   (`grep -l your_mobile_app_target automations/*.json` lists the 17 files) —
    replace it with your own push target, or delete those steps if you only want
-   the in-UI cards. Leaving them unreplaced makes the automation error at run
-   time. Note the push steps are deliberately gated so that a re-assert (which
-   exists only to restore a card a restart erased) does not re-notify: only
-   genuinely new information reaches the device. One gate is subtler than it
-   looks: `camera_motion_dead_alert` watches the proven-broken set with a template
-   trigger, and a template trigger does NOT fire from an initially-true state - the
-   same arming trap `numeric_state` has here - so it also pushes on BOOT whenever a
-   camera is already proven broken. Without that clause a proof raised before the
+   the in-UI cards. `camera_all_clear` has no card: without a push target, skip
+   it and `packages/cam_allclear.yaml`, which only it reads. Leaving the target
+   unreplaced makes the automation error at run time. Note the push steps are
+   deliberately gated so that a re-assert (which exists only to restore a card a
+   restart erased) does not re-notify: only genuinely new information reaches
+   the device. The one ungated push is `cameras_motion_stale_alert`'s, repeated
+   at every hourly check and every start while the whole fleet is past its
+   9-hour bar. One gate is subtler than it looks: `camera_motion_dead_alert`
+   watches the proven-broken set with a template trigger, and a template trigger
+   does NOT fire from an initially-true state - the same arming trap
+   `numeric_state` has here - so it also pushes on BOOT whenever a camera is
+   already proven broken. Without that clause a proof raised before the
    automation loaded would never page, and since the cards are in-memory, the
    restart that wiped the card would be the very event guaranteeing the silence.
-   `camera_health_alert`'s four template tiers have the same trap, and the health,
-   motion, flap and vision dead-men have its state-trigger form (a state trigger
-   needs a change after it attaches). Each of those five runs a start-up check on
-   the Home Assistant start trigger: it waits up to its own hold and pushes if the
-   fault is still present, saying the fault has been present since the start. The
-   check can repeat, once per start, a page sent before the restart, and it runs
-   only on a start: an automation reload re-arms the triggers without a start
-   event, so edit these five while the monitors are healthy.
+   `camera_health_alert`'s four template tiers and `camera_flap_alert`'s
+   push-decrypt tier have the same trap, and `camera_flap_alert`'s flapping
+   trigger and the health, motion, flap and vision dead-men have its
+   state-trigger form (a state trigger needs a change after it attaches). Each
+   of those six runs a start-up check on the Home Assistant start trigger: it
+   waits up to its own hold and pushes if the fault is still present, saying
+   the fault has been present since the start. The check can repeat, once per
+   start, a page sent before the restart, and it runs only on a start: an
+   automation reload re-arms the triggers without a start event, so edit these
+   six while the monitors are healthy.
 2. **Snapshot first.** Take a full backup immediately before deploying, so a
    bad change is a restore rather than a reconstruction. Note that manual
    backups are usually **exempt** from the supervisor's automatic-backup
    retention, so prune old pre-change snapshots yourself or they accumulate.
    The mirror-image hazard is worth planning for too: **restoring a backup
-   silently reverts every change made after that backup was taken.** Storage
+   silently reverts every change made after that backup was taken.** UI-managed
    automations are the easy thing to lose this way, because nothing warns you
    that an automation's config moved backwards. After any restore, diff the
    live automations against these files and re-apply the delta — which is the
@@ -148,13 +164,16 @@ before deploying (grep for `<` to find them).
 - `camera_health_alert` — pages on a **sustained** fault only, four tiers:
   camera down 8 min (fast); degraded (frozen/slow) 30 min — transient stream
   blips self-heal in under ~22 min and paging on them is pure noise;
-  fleet-stale 5 min (fastest) — multiple cameras returning byte-identical
-  frames simultaneously means a fleet-level snapshot-pipeline wedge; and
+  fleet-stale 5 min (fastest, with fleet-miss) — five or more of the nine
+  cameras (`FLEET_STALE_MIN`) returning a frame byte-identical to their own
+  previous probe in one cycle means a fleet-level snapshot-pipeline wedge; and
   fleet-miss 5 min — five or more of the nine probes failing the same cycle
   (`FLEET_MISS_MIN`), which is the
   snapshot path being down rather than any camera being down.
   Re-asserts hourly while the problem binary has been on 30+ min (the longest
-  tier's window, so a re-assert can never page a blip the tiers absorb):
+  tier's window, so a fault one tier absorbs never reaches it; faults in
+  different tiers that run back to back, none outlasting its own hold, can keep
+  the binary on that long and get a "Still faulted" card, never a push):
   persistent notifications are in-memory, so a restart wipes the page with the
   fault still latched and an edge trigger can never re-fire. A re-assert restores
   only the card. A tier already true when the triggers arm cannot fire while it
@@ -173,10 +192,13 @@ before deploying (grep for `<` to find them).
   joined at least one hold after the episode began, i.e. after the count edge's
   own page went out (an earlier joiner is in that page's summary). The
   `down_late` / `degraded_late` state triggers push each camera added to a list
-  ("Also down: X"). A change seen right after a reload or a start does not page,
-  since the start-up check covers it; after an error probe the next good one
-  re-pages any camera still late (a repeat, never a miss). On a script's first run
-  with no tier record, cameras already in a tier count as paged.
+  ("Also down: X"). A change whose previous reading was unknown or unavailable
+  does not page: after a start the start-up check covers it, and after a
+  `command_line` reload the tier's own trigger, re-armed while the sensor was
+  unavailable, pages the tier again after its hold (8 / 30 min); after an error
+  probe the next good one re-pages any camera still late (a repeat, never a
+  miss). On a script's first run with no tier record, cameras already in a tier
+  count as paged.
 - `camera_health_recovered` — dismisses the alert after **35 min** clear.
   Dismiss-only: no "recovered" notification (avoids churn). The gate must sit
   above the longest raise tier: at 5 min it was 6× *shorter* than the 30-min
@@ -187,10 +209,12 @@ before deploying (grep for `<` to find them).
   10-min re-arm window (`FREEZE_PROBES × scan_interval`), so "recovered" can no
   longer be asserted from an interval the detector is blind in.
 - `camera_health_monitor_down` / `_recovered` — dead-man for the watchdog
-  ITSELF. The alert's template triggers all read `state_attr(...)|int(0)`, so a
-  dead sensor — or the script's own error path, which publishes `healthy: -1` —
-  evaluates as "no fault" on every trigger: without this, the primary liveness
-  monitor can die and be reported as a clean fleet. The recovered half
+  ITSELF. The alert's template triggers read `state_attr(...)|int(0)` (down,
+  degraded) or `state_attr(...) == true` (fleet-stale, fleet-miss), so a dead
+  sensor — or the script's own error path, which publishes `healthy: -1` with
+  zeroed counts and false fleet flags — evaluates as "no fault" on every
+  trigger: without this, the primary liveness monitor can die and be reported
+  as a clean fleet. The recovered half
   dismisses the card once the sensor is back (dismiss-only). It is the only
   pager for a `-1` that is present from the start: that payload keeps a bucketed
   `updated_at`, so `camera_monitor_stalled` stays quiet.
@@ -261,7 +285,7 @@ before deploying (grep for `<` to find them).
   wedge described in `docs/operations.md` §3. The condition reads the
   staleness sensor's **recorder-derived** `hours_since` map, NOT entity
   `last_changed`: last_changed resets on every restart (blinding the check
-  for up to 4 h), and a motion sensor stuck `on` reads as *fresh motion
+  for up to its 9 h bar), and a motion sensor stuck `on` reads as *fresh motion
   forever* — a stuck sensor once pinned the fleet clock to "now" for ~35
   consecutive hourly checks, mathematically disabling the dead-man while it
   claimed to be watching.
@@ -316,15 +340,16 @@ cameras did or did not report. `cam_flap.py` now publishes `door_openings`,
 `DOOR_MOTION_WINDOW_S` anywhere on the fleet. `door_orphan_times` carries
 `[timestamp, door]` **pairs**, not bare timestamps: the per-door counts live in a
 separate attribute that has no times, the reporting window rolls every few hours,
-and the add-on log that could rejoin them retains only ~2.3 days — so an orphan
-recorded without its door becomes permanently unattributable, destroying exactly
-the history the feature exists to accumulate. Note also that summing
+and the add-on log that could rejoin them retains only about 37-38 hours (35 days
+in the engine-log archive below) — so an orphan recorded without its door becomes
+unattributable once those lines age out, destroying exactly the history the
+feature exists to accumulate. Note also that summing
 `door_orphans` across recorder samples **double-counts heavily**: the monitor
 reports over a rolling multi-hour window at a much shorter cadence, so one event
 appears in dozens of consecutive samples. Deduplicate via `door_orphan_times`.
 
 **Per-camera door coverage.** The first release deliberately did not adjudicate
-individual cameras: the add-on log retains only ~2.3 days, far too little to fit a
+individual cameras: the add-on log then held only ~2.3 days, far too little to fit a
 per-camera expectation. Two later additions made a per-camera test possible without
 fitting any rate. `DOOR_CAMERA` in `cam_flap.py` maps each door contact to the camera
 that covers it. That is owner knowledge — it ships empty, as a commented template, and a wrong
@@ -348,8 +373,13 @@ the door was judged 11 s after it opened, before the camera's line 72 s later
 existed. The same gap produced false orphans. An opening is now judged only when its
 whole ±`DOOR_MOTION_WINDOW_S` window lies inside the slice, and a trip only when
 `DOOR_TRIP_S` of look-back does too, because whether an opening *starts* a trip
-depends on the opening before it. Everything else is counted in `door_deferred`.
-Deferral loses nothing: overlapping samples judge each event later with full context.
+depends on the opening before it. An opening whose window does not fit is counted
+in `door_deferred` (openings, not trips); a trip that fails only the look-back sits
+at the slice's start, which earlier samples covered, and is counted nowhere.
+Deferral loses nothing while the monitor keeps polling: overlapping samples judge
+each event later with full context. A gap in successful polls longer than the slice
+reaches back (at most 6 h; about 85 min at the evening peak) leaves an event
+deferred at the trailing edge unjudged.
 Replaying 2.2 days of engine log through sliding windows at ten sampling phases gave
 zero wrong verdicts and zero dropped trips with the guard, against 71 wrong verdicts
 and 11 false orphans (summed over the ten phases) without it.
@@ -380,14 +410,15 @@ nor breaks a run, but it still counts in the fraction rule exactly as before, so
 new rules can only add detections. Each miss is classified once, when fresh rates
 first exist, and the class is stored with the trip so the record cannot flap. Measured: the three door-side cameras peak at 7–10 %, the
 doorbell at 20 %, the busiest camera at 54 %. If the rates are missing or more than
-3 hours old, every miss counts as before — the rule can only remove evidence, so it
-is never applied blind.
+3 hours old, a miss not yet classified counts as strong and stays unclassified until
+fresh rates exist (a class already decided is kept) — the rule can only remove
+evidence, so it is never applied blind.
 
 This needs its own trigger because **motion staleness cannot carry it**. A camera
 that still fires every day or two never goes stale — each stray event resets its
 clock — so it can miss every person at its own door and never page.
 `binary_sensor.camera_door_coverage_problem` and `camera_door_coverage_alert` watch
-the failing set directly. The push is gated on freshness rather than on trigger type:
+the failing set directly. The push is gated on freshness (a re-assert never pushes):
 `cam_flap.py` stamps `failing_since_ts` at the poll where a camera enters the set,
 and the alert pushes only while that stamp is under 15 minutes old **and** newer than
 the alert's own previous run (`this.attributes.last_triggered`, which Home Assistant
@@ -396,7 +427,8 @@ restart is stamped by the first poll after it and still pages, whichever of the 
 or attribute trigger sees it first. A failure that was already paged re-posts or
 updates its card on a restart, a set change or the 6-hourly re-assert without
 re-notifying. `cam_motion.py` also appends failing cameras to its own `summary`, because
-that summary is the only text the staleness push carries.
+the per-camera staleness push (`camera_motion_dead_alert`) carries that summary but not
+the card's DOOR COVERAGE block.
 
 **A door feed that stops is not a covered door (2026-11-18).** Every verdict above
 needs door openings, and they come from one source, the contacts' `entryOpen: true`
@@ -412,18 +444,22 @@ time. `cam_flap.py` therefore keeps, in the door record, the newest opening it h
 (24 h) old, **silent** once the record has itself watched 24 h without one, and
 **unknown** before that. Only the record's own observations count: judged trips cover
 paired doors only, so they never stand in for "no opening". A new or rebuilt record
-therefore reads unknown until it has watched 24 h. Watching starts at the first
-sample's start, so on the first poll after this ships it already counts that slice
-(up to 6 h). A gap in the watching (the monitor did not run, or every poll failed)
-starts it again, because openings in the gap were never seen. `silent_h` and
+therefore reads unknown until it has watched 24 h. Watching starts 5 minutes into
+the first sample (`max(DOOR_MOTION_WINDOW_S, DOOR_TRIP_S)` after its first timestamp,
+where it can first judge a trip), so on the first poll after this ships it already
+counts nearly all of that slice (just under 6 h at most). A gap in the watching (the
+monitor did not run, or every poll failed) starts it again 5 minutes into the next
+sample, because openings in the gap were never seen. `silent_h` and
 `watched_h` are floored to whole hours, so neither reaches 24 before the state changes.
 Over 332 openings
 (2026-10-15..11-11) the median gap was 0.1 h, the 99th percentile 12.6 h and the longest
 14.7 h, overnight. Whenever the feed is not live, `binary_sensor.camera_door_coverage_problem`
 is **unavailable** rather than "off", and where `DOOR_CAMERA` pairs any door, the flap
-summary says why: `NO DOOR FEED: ... - door coverage is not being judged`, `door feed not
-established (N of 24 h watched, ...)` or `door feed not evaluated`. If a failing verdict
-is still in the record, the clause says "no new door trips are being judged" instead.
+summary says why: `NO DOOR FEED: ... - door coverage is not being judged` or `door feed
+not established (N of 24 h watched, ...)`. If a failing verdict is still in the record,
+the clause says "no new door trips are being judged" instead. A fault is named whether
+or not a door is paired: `door feed not evaluated (...)`, or `door record could not be
+evaluated` when the whole record fails.
 This is a display truth, not an alert: a house left empty is a silent feed too, and the
 check cannot judge doors either way. One opening makes the feed live again at once, so
 a new contact needs no warm-up. A fault in the feed verdict reads `unknown` and is named
@@ -446,8 +482,9 @@ flat zero. The one episode that involved real trouble had already paged through
 `camera_flap_alert` and `camera_health_alert`. High `stream_errors` does correlate
 with recording errors (32% of samples vs 11%), but recording errors are already
 the alert metric, so wiring this would add duplicate and false pages without
-adding detection. Keep it as context on the card; revisit only if an outage ever
-shows up here first.
+adding detection. Keep it as context: it is published only as the `stream_errors`
+attribute of `sensor.camera_flap_rate`, on no card and not in its summary. Revisit
+only if an outage ever shows up here first.
 
 - `camera_flap_alert` / `camera_flap_recovered` / `camera_flap_down` — the
   stream-fault monitor (see `docs/operations.md` §6): pages on a sustained
@@ -456,14 +493,18 @@ shows up here first.
   (dead-man's switch for the monitor itself; a snapshot-watchdog death does
   not trip it - the window is measured from log timestamps, and `cam_vision.py`
   requests the snapshots itself once `cam_health.py`'s shared frames go stale -
-  and `camera_health_monitor_down` covers that). The rate runs over a fixed 6 h (`window_min`), held in
-  `/config/.cam_flap_rec_state.json`, because the 60,000-line slice (`span_min`) shrinks to about 85 min at
-  the evening peak. The rate falls off over up to 6 h after a burst. Also carries a tripwire on UNDECRYPTABLE cloud push
+  and `camera_health_monitor_down` covers that). The rate runs over up to 6 h of recording errors held in
+  `/config/.cam_flap_rec_state.json`, not over the 60,000-line slice (`span_min`), which shrinks to about
+  85 min at the evening peak. `window_min` is the span that record has observed: 360 once full; a new
+  record, or one after a gap in the polls the slice does not bridge, restarts at the slice and grows back
+  to 360. The rate falls off over up to 6 h after a burst. Also carries a tripwire on UNDECRYPTABLE cloud push
   messages (`push_undecryptable`). The push receiver either drops a message it
   cannot decrypt and logs one line (`Message dropped as it could not be
   decrypted: <reason>`, e.g. a missing crypto-key) or rethrows the error as a
-  Node dump whose header and `code:` line both name it (e.g.
-  `ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY`), never both for one message; the monitor
+  Node dump whose header names it (`ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY`, named
+  again on its `code:` line, or one of the two code-less reasons Ring plugin
+  0.0.147 adds, `crypto-key header is missing dh parameter` and `encryption
+  header is missing salt parameter`), never both for one message; the monitor
   counts both shapes, once per failure (a dump's later lines, a nested cause, or
   a window opening inside a dump are not counted again). Each failure can be a
   **lost motion or doorbell event**: the camera-source plugin learns of motion only
@@ -507,15 +548,18 @@ shows up here first.
   `/config/.cam_flap_flapping_state.json`, the same rule as `down_late` above with
   a 20 min hold) and the `flapping_late` trigger pushes "Also flapping: X". A
   fault already present when the triggers attach cannot fire them, so a boot
-  trigger notes which tiers are present, waits up to the tier's hold (20 min
-  flapping, 30 min push-decrypt) and pages those still present, with "(present
-  since Home Assistant started)"; mode is parallel so that wait cannot drop a
-  live trigger.
+  trigger notes which tiers are present, waits up to 20 min (30 min when the
+  push-decrypt tier is among them) for all of them to clear, and pages once if
+  any is still present, with "(present since Home Assistant started)"; mode is
+  parallel so that wait cannot drop a live trigger.
 - `camera_door_coverage_alert` / `_recovered` — per-camera door coverage (see the
   door-contact section above): pages when a camera keeps failing to report motion
   at its own door while other cameras see the activity. The push is gated on the
   `failing_since_ts` freshness stamp, so a restart neither drops nor repeats the
-  page; the card is dismissed once the failing set has been empty for 60 minutes.
+  page; the card is dismissed once `binary_sensor.camera_door_coverage_problem`
+  has read "off" for 60 minutes, which needs an empty failing set, a reporting
+  flap monitor and a live door feed (see "A door feed that stops is not a
+  covered door" above).
 - `camera_motion_partial_loss_alert` / `_recovered` — a camera that still fires but
   has dropped out of most of the motion its usual partners keep recording (see
   the partial-loss section). The card gives per-camera evidence, the cameras that
@@ -561,18 +605,26 @@ shows up here first.
   switch, walk in, and get PASS or FAILED pushed within 5 minutes.
 - `camera_monitor_stalled` / `_recovered` — **freshness** dead-man for all five
   monitors (the engine-log archive is the fifth), and the one that closes the largest hole in this design. Every other
-  dead-man here triggers on `unavailable`/`unknown`/`-1`, and none of them looks
-  at *age*. Home Assistant rewrites `last_updated` only when the state or an
-  attribute **changes**, and a healthy fleet emits a byte-identical payload for
+  dead-man here keys on a bad reading (`unavailable`/`unknown`/`-1`, an `error`
+  attribute, a failed partial-loss test or archive run, a blind camera), and none
+  of them looks at the *age* of the monitor's own last update. Home Assistant
+  rewrites `last_updated` only when the state or an attribute **changes**, and a
+  healthy fleet emits a byte-identical payload for
   hours — so a monitor whose update loop has stopped sits pinned at its last
   reading indefinitely: no bad state, no recorder row, no page, nothing. Measured
   here before the fix, the probe monitor had gone **37 minutes** without writing a
-  row while perfectly healthy, and legitimate steady periods reach 1 h 56 m — which
+  row while perfectly healthy, and over the 11 days of recorder history before the
+  heartbeat it went up to 7 h 04 m without a new row, and the flap monitor up to
+  5 h 00 m, while the host and recorder were up (`docs/operations.md` §9.7) — which
   is why a naive age bar false-fires. The fix is a bucketed `updated_at` published
   by each script, so `last_updated` advances at least once per bucket whenever the
-  loop actually runs, at roughly one extra recorder row per bucket rather than one
-  per poll. Bars are per sensor because the poll intervals differ 30× (3 h for the
-  hourly engine-log archive).
+  loop runs and succeeds, at roughly one extra recorder row per bucket rather than
+  one per poll. The error payloads of `cam_health.py` and `cam_logarchive.py` carry
+  the heartbeat too, but the `fail()` payloads of `cam_flap.py`, `cam_motion.py`
+  and `cam_vision.py` carry `updated_at: null`, so one of those three that fails
+  with the same message every poll publishes an identical payload and is reported
+  by `camera_monitor_stalled` as well as by its own dead-man. Bars are per sensor
+  because the poll intervals differ 30× (3 h for the hourly engine-log archive).
   It has no boot trigger: a start resets every monitor's `last_updated`, so a stall
   cannot be latched when the triggers attach, and its condition (on for 15 min)
   could never pass at a start anyway.
@@ -628,13 +680,15 @@ shows up here first.
   boot restores service in ~2 min. A real mains cut took one fleet dark for
   57 minutes and produced no camera signal whatsoever. `cam_motion.py` publishes
   `host_gap_min` — the largest hole spanning **every** entity in the recorder over
-  24 h, which is only explicable by the host being down. Note the trigger is a
-  template plus a half-hourly sweep, **not** `numeric_state`: numeric_state only
-  fires from an *armed* state, and after a cold boot neither ordering arms it
-  (attach-before-first-poll raises on the missing attribute and never arms;
-  first-poll-before-attach is already above the threshold and never arms), so it
-  would have been structurally incapable of reporting the very outage it exists
-  for.
+  24 h, which is only explicable by the host being down. Note no trigger here is
+  `numeric_state`: numeric_state only fires from an *armed* state, and after a
+  cold boot neither ordering arms it (attach-before-first-poll raises on the
+  missing attribute and never arms; first-poll-before-attach is already above the
+  threshold and never arms), so it would have been structurally incapable of
+  reporting the very outage it exists for. The first version used a template
+  trigger plus a half-hourly sweep. The pages now come from a state trigger on
+  `host_gap_new_end` and a start trigger (below); the sweep, gated on
+  `host_gap_min > 15`, only restores the card.
   **Each outage once, a second one too.** The first version's template trigger on
   `host_gap_min > 15` stayed true while an earlier outage was inside the 24 h
   window, so a second outage never paged. `cam_motion.py` now also publishes
@@ -673,10 +727,12 @@ shows up here first.
   missing its stale list or carrying an error: a command_line reload, a timeout or
   a script error), the push opens with `Motion monitor back after a gap - stale:
   <cameras>.` instead, because the gate then counts every camera still stale as
-  added. `HA restarted.` marks the boot push. A proven push gets no extra lead:
-  its existing `PROVEN event-path failure: <cameras>.` line already leads it. It
-  opens with `Motion monitor back after a gap.` when the proof re-fires as the
-  monitor recovers. The fleet summary and any walk-test hint follow unchanged.
+  added. `HA restarted.` marks the boot push. A proven push normally gets no
+  extra lead: its existing `PROVEN event-path failure: <cameras>.` line already
+  leads it. It opens with `Motion monitor back after a gap.` when the proof
+  re-fires as the monitor recovers, and with `Proven broken: none at send time.`
+  (and no PROVEN line) if the proof cleared before the push was sent. The fleet
+  summary and any walk-test hint follow unchanged.
   Without this lead, a page for a newly stale camera opened with a summary that
   still listed a camera paged earlier, and it read like a repeat of that page.
 The staleness page carries TWO automated discriminators, printed strongest
@@ -691,10 +747,11 @@ The staleness page carries TWO automated discriminators, printed strongest
   how often each partner's motion clusters historically contained the target,
   then counts how often they have since it went quiet; zero out of enough
   opportunities is a proof. On this fleet it identified a genuinely broken
-  camera at P = 2e-08 (a partner that co-fired in 42.6% of its clusters
-  historically produced 32 clusters with zero co-fires afterwards, while a
-  different partner's share of the same clusters rose to 100% — so the scene was
-  demonstrably *more* active, not quiet). Crucially it also reports its own
+  camera (a partner that co-fired in 49.0% of its clusters historically, 72 of
+  147, produced 32 clusters with zero co-fires afterwards, P = 4.4e-10 by the
+  point estimate and about 5e-08 under the bound below, while a different
+  partner's share of the same clusters rose from 28.1% to 100% — so the scene
+  was demonstrably *more* active, not quiet). Crucially it also reports its own
   power: a camera with no high-rate partner (a spatially isolated view, an
   interior room) returns "cannot be tested" — worded as no evidence either way,
   because the same result appears when a camera that fired only intermittently
@@ -743,7 +800,12 @@ The staleness page carries TWO automated discriminators, printed strongest
   hourly. The latch is keyed to the camera's cut timestamp, so the instant it
   produces any event its cut moves and the latch stops matching — it clears
   itself, with no reset path to get wrong, and it can only ever preserve a
-  verdict, never create one.
+  verdict, never create one. Two other things end a latch: it is forgotten 90
+  days after the proof (`LATCH_MAX_AGE_D`), and the latches are rewritten at
+  every poll from the stale set alone, so a poll at which no camera has fired for
+  24 h (staleness is not evaluated and the stale set is empty) drops every latch.
+  A proof the 30-day window can no longer re-derive does not return when the
+  fleet resumes.
 
   One structural blind spot is reported rather than papered over. Cameras that
   share a path co-fire at 85–95% with *each other* and only a few percent with
@@ -768,7 +830,8 @@ The staleness page carries TWO automated discriminators, printed strongest
   changes — a change that fires on three or more cameras within three minutes is
   a lighting transition, a cloud shadow, or the first frame after a restart
   (which has no valid prior frame and so registers on every camera at once), and
-  says nothing about any one camera — and it requires several of them. Testing
+  says nothing about any one camera — and it requires at least two of them
+  (`MIN_VISUAL_EVENTS`; a single one reads "inconclusive"). Testing
   "is the vision log non-empty" is not a discriminator at all: an outdoor scene
   guarantees entries via sun, shadow and IR transitions, so every stale outdoor
   camera reads "suspect" regardless of its true state - no human walk test required, which matters
@@ -791,23 +854,30 @@ The staleness page carries TWO automated discriminators, printed strongest
   `last_changed`, which resets on restart and would otherwise mask staleness.
   The alert fires on the onset edge, on any change to the **stale set** (so an
   additional camera crossing its threshold raises genuinely new information
-  rather than silently rewriting a card you have already read), on HA start, and
-  on a slow 2-hourly re-assert. It used to re-assert *hourly* off a bare clock,
-  which produced 260 identical recreations against 3 real state transitions in
-  26 days and trained the reader to ignore the channel. Its condition reads the
+  rather than silently rewriting a card you have already read), when the first
+  proof appears (the `proven` template trigger, true while any stale camera is
+  proven broken), on HA start, and on a slow 2-hourly re-assert. It used to
+  re-assert *hourly* off a bare clock, which produced 260 identical recreations
+  against 3 real state transitions in 26 days and trained the reader to ignore
+  the channel. Its condition reads the
   recorder-derived `stale_count` rather than the template entity's
   `last_changed`, so a restart no longer disarms it for the first hour — a restart otherwise wipes the notification with the binary still
   latched (the edge can never re-fire), and a second camera crossing its
   threshold while latched would otherwise never page; recreating the same
   notification_id is idempotent, so the re-assert adds no churn.
   Pushes go out only on genuinely new information: a camera ADDED to the stale
-  set, a new proof, or a restart while a proof stands. The 1-hour onset trigger
-  no longer pushes - every transition that turns the binary on is also a
-  stale-set change that `setchange` already pushed, so the first camera to go
-  stale used to page twice an hour apart - and a camera LEAVING the set updates
-  the card without re-paging the cameras still on it. Fit each per-camera
-  override to the longest silence that camera shows when nothing is wrong (here,
-  an unused interior room reached 211 h), not to a round number.
+  set, the first proof while none stands, or a restart while a proof stands or
+  `stale_added` is non-empty. A camera proven while another proof stands moves no
+  edge of the `proven` trigger and, already stale, changes no stale set, so its
+  proof sends no push of its own: the card shows it on the automation's next
+  run, and the next push, whatever triggers it, also names it on its PROVEN
+  line. The 1-hour onset trigger no longer pushes - every transition that turns
+  the binary on is also a stale-set change that `setchange` already pushed, so
+  the first camera to go stale used to page twice an hour apart - and a camera
+  LEAVING the set updates the card without re-paging the cameras still on it.
+  Fit each per-camera override to the longest silence that camera shows when
+  nothing is wrong (here, an unused interior room reached 211 h), not to a round
+  number.
 
 Every fault alert writes a `persistent_notification` (the HA notification
 centre) **and**, except the card-only `camera_log_archive_event`, sends a push
@@ -819,35 +889,42 @@ operator who is away from the property. The push steps are gated to fire on new
 information only, never on a re-assert - except `cameras_motion_stale_alert`,
 which pushes on every hourly check and at boot for as long as the whole fleet
 stays past its 9-hour bar: during a total outage an hourly page is intended.
-The start-up checks in `camera_health_alert` and the four monitor dead-men also
-push once per start for a fault that outlasts its hold, because a fault present
-when the triggers arm can never fire them.
+The start-up checks in `camera_health_alert`, `camera_flap_alert` and the four
+monitor dead-men also push once per start for a fault that outlasts its hold,
+because a fault present when the triggers arm can never fire them.
 
 - `camera_all_clear` — one push when a camera fault that **pushed** has recovered:
   "✅ Camera all-clear — Cleared: <the alert's title>. First alert 1 h 40 min ago,
-  2 alerts. Cameras now: 9/9 OK." Each of the fourteen fault alerts that push fires
-  `camera_alert_pushed` {card, title[, subjects]} right after its notify call returns,
-  and `sensor.camera_alert_ledger` (`packages/cam_allclear.yaml`) keeps those cards
-  open across restarts. Every 5 min this sweep gathers the indicator states into plain
-  values and gives each open card one verdict:
-  - **clear** (push, then close) when the card's own recovery test passes. Each test
-    holds the fault indicator for the same time as that card's recovered automation
-    (35 min for camera health, 30 for flap, vision, motion-dead and partial loss, 60
-    for door coverage, 15 for a stalled monitor, 5 for the three monitor-down cards,
-    none for fleet drop and the log archive). Four cards also
-    need evidence, because their card can clear without a recovery: partial loss needs
-    every flagged camera released by recovery (not stale, dormant or acknowledged);
-    door coverage needs every failing camera to have seen its door again; motion-dead
-    needs an active fleet (the stale set also empties when the whole fleet goes quiet);
-    a stalled monitor needs every monitor's own `updated_at` heartbeat past both the
-    push and the moment the stall cleared, so a restart's first publication, which
-    resets every `last_updated`, is not taken for a recovery. The flap card also holds
-    `binary_sensor.camera_push_decrypt_ok` for 30 min. Holds on a validity edge use the
-    package's small template binaries (push decrypt ok; health, motion and partial-loss
-    test monitors reporting), each the template its recovered automation holds with `for:`.
-  - **silent** (close, no push) when a card's indicator has been clear for a day without
-    that evidence (a flagged camera went stale, a door aged out of the 7-day record), or
-    for a card with no recovery test a week after its last push.
+  2 alerts. Cameras now: 9/9 OK." Each pushing fault alert but the two not recorded
+  (below), fourteen in all, fires `camera_alert_pushed` {card, title[, subjects]}
+  right after its notify call returns, and `sensor.camera_alert_ledger`
+  (`packages/cam_allclear.yaml`) keeps those cards open across restarts. Every 5 min
+  this sweep gathers the indicator states into plain values and gives each open card
+  one verdict:
+  - **clear** (push, then close) when the card's own recovery test passes. Thirteen tests
+    hold the fault indicator for the same time as that card's recovered automation
+    (35 min for camera health, 30 for flap, the flap and vision dead-men, motion-dead
+    and partial loss, 60 for door coverage, 15 for a stalled monitor, 5 for the health,
+    motion and partial-loss test dead-men, none for fleet drop and the log archive). The
+    fleet-wide no-motion card (`cameras_motion_stale`) has no hold: it clears when a
+    motion-monitor sample at most 35 min old shows the fleet's latest motion event came
+    after its last push, and it never closes silently. Four cards also need evidence,
+    because their card can clear without a recovery: partial loss needs every flagged
+    camera released by recovery (not stale, dormant or acknowledged); door coverage
+    needs every failing camera to have seen its door again; motion-dead needs an active
+    fleet (the stale set also empties when the whole fleet goes quiet); a stalled
+    monitor needs every monitor's own `updated_at` heartbeat past both the push and the
+    moment the stall cleared, so a restart's first publication, which resets every
+    `last_updated`, is not taken for a recovery. The flap card also holds
+    `binary_sensor.camera_push_decrypt_ok` for 30 min. Holds on a validity edge use
+    the package's small template binaries (push decrypt ok; health, motion and
+    partial-loss test monitors reporting), each the template its recovered automation
+    holds with `for:`.
+  - **silent** (close, no push) when a partial-loss, door-coverage or stalled-monitor
+    card's indicator has been clear for a day without that evidence (a flagged camera
+    went stale, a door aged out of the 7-day record, a monitor's heartbeat never moved
+    past both), or for a card with no recovery test a week after its last push. A
+    motion-dead card never closes silently: it waits for an active fleet.
   - **wait** otherwise.
 
   Card dismissals play no part: a person dismissing a card, a manual Run of a recovered
@@ -902,10 +979,12 @@ latched a false flag in 21 runs under an earlier power-floor veto and a 3x bar,
 and in 0 of 288 with the likelihood veto and the 2x bar.
 
 **Power is published, and no flag is not an all-clear.** Each camera's entry in
-`partial_detail.cams` carries its status: `testable` when even a total loss
-could convict it this poll, `underpowered` when tested but not even zero
-co-fires could, `untestable` when no partner is tested, `stale` when staleness
-owns it. `min_loss` is the smallest loss the most sensitive partner would
+`partial_detail.cams` carries its status: `flagged` while it holds a flag;
+otherwise `testable` when even a total loss could convict it this poll,
+`underpowered` when tested but not even zero co-fires could, `untestable` when
+no partner is tested; `stale` when staleness owns it (with `dormant_since` for
+a dormant flag), and `no events in lookback` with no motion row in the ~62-day
+lookback. `min_loss` is the smallest loss the most sensitive partner would
 convict at its expected count, and `partial_detail.cannot_convict` lists the
 cameras that could not have been convicted this poll. Measured by removing
 whole visit clusters from the real history (6 cameras x 4 healthy onsets),
@@ -964,11 +1043,12 @@ and is `null` (never `[]`) whenever the test did not run.
 `binary_sensor.camera_motion_partial_loss` is on while it is non-empty and
 unavailable - never off - when it is `null`. The recorder stores no attributes at all for a state whose
 attributes exceed 16 KB, so the evidence lists are trimmed (oldest first, counts
-kept) whenever the whole payload would pass 12,000 bytes, and
-`partial_detail.evidence_cap` then records the cap (absent when nothing was
-trimmed). Replayed every 6 hours over 56 days of recorder history, the whole
-attribute set peaked at 8.1 KB and nothing was trimmed; nine cameras flagged at
-the full cap would come to 14.4 KB untrimmed.
+kept) whenever the whole payload would pass 12,000 bytes (15,360 bytes, the
+16 KB limit less 1 KB for the keys HA adds, when it is over 12,000 even with
+every list empty), and `partial_detail.evidence_cap` then records the cap
+(absent when nothing was trimmed). Replayed every 6 hours over 56 days of
+recorder history, the whole attribute set peaked at 8.1 KB and nothing was
+trimmed; nine cameras flagged at the full cap would come to 14.4 KB untrimmed.
 
 **Measured over the recorder** (3,459 polls over 76 days, every real recorder
 hole masked): a camera that kept firing but dropped to 3 co-fires in 77 of its
@@ -1008,8 +1088,9 @@ for a regime seen only while someone is present: an indoor view lit only during
 visits is in day exposure almost exclusively while occupied, so its non-event
 samples are a person who lit one block, each one grows the EMA, and the bar
 climbs past what a person produces. Measured on one such view: the bar went from the floor to the cap over five
-days, and once it was there 9 of the camera's motion clusters drew 1 visual
-change.
+days, and from the first visit that drew no visual change, four visits before
+the bar reached the cap, the camera's 9 motion clusters drew 1 visual change
+between them.
 
 `cam_vision.py` therefore stamps each regime's last comparison. Once a regime
 has gone more than 15 min without one, its EMA relaxes toward 2.4 (where the
@@ -1053,16 +1134,18 @@ stays above the bar and is not addressed.
 
 **Single-frame luma spikes.** The same camera also delivers, about once a night,
 one IR frame much brighter than the frames either side (luma 86 -> 98 -> 86, or
-86 -> 184 -> 86) with no motion near. The spike is compared and logs a change -
+88 -> 184 -> 86) with no motion near. The spike is compared and logs a change -
 right once - but was then stored as the baseline, so the next, normal frame
 logged a second change against it. Luma cannot tell such a spike from a real
 one-frame event (room lights on for one frame during a visit), so the spike is
 always compared and always logs. When an IR frame logs a change and its luma
 differs from its baseline by more than 8 (`SPIKE_LUMA`), `cam_vision.py` keeps
-that baseline for one more IR frame (surviving failed, cached, unlit and dark
-polls; a lit colour frame drops it). If the next IR frame also logs a change,
-reads within 3 (`SPIKE_RETURN`) of the kept frame and shows no change against
-it, the picture is back: the spike's change is withdrawn and the return's kept,
+that baseline for one more IR frame, for at most 15 minutes from when the
+baseline was stored (`BASELINE_MAX_AGE_S`; within that it survives failed,
+cached, unlit and dark polls, and a lit colour frame drops it). If the next IR
+frame arrives within that time and also logs a change, reads within 3
+(`SPIKE_RETURN`) of the kept frame and shows no change against it, the picture
+is back: the spike's change is withdrawn and the return's kept,
 so the pair counts once, and the summary says "one-frame luma spike counted
 once" with the luma values and the test result ("... both kept" when the return
 differs). Every frame is still compared against the same frame and stored as
@@ -1078,15 +1161,17 @@ mostly a light switched on and off during a visit).
 
 ## A camera with no co-firing partner: switch notes and the walk test
 
-An interior room's camera has no partner that shares 15 % of its view, so it is
+An interior room's camera has no partner whose motion clusters include it at
+least 15 % of the time (the co-firing test's rate floor), so it is
 judged on duration alone (a per-camera window). Silence alone cannot tell an
 empty room from a dead camera. When that camera is stale, its stale verdict
-carries a note listing every physical press of the room's light switch since
-its last motion event (`WITNESS` in `cam_motion.py`). Z-Wave Central Scene
+carries a note that counts the physical presses of the room's light switch since
+its last motion event (looking back at most 90 days) and lists the newest 8
+(`WITNESS` in `cam_motion.py`). Z-Wave Central Scene
 events are sent only for a paddle pressed by hand, so these are a clean record
 of someone at the switch: a row is a press when its timestamp lies -5 to +120 s
 from the time it records (restart and re-interview rewrites repeat an old time
-and are dropped). Each press shows whether a companion camera fired within
+and are dropped). Each listed press shows whether a companion camera fired within
 2 minutes, and the note says that a switch box outside the camera's view makes a
 press with no motion no proof of a fault. Presses never make the camera stale or
 broken. Each visit's outcome is logged in the motion state file (newest 50) to
@@ -1095,8 +1180,9 @@ build the calibration a press-based rule would need.
 `camera_room_walk_test` turns a press into a deliberate test: double-tap
 either paddle (`KeyPressed2x`), then walk into the room. It posts a "running"
 card, waits up to 5 minutes for the camera's motion sensor (motion already being
-reported within 30 s before the tap counts), and pushes PASS with the reaction
-time or FAILED with what to check in the Ring app. Only a fresh double-tap
+reported within 30 s before the tap counts), then replaces the card with the
+result and pushes it: PASS with the reaction time, or FAILED (only the card lists
+what to check in the Ring app). Only a fresh double-tap
 starts it: a state restored after a restart or an event older than 2 minutes is
 ignored. A restart during the 5 minutes aborts the test without a result. A
 double-tap that is not recognised (not reported by the switch, or dropped by
@@ -1164,23 +1250,33 @@ prints `https://<v6>:10443/`; the port is kept, and a run that also parses as
 one longer address is redacted whole) before IPv4 (classified, never kept); credentials (`Authorization`/`Cookie`,
 bearer/basic tokens, ICE `ice-pwd`/`ice-ufrag`/`usernameFragment`, quoted
 passphrases, password/username/token/secret/api-key assignments, a credential
-word before an opaque run); RTSP session ids; DTLS fingerprints and MACs; Ring ids by key (pseudonyms for camera, ding, cell and session ids, below), UUIDs, HomeKit codes, coordinates; then runs of 16+ hex and
-bare runs of 7+ digits. An independent **residual scan** runs over the whole
-archived line and withholds rather than writes anything that still looks like
-an identifier: JWT prefixes, dotted quads (also URL-encoded), IPv6 shapes,
-credential assignments with escaped quotes or `%3A`/`%3D` separators,
-`credential`/`api-key`/`signature` keys, URL-encoded e-mail, alternative MAC
-forms, HomeKit setup URIs, a quoted mixed-class value under `auth`/`key`, a quoted value under any key
-ending in `id` or `_key` that still holds a run of eight or more letters, digits
-and dashes mixing letters and digits, a raw segment after `mode/location/`,
+word before an opaque run); RTSP session ids; DTLS fingerprints and MACs; Ring
+ids by key, as an object's `id`, in Ring REST paths and in the two location
+errors (pseudonyms for camera, ding, cell and session ids, below); ding and
+push epoch-ms stamps as offsets (below); UUIDs, HomeKit codes, coordinates;
+then runs of 16+ hex and bare runs of 7+ digits; last, mixed letter-digit runs
+of 8+ in a quoted value under a key ending in `id`, `_key` or `Key` (below). An
+independent **residual scan** runs over the whole archived line and withholds
+rather than writes anything that still looks like an identifier: JWT prefixes,
+dotted quads (also URL-encoded), IPv6 shapes, credential assignments (plain,
+with escaped quotes or with `%3A`/`%3D` separators, `credential`/`api-key`/
+`signature` keys included) whose value is not an exact placeholder, a credential
+word (`token`, `secret`, `password`, `ufrag`, `bearer`) before an opaque run of
+12+ characters, a raw RTSP `session:` value, a `doorbot_id`, `device_id`,
+`location_id`, `ding_id` or `cell_id` key followed by anything but an exact
+placeholder, runs of 12+ hex or 7+ digits, e-mail domains (also URL-encoded),
+alternative MAC forms, HomeKit setup URIs, a quoted mixed-class value of 16+
+characters under `auth`, `key` or `p256dh`, a quoted value under any key ending
+in `id`, `_key` or `Key` that still holds a run of 8+ letters, digits and
+dashes mixing letters and digits, a raw segment after `mode/location/`,
 `locations/` or `accounts/` in a URL path, any text but the placeholder after
-`for location` in either Ring location error, and
-any keyless mixed-case alphanumeric run of 24+ characters. Base64 blobs (for
-example an SDP `sprop-parameter-sets`) are therefore withheld by design.
-Authentication prose such as "Refresh token is not valid" survives. Measured on
-the whole live journal (574,598 entries): 0 lines withheld, 0 residual hits;
-5,531 distinct secret values extracted independently from the raw lines, none
-present in the archive.
+`for location` in either Ring location error, and any keyless run of 24+
+letters, digits and `_+/=-` that holds an upper-case letter, a lower-case
+letter and a digit. Base64 blobs (for example an SDP `sprop-parameter-sets`)
+are therefore withheld by design. Authentication prose such as "Refresh token
+is not valid" survives. Measured on the whole live journal (574,598 entries):
+0 lines withheld, 0 residual hits; 5,531 distinct secret values extracted
+independently from the raw lines, none present in the archive.
 
 **Pseudonyms.** The Ring identifiers that a review needs in order to tie
 messages together are replaced by keyed pseudonyms instead of a constant
@@ -1193,18 +1289,19 @@ class and the value, under a 32-byte key, written in base 20 with the letters
 letter, no digit and no capital, so a token can never trip the residual scan,
 which keeps its full strictness for raw values; at 12 letters the chance of
 any collision among 100,000 values is about 1e-6. Account-level ids (location,
-user, account), hardware ids, serials and MACs stay the constant `<RID>`, and
-other UUIDs (SDP stream ids) stay `<UUID>`. A ding's `created_at` and
-`requested_at` (epoch milliseconds) become the signed offset from the line's
-own UTC stamp, for example `<T:-1.722s>`, so the latency from Ring to the
-engine can be measured without keeping an absolute number; anything else
-there stays `<NUM>`. The key lives in `.pseudonym.key` in the archive
-directory (0600, never logged, outside every backup like the archive). It is a
-dotfile so that a `*` copy of the directory leaves it behind: pull day files by
-name and never copy the key off the host, because with the key the camera ids
-can be recovered from their tokens by brute force. A run that finds no key, or
-a key of the wrong size, generates a new one and saves it only after its lines
-are on disk. When the archive already has day files, that run writes
+user, account), hardware ids and serials stay the constant `<RID>`; a MAC
+written as six pairs joined by `:` or `-` becomes `<MAC>` (any other form under
+a `mac_address` key `<RID>`), and other UUIDs (SDP stream ids) stay `<UUID>`.
+A ding's `created_at` and `requested_at` (epoch milliseconds) become the signed
+offset from the line's own UTC stamp, for example `<T:-1.722s>`, so the latency
+from Ring to the engine can be measured without keeping an absolute number;
+anything else there stays `<NUM>`. The key lives in `.pseudonym.key` in the
+archive directory (0600, never logged, outside every backup like the archive).
+It is a dotfile so that a `*` copy of the directory leaves it behind: pull day
+files by name and never copy the key off the host, because with the key the
+camera ids can be recovered from their tokens by brute force. A run that finds
+no key, or a key of the wrong size, generates a new one and saves it only after
+its lines are on disk. When the archive already has day files, that run writes
 `#~camlog~ REKEY …` at the head of every gzip member it appends (a fresh
 archive starts with `START` instead), so each day file shows where its tokens
 change key: tokens on the two sides of a REKEY line are not comparable. A key
@@ -1215,16 +1312,23 @@ the whole retained journal (about 600,000 entries): one token per camera that
 held a session, an exact one-to-one match with the camera names over every
 `sdp` answer, every signalling block attributable to a camera (previously
 about 19 % could not be), 0 lines withheld. Ring ids are recognised by key in the `key: value`, JSON, escaped-JSON and
-URL-encoded forms, and as the `id` of a `location`, `device`, `doorbot` or
+`key%3Dvalue` forms, and as the `id` of a `location`, `device`, `doorbot` or
 `ding` object, whether the object is written on one line or its `id` follows
-on a line of its own inside the same dump. The location id is also recognised
-where the Ring client library writes it outside a key: as the path segment
-after `mode/location/`, `locations/` or `accounts/` in the URL of a failed or
-retried request, and in its two errors that name a location (`... found for
-location <name> - <id>`, `Could not find a security panel for location <name>
-- <id>`), where the name goes too. An id inside an array, as a map key, in
-other prose or as a bare string is out of reach of every rule (a numeric id or
-a UUID there still meets the number and UUID rules).
+on a line of its own inside the same dump. Session UUIDs under `dialog_id`
+or `session_id` are recognised by key only in the `key: value` and JSON
+forms: escaped JSON gives `<UUID>`, and a `%3D` one is left to the generic
+rules and the residual scan, which nearly always withholds it. In fully
+URL-encoded JSON (`%22key%22%3A%22value%22`) no Ring-id key rule matches, so
+a value there gets no pseudonym and meets only the generic rules (the quoted
+`..id`/`.._key`/`..Key` rule below included) and the residual scan. The
+location id is also recognised where the Ring client library writes it
+outside a key: as the path segment after `mode/location/`, `locations/` or
+`accounts/` in the URL of a failed or retried request, and in its two errors
+that name a location (`... found for location <name> - <id>`,
+`Could not find a security panel for location <name> - <id>`), where the name
+goes too. An id inside an array, as a map key, in other prose or as a bare
+string is out of reach of every rule (a numeric id or a UUID there still
+meets the number and UUID rules).
 
 **Push notifications.** A doorbell press makes the engine log the Ring push
 notification as an object dump (`<camera> onDoorbellPressed { ... }`). Its
@@ -1237,14 +1341,17 @@ non-Ring device never reads as a camera); the ding id at the head of
 press to its live session, and its suffix becomes `<RID>` whether quoted or
 not, after `|` or `%7C`; `triggered_at`, `sent_at` and the snapshot
 `timestamp` become offsets like the ding stamps. The other copies of the camera
-id in the dump (the channel suffix, `referring_item_id`, the snapshot id) stay
-`<NUM>`. As a general rule, any quoted value under a key ending in `id` or
-`_key` (or `Key`) has every run of eight or more letters, digits, dashes and
+id in the dump (the channel suffix, `referring_item_id`, the second half of
+`snapshot_uuid`) stay `<NUM>`; the 32-hex snapshot id becomes `<HEX>`. As a
+general rule, any quoted value under a key ending in `id` or `_key` (or `Key`)
+has every run of eight or more letters, digits, dashes and
 underscores that mixes letters and digits replaced by `<RID>`; stream and track
 ids, counters and codec names are digits only, UUIDs or shorter and are not
-touched. The residual scan withholds any such run that is still there, so a
-variant under a quoted `..id` or `.._key` key that no rule knows is withheld
-instead of archived; an id outside a quoted key (prose, an array element, a map
+touched. The residual scan withholds any such run that is still there, though
+it counts only letters, digits and dashes (an underscore ends a run there), so a
+variant under a quoted `..id`, `.._key` or `..Key` key that no rule knows is
+withheld instead of archived unless underscores split it into runs that no
+longer qualify; an id outside a quoted key (prose, an array element, a map
 key, a URL path other than the Ring paths above) is still out of reach. A rule
 fix applies to new lines only: day files written before it keep what they hold
 until they are re-redacted.
@@ -1253,8 +1360,10 @@ until they are re-redacted.
 `takePicture` webhook every 120 s (the visual monitor analyses those frames and
 fetches for itself only while they are missing or stale), and the engine logs
 each request as a 15-line object dump. Each dump that matches a strict grammar is replaced by its url line and a
-note of what was removed (about half the lines; gzip size -33 %); anything else
-is archived verbatim. `cam_flap.py` counts probes by device id
+note of what was removed (on 2026-10-02, while both monitors still fetched every
+camera, the dumps were about half the lines and a third of the gzip size; one
+fetcher makes half as many dumps); anything else is archived verbatim.
+`cam_flap.py` counts probes by device id
 (`public/<id>/<token>/takePicture`, the token lower-case hex in the live journal or
 `<HEX>` in the archive), so its parser gives the same `probe_counts` on both. A
 request whose token is neither, such as an unfilled `<webhook_token>`
@@ -1284,7 +1393,7 @@ also presses). The archive is also the fifth
 member of `camera_monitor_stalled`, with a 3 h bar.
 
 **Measured** in the core container: an hourly increment of 15,000 entries takes
-about 2 s; the whole journal about 85-89 s, so a first backfill takes two to
+about 2-4 s; the whole journal about 85-89 s, so a first backfill takes two to
 three runs. `cam_logarchive.py --dry-run` fetches, collapses, redacts and scans, writes
 nothing, and adds a pseudonym census to its note (counts only: tokens per
 class, cameras, sdp pairs, whether the token-to-camera map is one-to-one,
