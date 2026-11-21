@@ -811,11 +811,17 @@ The staleness page carries TWO automated discriminators, printed strongest
   produces any event its cut moves and the latch stops matching — it clears
   itself, with no reset path to get wrong, and it can only ever preserve a
   verdict, never create one. Two other things end a latch: it is forgotten 90
-  days after the proof (`LATCH_MAX_AGE_D`), and the latches are rewritten at
-  every poll from the stale set alone, so a poll at which no camera has fired for
-  24 h (staleness is not evaluated and the stale set is empty) drops every latch.
-  A proof the 30-day window can no longer re-derive does not return when the
-  fleet resumes.
+  days after the proof (`LATCH_MAX_AGE_D`), and it is dropped once the recorder
+  purges the camera's last motion event (the camera then reads "never seen in the
+  recorder"), so it lasts its full 90 days only while `purge_keep_days` exceeds
+  the days from the camera's last event to the proof plus 90; at the 30-day
+  minimum in `docs/operations.md` §9.5 it ends about 30 days after the camera's
+  last event. A poll that does not evaluate the camera keeps its latch: one at
+  which no camera has fired for 24 h (staleness is not evaluated, the stale set
+  is empty, and the camera gets no corroboration entry, so its latched proof is
+  not published), or one after its window was raised past its silence. When the
+  fleet resumes, the stale-set change that re-adds the camera pushes again, and
+  its PROVEN line names the latched proof.
 
   One structural blind spot is reported rather than papered over. Cameras that
   share a path co-fire at 85–95% with *each other* and only a few percent with
@@ -1280,10 +1286,14 @@ word (`token`, `secret`, `password`, `ufrag`, `bearer`) before an opaque run of
 12+ characters, a raw RTSP `session:` value, a `doorbot_id`, `device_id`,
 `location_id`, `ding_id` or `cell_id` key followed by anything but an exact
 placeholder, runs of 12+ hex or 7+ digits, e-mail domains (also URL-encoded),
-alternative MAC forms, HomeKit setup URIs, a quoted mixed-class value of 16+
-characters under `auth`, `key` or `p256dh`, a quoted value under any key ending
-in `id`, `_key` or `Key` that still holds a run of 8+ letters, digits,
-underscores and dashes mixing letters and digits, a raw segment after `mode/location/`,
+alternative MAC forms (dotted 4.4.4, dash-joined, and six standalone hex pairs
+joined by spaces, `+`, `%3A` or `%20`, holding a hex letter unless every
+separator is `%3A`), anything but an exact placeholder under a MAC-address key
+(see below) and the rest of a split value after that placeholder, HomeKit
+setup URIs, a quoted mixed-class value of 16+ characters under `auth`, `key`
+or `p256dh`, a quoted value under any key ending in `id`, `_key` or `Key` that
+still holds a run of 8+ letters, digits, underscores and dashes mixing letters
+and digits, a raw segment after `mode/location/`,
 `locations/` or `accounts/` in a URL path, any text but the placeholder after
 `for location` in either Ring location error, and any keyless run of 24+
 letters, digits and `_+/=-` that holds an upper-case letter, a lower-case
@@ -1306,11 +1316,20 @@ which keeps its full strictness for raw values; at 12 letters the chance of
 any collision among 100,000 values is about 1e-6. Account-level ids (location,
 user, account), hardware ids and serials stay the constant `<RID>`; a MAC
 written as six pairs joined by one separator (`:` or `-`), with no `:` or `-`
-glued to either end, becomes `<MAC>`; under a `mac_address` key a value of
-letters, digits and `_.:-`, one glued to the key's `:` included, becomes
-`<RID>`, while a MAC whose pairs are separated by spaces or `%3A` meets no rule
-and no residual pattern and is archived as logged. Other UUIDs (SDP stream ids)
-stay `<UUID>`.
+glued to either end, becomes `<MAC>`, and so does one under any key ending in
+`macaddress`, `mac_address` or `mac-address` (any case, so `macAddress` and
+`wifiMacAddress` too) whose six pairs are joined by spaces, `+`, `%3A` or `%20`
+(a longer run of pairs there is left whole for the residual scan). Under such a
+key another value of four or more letters, digits and `_.:-`, one glued to the
+key's `:` included, becomes `<RID>`. The residual scan withholds anything else
+there except `null`, `undefined`, `true`, `false` or an empty value, and the
+rest of a split value after either placeholder: joined to it by a space, tab,
+`+`, `/`, `,`, `;`, `|`, `%3A` or `%20`, a token holding a hex letter, a run of
+4+ hex digits or two joined pairs (a lone two-digit number, as in
+`<MAC>, 54 Mbps`, and a pair after `.` or `_`, as in `<MAC>.12`, are archived).
+Outside such a key, an all-digit MAC whose six pairs are joined by spaces, `+`,
+`%3A` or `%20` (mixed or not) is archived as logged unless every separator is
+`%3A`. Other UUIDs (SDP stream ids) stay `<UUID>`.
 A ding's `created_at` and `requested_at` (epoch milliseconds) become the signed
 offset from the line's own UTC stamp, for example `<T:-1.722s>`, so the latency
 from Ring to the engine can be measured without keeping an absolute number;
@@ -1337,9 +1356,12 @@ on a line of its own inside the same dump. Session UUIDs under `dialog_id`
 or `session_id` are recognised by key only in the `key: value` and JSON
 forms: escaped JSON gives `<UUID>`, and a `%3D` one is left to the generic
 rules and the residual scan, which nearly always withholds it. In fully
-URL-encoded JSON (`%22key%22%3A%22value%22`) no Ring-id key rule matches, so
-a value there gets no pseudonym and meets only the generic rules (the quoted
-`..id`/`.._key`/`..Key` rule below included) and the residual scan. The
+URL-encoded JSON (`%22key%22%3A%22value%22`) the only key rules that match are
+the MAC-address ones (their key may carry a prefix, which takes in the `22` of
+the opening `%22`): six joined pairs become `<MAC>` and another value `<RID>`.
+A value under any other key gets no pseudonym and meets only the generic rules
+(the quoted `..id`/`.._key`/`..Key` rule below included) and the residual scan.
+The
 location id is also recognised where the Ring client library writes it
 outside a key: as the path segment after `mode/location/`, `locations/` or
 `accounts/` in the URL of a failed or retried request, and in its two errors

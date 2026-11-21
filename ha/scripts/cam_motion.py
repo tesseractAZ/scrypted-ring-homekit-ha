@@ -124,7 +124,12 @@ DOOR_STATE_MAX_AGE_MIN = 45.0  # cam_flap runs every 10 min; older means it is n
 # keyed to cut_ts, so the instant the camera produces any event its cut moves and
 # the latch no longer matches - it clears itself with no explicit reset path to
 # get wrong. Nothing here can CREATE a verdict; it can only preserve one that was
-# already earned.
+# already earned. It also survives a poll that does not evaluate the camera (a
+# quiet fleet, a raised window). It ends on the camera's next event, at
+# LATCH_MAX_AGE_D, or when the recorder purges the camera's last ON row (`last` then
+# has no cut for it, and the camera reads "never seen in the recorder"); a latch
+# lasts its full span only while purge_keep_days exceeds the days from the cut to
+# proven_at plus LATCH_MAX_AGE_D.
 LATCH_MAX_AGE_D = 90.0   # forget a latch this old even if the camera stays quiet
 STALE_HOURS = 72.0      # a camera silent this long while the fleet is active
 # Naturally-quiet cameras get longer windows. Zero events is NOT proof of a
@@ -1572,6 +1577,28 @@ def main():
                        v.get("verdict", "n/a"))),
             }
             new_latches[cam] = prior
+    # A latch belongs to a camera's silent span, not to this poll's stale list.
+    # Carry a valid one for every camera the loop above did not evaluate: all of
+    # them while the fleet is quiet (staleness is not evaluated, so `stale` is
+    # empty), or one whose window was raised past its silence. Without this a
+    # quiet day dropped every latch, and a proof the 30-day window could no
+    # longer re-derive never came back when the fleet resumed. Same test as
+    # prior_valid; corroboration stays empty for these cameras, so nothing is
+    # published until the camera is stale again, when the loop reports the
+    # latch as before. It still ends on the camera's next event, at LATCH_MAX_AGE_D,
+    # or once the recorder no longer holds the camera's last event (ts is None here
+    # and in the loop above).
+    for cam, prior in (latches.items() if isinstance(latches, dict) else ()):
+        if cam in new_latches or cam in stale or cam not in CAMS:
+            continue
+        ts = last.get(cam)
+        try:
+            if (ts is not None and isinstance(prior, dict)
+                    and abs(float(prior.get("cut_ts", 0)) - float(ts)) < 1.0
+                    and (now - float(prior.get("proven_at", 0))) <= LATCH_MAX_AGE_D * 86400):
+                new_latches[cam] = prior
+        except (TypeError, ValueError):  # a malformed latch is no latch
+            continue
 
     # PARTIAL LOSS. Every non-stale camera, every poll. partial_loss is None
     # (never []) and partial_detail carries the error whenever the test did not

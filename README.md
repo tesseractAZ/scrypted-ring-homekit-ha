@@ -53,7 +53,7 @@ The repository holds the deployable monitors, packages and automations as saniti
 - **Cross-camera corroboration: proof without a walk test.**
   - Motion events are grouped into clusters linked within 300 s, and each camera's historical co-firing rate with each partner is fitted.
   - A partner qualifies when it co-fires at least 15 % of the time, with at least 20 clusters before the silence and 8 since.
-  - When those partners keep firing and the quiet camera's co-fires stop, the camera is shown broken at α = 10⁻³ (Wilson interval). The proof latches and clears itself on the camera's next real event; it is also forgotten 90 days after the proof, and dropped at any poll at which no camera has fired in the last 24 h.
+  - When those partners keep firing and the quiet camera's co-fires stop, the camera is shown broken at α = 10⁻³ (Wilson interval). The proof latches and clears itself on the camera's next real event; it is also forgotten 90 days after the proof, or sooner once the recorder purges the camera's last motion event (about 30 days after that event at a 30-day `purge_keep_days`; see docs/operations.md §9.5). A poll that does not evaluate the camera, such as one at which no camera has fired in the last 24 h, keeps the latch, so the proof is back when the fleet resumes.
 - **Partial-loss detection.**
   - A camera can keep firing but drop out of most of the activity its partners record. A binomial tail test with Bonferroni correction (α = 10⁻⁶ per camera-poll) looks for this on a 48-hour window against a 27-day baseline, guarded by a likelihood veto.
   - In replay it caught 14–18 of 24 losses of 80–100 %, typically 40–50 h after onset. Losses below about 75 % and day-only or night-only losses are mostly missed, and slow declines are not detected. The test publishes its own statistical power, so "no flag" is never mistaken for an all-clear.
@@ -90,8 +90,8 @@ The repository holds the deployable monitors, packages and automations as saniti
   - Seven in-band markers (CURSOR, GAP, RESYNC, START, SILENCE, REKEY, STAMPS) and explicit GAP/RESYNC semantics mean a gap is recorded as a gap and no lost minute is silent.
   - Storage is crash-safe gzip members, kept for 35 days, with a clock guard and a size cap.
 - **Redaction before anything is written.**
-  - *30 ordered rules run first.* Measured on 593,141 live lines, they removed 7,200 JWTs, 41,091 IPv4 addresses, 9,047 IPv6 addresses, 5,004 ICE credential lines and 3,336 DTLS fingerprints, among others.
-  - *Then a separate 21-pattern residual scan* withholds any line that still matches one of its identifier patterns, so a missed variant of a known shape fails closed. An identifier in a shape no pattern covers (an array element, a map key, free prose) is documented as out of reach.
+  - *31 ordered rules run first.* Measured on 593,141 live lines, they removed 7,200 JWTs, 41,091 IPv4 addresses, 9,047 IPv6 addresses, 5,004 ICE credential lines and 3,336 DTLS fingerprints, among others.
+  - *Then a separate 23-pattern residual scan* withholds any line that still matches one of its identifier patterns, so a missed variant of a known shape fails closed. An identifier in a shape no pattern covers (an array element, a map key, free prose) is documented as out of reach.
 - **Keyed HMAC-SHA256 pseudonyms** in four classes keep cameras, dings, media cells and sessions correlatable across lines without exposing a single id. Ding timestamps become offsets from the line's own time. A pseudonym census, run on demand, checks that camera tokens map one-to-one onto cameras; on 2026-10-03 it found 7 tokens for the 7 cameras that held a session.
 - **Engineering under load.**
   - *Probe dumps collapsed:* repetitive probe request dumps are folded down. Measured while two monitors still probed every camera, that cut the archive by about a third.

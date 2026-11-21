@@ -293,11 +293,13 @@ CURSOR_SHAPE = re.compile(r"^(?:[a-z]=[0-9a-f]{1,64};){2,9}[a-z]=[0-9a-f]{1,64}$
 #        class so an equal value stays visibly equal)
 # location/user/account/owner/household/hardware ids and serials stay the
 # constant <RID> (a MAC of six pairs with one separator, ':' or '-', and no ':'
-# or '-' glued to either end is <MAC> from R5b first; under a mac_address key a
-# value of [0-9A-Za-z_.:-], one glued to the key's ':' included, reaches R6 and
-# becomes <RID>; a MAC whose pairs are separated by spaces or %3A meets no rule
-# and no residual pattern): account- or hardware-level, constant within this
-# archive, so a
+# or '-' glued to either end is <MAC> from R5b first; under a key ending in
+# macaddress, mac_address or mac-address (any case) one with its pairs joined by
+# spaces, '+', %3A or %20 is <MAC> from R5c, another value of 4+ [0-9A-Za-z_.:-]
+# (one glued to the key's ':' included) reaches R6 and becomes <RID>, and the
+# residual withholds the rest, the rest of a split value after either placeholder
+# included - see its mac_kv): account- or
+# hardware-level, constant within this archive, so a
 # pseudonym would tell nothing. A pseudonym is not reversible without the key,
 # which never leaves the host's archive directory (a dotfile, so a '*' copy of the
 # day files leaves it behind) and never enters a backup; the
@@ -466,6 +468,14 @@ R_SESSION = re.compile(r"(?i)(?<![\w-])(session[\"']?\s*:\s*[\"']?)(?=[A-Za-z0-9
 R_FP = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){7,}(?![0-9A-Fa-f])")
 # R5b MAC (defensive; 0 seen): exactly six pairs.
 R_MAC = re.compile(r"(?<![0-9A-Fa-f:-])[0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}(?:\1[0-9A-Fa-f]{2}){4}(?![0-9A-Fa-f:-])")
+# R5c MAC under a mac_address key (any key ending in macaddress, mac_address or
+# mac-address, any case, so macAddress too; 0 seen) with its pairs joined by a space,
+# '+' or a URL-encoded ':' or space (%3A, %20); a longer run of pairs is left whole
+# for the residual to withhold. R5b needs a literal ':' or '-', and R6's value class
+# stops at a space or '%', so until 2026-11-21 such a value was archived as logged.
+# Key-scoped on purpose: Node Buffer dumps and SDP payload-type lists are
+# space-separated pairs too.
+_MAC_SEP = r"(?: |\+|%3[aA]|%20)"
 # The key/value separator of the Ring-id rules: util.inspect 'key: v', JSON
 # '"key":"v"', JSON escaped once or more ('\"key\":\"v\"') and URL-encoded
 # ('key%3Dv', '%22key%22%3A%22v'). An id in an array ('cell_ids: [..]') or in
@@ -476,6 +486,9 @@ R_MAC = re.compile(r"(?<![0-9A-Fa-f:-])[0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}(?:\1[0
 # key by R9.
 _KV_SEP = r"(?:\\*[\"']|%22)?\s*(?:[:=]|%3[ad])\s*(?:\\*[\"']|%22)?"
 _Q = r"(?:\\*[\"'])?"         # an optional quote, escaped any number of times
+R_MAC_KV = re.compile(r"(?i)((?<![\w-])[\w-]*?mac[_-]?address" + _KV_SEP + r")"
+                      r"([0-9a-f]{2}(?:" + _MAC_SEP + r"[0-9a-f]{2}){5})(?![0-9a-z])"
+                      r"(?!(?:" + _MAC_SEP + r"|[:.-])[0-9a-f]{2}(?![0-9a-z]))")
 # R6a Ring ids that become KEYED PSEUDONYMS (see PSEUDONYMS): group 2 is the key,
 # group 3 the value (the same value class as R_RID).
 R_RID_PS = re.compile(
@@ -533,7 +546,7 @@ R_LOC_PROSE = re.compile(r"(?ia)((?:found|security panel) for location ).+")
 # R6 Ring account/device identifiers by key, and generic numeric "id".
 R_RID = re.compile(
     r"(?i)(?<![\w-])((?:doorbot_?id|device_?id|location_?id|ding_?id|cell_?id|account_?id|"
-    r"user_?id|owner_?id|household_?id|hardware_?id|serial(?:_?number)?|mac_?address)"
+    r"user_?id|owner_?id|household_?id|hardware_?id|serial(?:_?number)?|[\w-]*?mac[_-]?address)"
     + _KV_SEP + r")(?!(?:undefined|null|true|false)\b)([0-9A-Za-z_.:-]{4,})")
 R_ID = re.compile(r"(?<![\w-])([\"']?id[\"']?\s*[:=]\s*[\"']?)(\d{5,})")
 # R6b UUIDs (dialog_id / RMS session ids / msid / cname): 2,808 distinct, none
@@ -822,6 +835,7 @@ RULES = [
     ("rtsp_session", R_SESSION, _keyed("<SESS>", "rtsp_session"), lambda msg, low: "session" in low),
     ("fingerprint", R_FP, _whole("<FP>", "fingerprint"), lambda msg, low: msg.count(":") >= 7),
     ("mac", R_MAC, _whole("<MAC>", "mac"), lambda msg, low: msg.count(":") >= 5 or msg.count("-") >= 5),
+    ("mac_kv", R_MAC_KV, _keyed("<MAC>", "mac"), lambda msg, low: "mac" in low),
     ("ring_ps", R_RID_PS, _ps_rid,
      lambda msg, low: "doorbot" in low or "device" in low or "ding" in low or "cell" in low),
     ("ring_obj", R_OBJ_ID, _obj_id, lambda msg, low: "{" in msg and any(k in low for k in _OBJ_KW)),
@@ -873,6 +887,22 @@ def stamp_ms(ts):
 # ---------------------------------------------------------------------------
 _PH = (r"(?-i:<(?:JWT|EMAIL|CRED|SESS|FP|MAC|RID|UUID|HKCODE|GEO|HEX|NUM|IP[46]:[a-z]+|"
        r"DEV:[g-z]{8}|(?:DING|CELL|SES):[g-z]{12}|T:[+-][0-9]{1,5}\.[0-9]{3}s)>)")
+class _Gated:
+    """A residual pattern behind a cheaper regex that every match of it also matches
+    (a necessary condition), so the verdict is the same; residual() needs only search()."""
+
+    def __init__(self, gate, full):
+        self.gate, self.rx = re.compile(gate), re.compile(full)
+        self.pattern = full
+
+    def search(self, line):
+        return self.rx.search(line) if self.gate.search(line) else None
+
+
+# mac_sp: a hex pair that stands alone - not after a letter, digit or '%', unless it
+# follows a %XX escape. Zero-width, so the lookbehinds built with it stay fixed-width.
+_ALONE = r"(?:(?<![0-9a-z%])|(?<=%[0-9a-f]{2}))"
+
 RESIDUAL = [
     ("jwt", re.compile(r"eyJ")),
     ("dotted_quad", re.compile(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")),
@@ -893,6 +923,37 @@ RESIDUAL = [
     ("email", re.compile(r"@[A-Za-z0-9-]+\.[A-Za-z]{2,}")),
     ("email_pct", re.compile(r"(?i)%40[A-Za-z0-9-]+(?:\.|%2e)[A-Za-z]{2,}")),
     ("mac_alt", re.compile(r"(?i)\b[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}\b|[0-9a-f]{2}(?:-[0-9a-f]{2}){5}")),
+    # R5c's and R6's backstop: under a mac_address key only an exact placeholder (or
+    # null/undefined/true/false or an empty value) may follow, and after it, joined by
+    # a space, tab, '+', '/', ',', ';', '|', %3A or %20, no token holding a hex letter,
+    # no run of 4+ hex digits and no two joined pairs: the rest of a split value (R6
+    # stops at a space, '/' or ',', so 'aabb ccdd eeff' left '<RID> ccdd eeff'). A lone
+    # two-digit number ('<MAC>, 54 Mbps') and a pair after '.' or '_' ('<MAC>.12') pass.
+    # '%22' and backslashes are exempt as the opening quote: the optional quote group
+    # may be skipped by backtracking.
+    ("mac_kv", re.compile(r"(?i)mac[_-]?address(?:\\*[\"']|%22)?\s*(?:[:=]|%3[ad])\s*(?:\\*[\"']|%22)?(?:(?!"
+                          + _PH + r"|null\b|undefined\b|true\b|false\b|\\*[\"',})\]&]|%22|$)\S"
+                          r"|(?-i:<(?:MAC|RID)>)(?:[ \t+/,;|]|%3a|%20){1,3}"
+                          r"(?:(?=[0-9]*[a-f])(?:[0-9a-f]{2})+(?![0-9a-z])|(?:[0-9a-f]{2}){2,}(?![0-9a-z])"
+                          r"|[0-9a-f]{2}(?:[ \t+/,;|]|%3a|%20|[:.-]){1,3}(?:[0-9a-f]{2})+(?![0-9a-z])))")),
+    # Six hex pairs joined by a space, '+', %3A or %20 outside any key (prose, a URL).
+    # Bounded on both sides, so a longer run of pairs (a Node Buffer dump) does not
+    # trip it, and it needs a hex letter (not when every separator is %3A), so a list of
+    # two-digit numbers (SDP payload types) does not. A preceding pair counts only when
+    # it stands alone or follows a %XX escape, not as the tail of a word or an escape
+    # ('MAC%3A%20AA%3A..' is caught). Outside a mac_address key an all-digit run joined
+    # by spaces, '+', %3A or %20 (mixed or not) is archived as logged unless every
+    # separator is %3A. Its leading assertions defeat
+    # the regex engine's fast scan, so it runs behind _Gated: the bare six-pair shape,
+    # a necessary condition, decides first.
+    ("mac_sp", _Gated(r"(?i)[0-9a-f]{2}(?:" + _MAC_SEP + r"[0-9a-f]{2}){5}",
+                      r"(?i)(?:(?<![0-9a-z])|(?<=%[0-9a-f]{2}))"
+                      r"(?<!" + _ALONE + r"[0-9a-f]{2} )(?<!" + _ALONE + r"[0-9a-f]{2}\+)"
+                      r"(?<!" + _ALONE + r"[0-9a-f]{2}%3a)(?<!" + _ALONE + r"[0-9a-f]{2}%20)"
+                      r"(?=(?:[0-9a-f]{2}" + _MAC_SEP + r"){0,5}[0-9]?[a-f]"
+                      r"|[0-9a-f]{2}(?:%3a[0-9a-f]{2}){5}(?![0-9a-z]))"
+                      r"[0-9a-f]{2}(?:" + _MAC_SEP + r"[0-9a-f]{2}){5}"
+                      r"(?![0-9a-z])(?!" + _MAC_SEP + r"[0-9a-f]{2}(?![0-9a-z]))")),
     ("hk_uri", re.compile(r"X-HM://")),
     ("dotted_quad_pct", re.compile(r"(?i)\d{1,3}(?:%2e\d{1,3}){3}")),
     # A quoted mixed-class value under a bare auth/key/p256dh key (a Web Push
